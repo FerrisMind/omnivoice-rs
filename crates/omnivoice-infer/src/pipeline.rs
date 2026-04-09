@@ -59,16 +59,18 @@ impl Phase3Pipeline {
     }
 
     pub fn load_asr_model(&self, model_name: Option<&str>) -> Result<()> {
-        let requested = model_name.unwrap_or(crate::asr::default_local_asr_model_path());
+        let requested = model_name
+            .map(str::to_string)
+            .unwrap_or_else(crate::asr::default_asr_model_spec);
         let mut guard = self.asr.lock().unwrap_or_else(|poison| poison.into_inner());
         let needs_reload = guard
             .as_ref()
-            .map(|(loaded, _)| loaded != requested)
+            .map(|(loaded, _)| loaded != &requested)
             .unwrap_or(true);
         if needs_reload {
             *guard = Some((
-                requested.to_string(),
-                WhisperAsr::load(requested, self.stage0.device().clone())?,
+                requested.clone(),
+                WhisperAsr::load(&requested, self.stage0.device().clone())?,
             ));
         }
         Ok(())

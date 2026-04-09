@@ -1,6 +1,6 @@
 #![cfg(feature = "cuda")]
 
-use std::{path::PathBuf, process::Command};
+use std::{fs, path::PathBuf, process::Command};
 
 use omnivoice_infer::{
     artifacts::ReferenceArtifactBundle, contracts::DecodedAudio, gpu_lock::acquire_gpu_test_lock,
@@ -150,7 +150,7 @@ fn phase10_cli_infer_cuda_matches_reference_audio() {
         .join("cli_auto_en_short.wav");
     let mut args = vec![
         "infer".to_string(),
-        "--model-dir".to_string(),
+        "--model".to_string(),
         model_root().display().to_string(),
         "--text".to_string(),
         request.texts[0].clone(),
@@ -245,6 +245,83 @@ fn phase10_cli_infer_cuda_auto_device_dtype_succeeds() {
     let expected = case.load_final_audio().unwrap();
     assert_audio_matches_reference_with_frame_tolerance(
         &actual, &expected, 20_000, 3.0e-2, 5.0e-2, 0.55,
+    );
+}
+
+#[test]
+fn phase10_cli_infer_batch_cuda_generates_expected_outputs() {
+    let _guard = acquire_gpu_test_lock().unwrap();
+    let binary = env!("CARGO_BIN_EXE_omnivoice-cli");
+    let bundle = ReferenceArtifactBundle::from_root(deterministic_reference_root()).unwrap();
+    let case = bundle.case_by_id("det_auto_en_short").unwrap();
+    let request = case.build_generation_request().unwrap();
+
+    let batch_root = repo_root().join("artifacts").join("phase10-batch-test");
+    let test_list = batch_root.join("test_list.jsonl");
+    let res_dir = batch_root.join("results");
+    fs::create_dir_all(&res_dir).unwrap();
+    fs::write(
+        &test_list,
+        format!(
+            "{{\"id\":\"sample_a\",\"text\":{:?}}}\n{{\"id\":\"sample_b\",\"text\":{:?}}}\n",
+            request.texts[0], request.texts[0]
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(binary)
+        .args([
+            "infer-batch",
+            "--model",
+            &model_root().display().to_string(),
+            "--test-list",
+            &test_list.display().to_string(),
+            "--res-dir",
+            &res_dir.display().to_string(),
+            "--lang-id",
+            "en",
+            "--batch-size",
+            "2",
+            "--device",
+            "cuda:0",
+            "--dtype",
+            "f32",
+            "--seed",
+            "1234",
+            "--num-step",
+            "32",
+            "--guidance-scale",
+            "2.0",
+            "--t-shift",
+            "0.1",
+            "--layer-penalty-factor",
+            "5.0",
+            "--position-temperature",
+            "0.0",
+            "--class-temperature",
+            "0.0",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("phase_marker=omnivoice-phase10"));
+    assert!(stdout.contains("command=infer-batch"));
+    assert!(stdout.contains("written_files=2"));
+
+    let expected = case.load_final_audio().unwrap();
+    let actual_a = DecodedAudio::read_wav(res_dir.join("sample_a.wav")).unwrap();
+    let actual_b = DecodedAudio::read_wav(res_dir.join("sample_b.wav")).unwrap();
+    assert_audio_matches_reference_with_frame_tolerance(
+        &actual_a, &expected, 480, 3.0e-3, 1.0e-2, 0.4,
+    );
+    assert_audio_matches_reference_with_frame_tolerance(
+        &actual_b, &expected, 480, 3.0e-3, 1.0e-2, 0.4,
     );
 }
 

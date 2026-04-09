@@ -1995,6 +1995,8 @@ dependencies = [
 name = "omnivoice-cli"
 version = "0.1.0"
 dependencies = [
+ "candle-core",
+ "hf-hub",
  "omnivoice-infer",
  "serde_json",
 ]

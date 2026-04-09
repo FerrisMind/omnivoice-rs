@@ -8,6 +8,8 @@ authors.workspace = true
 [dependencies]
 omnivoice-infer = { path = "../omnivoice-infer" }
 serde_json.workspace = true
+candle-core.workspace = true
+hf-hub.workspace = true
 
 [features]
 default = []

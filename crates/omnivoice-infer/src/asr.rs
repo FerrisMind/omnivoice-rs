@@ -10,6 +10,7 @@ use tokenizers::Tokenizer;
 use crate::error::{OmniVoiceError, Result};
 
 const DEFAULT_LOCAL_ASR_MODEL: &str = "H:/omnivoice/model/whisper";
+const DEFAULT_HF_ASR_MODEL: &str = "openai/whisper-large-v3-turbo";
 const MEL_FILTERS_80: &[u8] = include_bytes!("../../../tools/whisper/melfilters.bytes");
 const MEL_FILTERS_128: &[u8] = include_bytes!("../../../tools/whisper/melfilters128.bytes");
 
@@ -169,6 +170,14 @@ impl WhisperAsr {
 
 pub fn default_local_asr_model_path() -> &'static str {
     DEFAULT_LOCAL_ASR_MODEL
+}
+
+pub fn default_asr_model_spec() -> String {
+    if Path::new(DEFAULT_LOCAL_ASR_MODEL).exists() {
+        DEFAULT_LOCAL_ASR_MODEL.to_string()
+    } else {
+        DEFAULT_HF_ASR_MODEL.to_string()
+    }
 }
 
 fn resolve_model_files(model_id_or_path: &str) -> Result<(PathBuf, PathBuf, PathBuf, bool)> {

@@ -1,8 +1,24 @@
-use std::{collections::BTreeSet, env, path::PathBuf};
+use std::{
+    collections::{BTreeSet, VecDeque},
+    env,
+    fs::{self, File},
+    io::{BufRead, BufReader},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    thread,
+};
+
+use candle_core::Device;
+use hf_hub::{
+    api::sync::{Api as HfApi, ApiRepo},
+    Repo, RepoType,
+};
 
 use omnivoice_infer::{
-    artifacts::{ReferenceArtifactBundle, RuntimeArtifacts},
+    artifacts::{ReferenceArtifactBundle, RuntimeArtifactManifest, RuntimeArtifacts},
+    audio_input::ReferenceAudioProcessor,
     contracts::{GeneratedTokens, GenerationRequest, PreparedPromptSequence, ReferenceAudioInput},
+    frontend::Frontend,
     pipeline::Phase3Pipeline,
     workspace_phase_marker, DTypeSpec, DeviceSpec, OmniVoiceError, RuntimeOptions,
 };
@@ -64,6 +80,53 @@ fn main() -> Result<(), OmniVoiceError> {
             denoise,
             audio_chunk_duration,
             audio_chunk_threshold,
+            seed,
+        ),
+        CliCommand::InferBatch {
+            model_dir,
+            test_list,
+            res_dir,
+            device,
+            dtype,
+            num_step,
+            guidance_scale,
+            t_shift,
+            nj_per_gpu,
+            audio_chunk_duration,
+            audio_chunk_threshold,
+            batch_duration,
+            batch_size,
+            warmup,
+            preprocess_prompt,
+            postprocess_output,
+            layer_penalty_factor,
+            position_temperature,
+            class_temperature,
+            denoise,
+            lang_id,
+            seed,
+        } => run_infer_batch(
+            model_dir,
+            test_list,
+            res_dir,
+            device,
+            dtype,
+            num_step,
+            guidance_scale,
+            t_shift,
+            nj_per_gpu,
+            audio_chunk_duration,
+            audio_chunk_threshold,
+            batch_duration,
+            batch_size,
+            warmup,
+            preprocess_prompt,
+            postprocess_output,
+            layer_penalty_factor,
+            position_temperature,
+            class_temperature,
+            denoise,
+            lang_id,
             seed,
         ),
         CliCommand::PreparePrompt {
@@ -139,6 +202,30 @@ enum CliCommand {
         audio_chunk_threshold: f32,
         seed: Option<u64>,
     },
+    InferBatch {
+        model_dir: PathBuf,
+        test_list: PathBuf,
+        res_dir: PathBuf,
+        device: DeviceSpec,
+        dtype: DTypeSpec,
+        num_step: usize,
+        guidance_scale: f32,
+        t_shift: f32,
+        nj_per_gpu: usize,
+        audio_chunk_duration: f32,
+        audio_chunk_threshold: f32,
+        batch_duration: f32,
+        batch_size: usize,
+        warmup: usize,
+        preprocess_prompt: bool,
+        postprocess_output: bool,
+        layer_penalty_factor: f32,
+        position_temperature: f32,
+        class_temperature: f32,
+        denoise: bool,
+        lang_id: Option<String>,
+        seed: Option<u64>,
+    },
     PreparePrompt {
         model_dir: PathBuf,
         reference_root: PathBuf,
@@ -179,11 +266,35 @@ enum CliCommand {
     },
 }
 
+#[derive(Clone, Debug)]
+struct BatchSample {
+    id: String,
+    text: String,
+    ref_audio: Option<PathBuf>,
+    ref_text: Option<String>,
+    instruct: Option<String>,
+    language: Option<String>,
+    duration: Option<f32>,
+    speed: Option<f32>,
+}
+
+#[derive(Clone, Debug)]
+struct BatchJob {
+    samples: Vec<BatchSample>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct BatchWorkerStats {
+    batches_processed: usize,
+    samples_written: usize,
+}
+
 impl CliCommand {
     fn parse(args: &[String]) -> Result<Self, OmniVoiceError> {
         match args.first().map(String::as_str) {
             Some("artifacts") => parse_artifacts_validate(args),
             Some("infer") => parse_infer(args),
+            Some("infer-batch") => parse_infer_batch(args),
             Some("prepare-prompt") => parse_case_command(args, true),
             Some("stage1-prepare") => parse_case_command(args, false),
             Some("stage1-decode") => parse_stage1_decode(args),
@@ -204,9 +315,9 @@ fn parse_artifacts_validate(args: &[String]) -> Result<CliCommand, OmniVoiceErro
     let mut index = 2;
     while index < args.len() {
         match args[index].as_str() {
-            "--model-dir" => {
+            "--model-dir" | "--model" => {
                 let value = args.get(index + 1).ok_or_else(|| {
-                    OmniVoiceError::InvalidRequest("--model-dir requires a path value".to_string())
+                    OmniVoiceError::InvalidRequest("--model requires a path or repo id".to_string())
                 })?;
                 model_dir = Some(PathBuf::from(value));
                 index += 2;
@@ -231,7 +342,7 @@ fn parse_artifacts_validate(args: &[String]) -> Result<CliCommand, OmniVoiceErro
 
     let Some(model_dir) = model_dir else {
         return Err(OmniVoiceError::InvalidRequest(format!(
-            "missing required --model-dir\n{}",
+            "missing required --model\n{}",
             usage()
         )));
     };
@@ -271,8 +382,8 @@ fn parse_infer(args: &[String]) -> Result<CliCommand, OmniVoiceError> {
 
     while index < args.len() {
         match args[index].as_str() {
-            "--model-dir" => {
-                model_dir = Some(PathBuf::from(required_value(args, index, "--model-dir")?));
+            "--model-dir" | "--model" => {
+                model_dir = Some(PathBuf::from(required_value(args, index, "--model")?));
                 index += 2;
             }
             "--text" => {
@@ -377,7 +488,7 @@ fn parse_infer(args: &[String]) -> Result<CliCommand, OmniVoiceError> {
     }
 
     Ok(CliCommand::Infer {
-        model_dir: required_path_arg(model_dir, "--model-dir")?,
+        model_dir: required_path_arg(model_dir, "--model")?,
         text: required_string_arg(text, "--text")?,
         output: required_path_arg(output, "--output")?,
         language,
@@ -404,6 +515,156 @@ fn parse_infer(args: &[String]) -> Result<CliCommand, OmniVoiceError> {
     })
 }
 
+fn parse_infer_batch(args: &[String]) -> Result<CliCommand, OmniVoiceError> {
+    let mut model_dir = None;
+    let mut test_list = None;
+    let mut res_dir = None;
+    let mut device = DeviceSpec::default();
+    let mut dtype = DTypeSpec::default();
+    let mut num_step = 32usize;
+    let mut guidance_scale = 2.0f32;
+    let mut t_shift = 0.1f32;
+    let mut nj_per_gpu = 1usize;
+    let mut audio_chunk_duration = 15.0f32;
+    let mut audio_chunk_threshold = 30.0f32;
+    let mut batch_duration = 1000.0f32;
+    let mut batch_size = 0usize;
+    let mut warmup = 0usize;
+    let mut preprocess_prompt = true;
+    let mut postprocess_output = true;
+    let mut layer_penalty_factor = 5.0f32;
+    let mut position_temperature = 5.0f32;
+    let mut class_temperature = 0.0f32;
+    let mut denoise = true;
+    let mut lang_id = None;
+    let mut seed = None;
+    let mut index = 1;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--model-dir" | "--model" => {
+                model_dir = Some(PathBuf::from(required_value(args, index, "--model")?));
+                index += 2;
+            }
+            "--test-list" | "--test_list" => {
+                test_list = Some(PathBuf::from(required_value(args, index, "--test-list")?));
+                index += 2;
+            }
+            "--res-dir" | "--res_dir" => {
+                res_dir = Some(PathBuf::from(required_value(args, index, "--res-dir")?));
+                index += 2;
+            }
+            "--device" => {
+                device = DeviceSpec::parse(required_value(args, index, "--device")?)?;
+                index += 2;
+            }
+            "--dtype" => {
+                dtype = DTypeSpec::parse(required_value(args, index, "--dtype")?)?;
+                index += 2;
+            }
+            "--num-step" | "--num_step" => {
+                num_step = parse_usize_arg(args, index, "--num-step")?;
+                index += 2;
+            }
+            "--guidance-scale" | "--guidance_scale" => {
+                guidance_scale = parse_f32_arg(args, index, "--guidance-scale")?;
+                index += 2;
+            }
+            "--t-shift" | "--t_shift" => {
+                t_shift = parse_f32_arg(args, index, "--t-shift")?;
+                index += 2;
+            }
+            "--nj-per-gpu" | "--nj_per_gpu" => {
+                nj_per_gpu = parse_usize_arg(args, index, "--nj-per-gpu")?;
+                index += 2;
+            }
+            "--audio-chunk-duration" | "--audio_chunk_duration" => {
+                audio_chunk_duration = parse_f32_arg(args, index, "--audio-chunk-duration")?;
+                index += 2;
+            }
+            "--audio-chunk-threshold" | "--audio_chunk_threshold" => {
+                audio_chunk_threshold = parse_f32_arg(args, index, "--audio-chunk-threshold")?;
+                index += 2;
+            }
+            "--batch-duration" | "--batch_duration" => {
+                batch_duration = parse_f32_arg(args, index, "--batch-duration")?;
+                index += 2;
+            }
+            "--batch-size" | "--batch_size" => {
+                batch_size = parse_usize_arg(args, index, "--batch-size")?;
+                index += 2;
+            }
+            "--warmup" => {
+                warmup = parse_usize_arg(args, index, "--warmup")?;
+                index += 2;
+            }
+            "--preprocess-prompt" | "--preprocess_prompt" => {
+                preprocess_prompt = parse_bool_arg(args, index, "--preprocess-prompt")?;
+                index += 2;
+            }
+            "--postprocess-output" | "--postprocess_output" => {
+                postprocess_output = parse_bool_arg(args, index, "--postprocess-output")?;
+                index += 2;
+            }
+            "--layer-penalty-factor" | "--layer_penalty_factor" => {
+                layer_penalty_factor = parse_f32_arg(args, index, "--layer-penalty-factor")?;
+                index += 2;
+            }
+            "--position-temperature" | "--position_temperature" => {
+                position_temperature = parse_f32_arg(args, index, "--position-temperature")?;
+                index += 2;
+            }
+            "--class-temperature" | "--class_temperature" => {
+                class_temperature = parse_f32_arg(args, index, "--class-temperature")?;
+                index += 2;
+            }
+            "--denoise" => {
+                denoise = parse_bool_arg(args, index, "--denoise")?;
+                index += 2;
+            }
+            "--lang-id" | "--lang_id" => {
+                lang_id = Some(required_value(args, index, "--lang-id")?.to_string());
+                index += 2;
+            }
+            "--seed" => {
+                seed = Some(parse_u64_arg(args, index, "--seed")?);
+                index += 2;
+            }
+            other => {
+                return Err(OmniVoiceError::InvalidRequest(format!(
+                    "unknown argument: {other}\n{}",
+                    usage()
+                )));
+            }
+        }
+    }
+
+    Ok(CliCommand::InferBatch {
+        model_dir: required_path_arg(model_dir, "--model")?,
+        test_list: required_path_arg(test_list, "--test-list")?,
+        res_dir: required_path_arg(res_dir, "--res-dir")?,
+        device,
+        dtype,
+        num_step,
+        guidance_scale,
+        t_shift,
+        nj_per_gpu,
+        audio_chunk_duration,
+        audio_chunk_threshold,
+        batch_duration,
+        batch_size,
+        warmup,
+        preprocess_prompt,
+        postprocess_output,
+        layer_penalty_factor,
+        position_temperature,
+        class_temperature,
+        denoise,
+        lang_id,
+        seed,
+    })
+}
+
 fn parse_case_command(args: &[String], prompt: bool) -> Result<CliCommand, OmniVoiceError> {
     let mut model_dir = None;
     let mut reference_root = None;
@@ -414,9 +675,9 @@ fn parse_case_command(args: &[String], prompt: bool) -> Result<CliCommand, OmniV
 
     while index < args.len() {
         match args[index].as_str() {
-            "--model-dir" => {
+            "--model-dir" | "--model" => {
                 let value = args.get(index + 1).ok_or_else(|| {
-                    OmniVoiceError::InvalidRequest("--model-dir requires a path value".to_string())
+                    OmniVoiceError::InvalidRequest("--model requires a path or repo id".to_string())
                 })?;
                 model_dir = Some(PathBuf::from(value));
                 index += 2;
@@ -462,7 +723,7 @@ fn parse_case_command(args: &[String], prompt: bool) -> Result<CliCommand, OmniV
 
     let Some(model_dir) = model_dir else {
         return Err(OmniVoiceError::InvalidRequest(format!(
-            "missing required --model-dir\n{}",
+            "missing required --model\n{}",
             usage()
         )));
     };
@@ -510,9 +771,9 @@ fn parse_stage1_decode(args: &[String]) -> Result<CliCommand, OmniVoiceError> {
 
     while index < args.len() {
         match args[index].as_str() {
-            "--model-dir" => {
+            "--model-dir" | "--model" => {
                 let value = args.get(index + 1).ok_or_else(|| {
-                    OmniVoiceError::InvalidRequest("--model-dir requires a path value".to_string())
+                    OmniVoiceError::InvalidRequest("--model requires a path or repo id".to_string())
                 })?;
                 model_dir = Some(PathBuf::from(value));
                 index += 2;
@@ -569,7 +830,7 @@ fn parse_stage1_decode(args: &[String]) -> Result<CliCommand, OmniVoiceError> {
 
     let Some(model_dir) = model_dir else {
         return Err(OmniVoiceError::InvalidRequest(format!(
-            "missing required --model-dir\n{}",
+            "missing required --model\n{}",
             usage()
         )));
     };
@@ -614,9 +875,9 @@ fn parse_stage0_generate(args: &[String]) -> Result<CliCommand, OmniVoiceError> 
 
     while index < args.len() {
         match args[index].as_str() {
-            "--model-dir" => {
+            "--model-dir" | "--model" => {
                 let value = args.get(index + 1).ok_or_else(|| {
-                    OmniVoiceError::InvalidRequest("--model-dir requires a path value".to_string())
+                    OmniVoiceError::InvalidRequest("--model requires a path or repo id".to_string())
                 })?;
                 model_dir = Some(PathBuf::from(value));
                 index += 2;
@@ -668,7 +929,7 @@ fn parse_stage0_generate(args: &[String]) -> Result<CliCommand, OmniVoiceError> 
     }
 
     Ok(CliCommand::Stage0Generate {
-        model_dir: required_path_arg(model_dir, "--model-dir")?,
+        model_dir: required_path_arg(model_dir, "--model")?,
         reference_root: required_path_arg(reference_root, "--reference-root")?,
         case: required_string_arg(case, "--case")?,
         out: required_path_arg(out, "--out")?,
@@ -687,9 +948,9 @@ fn parse_stage0_debug(args: &[String]) -> Result<CliCommand, OmniVoiceError> {
 
     while index < args.len() {
         match args[index].as_str() {
-            "--model-dir" => {
+            "--model-dir" | "--model" => {
                 let value = args.get(index + 1).ok_or_else(|| {
-                    OmniVoiceError::InvalidRequest("--model-dir requires a path value".to_string())
+                    OmniVoiceError::InvalidRequest("--model requires a path or repo id".to_string())
                 })?;
                 model_dir = Some(PathBuf::from(value));
                 index += 2;
@@ -734,7 +995,7 @@ fn parse_stage0_debug(args: &[String]) -> Result<CliCommand, OmniVoiceError> {
     }
 
     Ok(CliCommand::Stage0Debug {
-        model_dir: required_path_arg(model_dir, "--model-dir")?,
+        model_dir: required_path_arg(model_dir, "--model")?,
         reference_root: required_path_arg(reference_root, "--reference-root")?,
         case: required_string_arg(case, "--case")?,
         device,
@@ -742,10 +1003,76 @@ fn parse_stage0_debug(args: &[String]) -> Result<CliCommand, OmniVoiceError> {
     })
 }
 
+fn resolve_model_root(model: &Path) -> Result<PathBuf, OmniVoiceError> {
+    if model.exists() {
+        return Ok(model.to_path_buf());
+    }
+    let model_spec = model.to_string_lossy().trim().to_string();
+    if model_spec.is_empty() {
+        return Err(OmniVoiceError::InvalidRequest(
+            "--model requires a local directory or Hugging Face repo id".to_string(),
+        ));
+    }
+    download_model_snapshot(&model_spec)
+}
+
+fn download_model_snapshot(model_id: &str) -> Result<PathBuf, OmniVoiceError> {
+    let api = HfApi::new().map_err(|error| OmniVoiceError::InvalidData(error.to_string()))?;
+    let repo = api.repo(Repo::with_revision(
+        model_id.to_string(),
+        RepoType::Model,
+        "main".to_string(),
+    ));
+
+    let manifest_path = repo
+        .get("omnivoice.artifacts.json")
+        .map_err(|error| OmniVoiceError::InvalidData(error.to_string()))?;
+    let snapshot_root = manifest_path.parent().ok_or_else(|| {
+        OmniVoiceError::InvalidData(format!(
+            "hf-hub returned an invalid snapshot path for model {model_id}"
+        ))
+    })?;
+
+    let manifest: RuntimeArtifactManifest =
+        serde_json::from_str(&fs::read_to_string(&manifest_path)?)?;
+    download_repo_file(&repo, "config.json")?;
+    download_repo_file(&repo, &manifest.generator.config.to_string_lossy())?;
+    download_repo_file(&repo, &manifest.generator.weights.to_string_lossy())?;
+    download_repo_file(&repo, &manifest.text_tokenizer.tokenizer.to_string_lossy())?;
+    download_repo_file(
+        &repo,
+        &manifest.text_tokenizer.tokenizer_config.to_string_lossy(),
+    )?;
+    if let Some(chat_template) = manifest.text_tokenizer.metadata.chat_template.as_ref() {
+        download_repo_file(&repo, &chat_template.to_string_lossy())?;
+    }
+    download_repo_file(&repo, &manifest.audio_tokenizer.config.to_string_lossy())?;
+    download_repo_file(&repo, &manifest.audio_tokenizer.weights.to_string_lossy())?;
+    download_repo_file(
+        &repo,
+        &manifest
+            .audio_tokenizer
+            .preprocessor_config
+            .to_string_lossy(),
+    )?;
+    if let Some(license) = manifest.audio_tokenizer.metadata.license.as_ref() {
+        download_repo_file(&repo, &license.to_string_lossy())?;
+    }
+
+    Ok(snapshot_root.to_path_buf())
+}
+
+fn download_repo_file(repo: &ApiRepo, relative_path: &str) -> Result<PathBuf, OmniVoiceError> {
+    let normalized = relative_path.replace('\\', "/");
+    repo.get(&normalized)
+        .map_err(|error| OmniVoiceError::InvalidData(error.to_string()))
+}
+
 fn run_artifacts_validate(
     model_dir: PathBuf,
     reference_root: Option<PathBuf>,
 ) -> Result<(), OmniVoiceError> {
+    let model_dir = resolve_model_root(&model_dir)?;
     let runtime = RuntimeArtifacts::from_model_root(&model_dir)?;
     println!("phase_marker={}", workspace_phase_marker());
     println!("runtime_manifest={}", runtime.manifest_path().display());
@@ -846,6 +1173,7 @@ fn run_infer(
     audio_chunk_threshold: f32,
     seed: Option<u64>,
 ) -> Result<(), OmniVoiceError> {
+    let model_dir = resolve_model_root(&model_dir)?;
     let mut options = RuntimeOptions::new(model_dir)
         .with_device(device)
         .with_dtype(dtype);
@@ -904,6 +1232,488 @@ fn run_infer(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn run_infer_batch(
+    model_dir: PathBuf,
+    test_list: PathBuf,
+    res_dir: PathBuf,
+    device: DeviceSpec,
+    dtype: DTypeSpec,
+    num_step: usize,
+    guidance_scale: f32,
+    t_shift: f32,
+    nj_per_gpu: usize,
+    audio_chunk_duration: f32,
+    audio_chunk_threshold: f32,
+    batch_duration: f32,
+    batch_size: usize,
+    warmup: usize,
+    preprocess_prompt: bool,
+    postprocess_output: bool,
+    layer_penalty_factor: f32,
+    position_temperature: f32,
+    class_temperature: f32,
+    denoise: bool,
+    lang_id: Option<String>,
+    seed: Option<u64>,
+) -> Result<(), OmniVoiceError> {
+    if nj_per_gpu == 0 {
+        return Err(OmniVoiceError::InvalidRequest(
+            "--nj-per-gpu must be > 0".to_string(),
+        ));
+    }
+    if batch_duration <= 0.0 && batch_size == 0 {
+        return Err(OmniVoiceError::InvalidRequest(
+            "--batch-duration must be > 0 when --batch-size is 0".to_string(),
+        ));
+    }
+
+    let model_dir = resolve_model_root(&model_dir)?;
+    fs::create_dir_all(&res_dir)?;
+    let samples = read_test_list(&test_list, lang_id.as_deref())?;
+    if samples.is_empty() {
+        return Err(OmniVoiceError::InvalidRequest(format!(
+            "test list {} does not contain any valid samples",
+            test_list.display()
+        )));
+    }
+
+    let frontend = Frontend::from_model_root(&model_dir)?;
+    let processor = ReferenceAudioProcessor::new(24_000, 960);
+    let jobs = if batch_size > 0 {
+        cluster_samples_by_batch_size(&samples, &frontend, &processor, batch_size)?
+    } else {
+        cluster_samples_by_duration(&samples, &frontend, &processor, batch_duration)?
+    };
+    let worker_devices = resolve_batch_devices(device, nj_per_gpu)?;
+    let queue = Arc::new(Mutex::new(VecDeque::from(jobs.clone())));
+    let model_dir = Arc::new(model_dir);
+    let res_dir = Arc::new(res_dir);
+
+    let mut handles = Vec::with_capacity(worker_devices.len());
+    for worker_device in worker_devices.clone() {
+        let queue = Arc::clone(&queue);
+        let model_dir = Arc::clone(&model_dir);
+        let res_dir = Arc::clone(&res_dir);
+        handles.push(thread::spawn(move || {
+            run_batch_worker(
+                worker_device,
+                queue,
+                model_dir,
+                res_dir,
+                dtype,
+                num_step,
+                guidance_scale,
+                t_shift,
+                audio_chunk_duration,
+                audio_chunk_threshold,
+                warmup,
+                preprocess_prompt,
+                postprocess_output,
+                layer_penalty_factor,
+                position_temperature,
+                class_temperature,
+                denoise,
+                seed,
+            )
+        }));
+    }
+
+    let mut totals = BatchWorkerStats::default();
+    for handle in handles {
+        let stats = handle.join().map_err(|_| {
+            OmniVoiceError::InvalidData("batch worker thread panicked".to_string())
+        })??;
+        totals.batches_processed += stats.batches_processed;
+        totals.samples_written += stats.samples_written;
+    }
+
+    println!("phase_marker={}", workspace_phase_marker());
+    println!("command=infer-batch");
+    println!("model_root={}", model_dir.display());
+    println!("test_list={}", test_list.display());
+    println!("res_dir={}", res_dir.display());
+    println!("device={:?}", device);
+    println!("dtype={:?}", dtype);
+    println!("worker_count={}", worker_devices.len());
+    println!("batch_count={}", jobs.len());
+    println!("sample_count={}", samples.len());
+    println!("written_files={}", totals.samples_written);
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_batch_worker(
+    worker_device: DeviceSpec,
+    queue: Arc<Mutex<VecDeque<BatchJob>>>,
+    model_dir: Arc<PathBuf>,
+    res_dir: Arc<PathBuf>,
+    dtype: DTypeSpec,
+    num_step: usize,
+    guidance_scale: f32,
+    t_shift: f32,
+    audio_chunk_duration: f32,
+    audio_chunk_threshold: f32,
+    warmup: usize,
+    preprocess_prompt: bool,
+    postprocess_output: bool,
+    layer_penalty_factor: f32,
+    position_temperature: f32,
+    class_temperature: f32,
+    denoise: bool,
+    seed: Option<u64>,
+) -> Result<BatchWorkerStats, OmniVoiceError> {
+    let mut options = RuntimeOptions::new((*model_dir).clone())
+        .with_device(worker_device)
+        .with_dtype(dtype);
+    if let Some(seed) = seed {
+        options = options.with_seed(seed);
+    }
+    let pipeline = Phase3Pipeline::from_options(options)?;
+    for _ in 0..warmup {
+        let mut warmup_request = GenerationRequest::new_text_only("hello");
+        warmup_request.languages = vec![Some("en".to_string())];
+        let _ = pipeline.generate(&warmup_request)?;
+    }
+
+    let mut stats = BatchWorkerStats::default();
+    loop {
+        let job = {
+            let mut guard = queue.lock().unwrap_or_else(|poison| poison.into_inner());
+            guard.pop_front()
+        };
+        let Some(job) = job else { break };
+        let request = build_batch_request(
+            &job.samples,
+            num_step,
+            guidance_scale,
+            t_shift,
+            audio_chunk_duration,
+            audio_chunk_threshold,
+            preprocess_prompt,
+            postprocess_output,
+            layer_penalty_factor,
+            position_temperature,
+            class_temperature,
+            denoise,
+        );
+        let audios = pipeline.generate(&request)?;
+        for (sample, audio) in job.samples.iter().zip(audios.into_iter()) {
+            let output_path = res_dir.join(format!("{}.wav", sample.id));
+            audio.write_wav(output_path)?;
+            stats.samples_written += 1;
+        }
+        stats.batches_processed += 1;
+    }
+
+    Ok(stats)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_batch_request(
+    samples: &[BatchSample],
+    num_step: usize,
+    guidance_scale: f32,
+    t_shift: f32,
+    audio_chunk_duration: f32,
+    audio_chunk_threshold: f32,
+    preprocess_prompt: bool,
+    postprocess_output: bool,
+    layer_penalty_factor: f32,
+    position_temperature: f32,
+    class_temperature: f32,
+    denoise: bool,
+) -> GenerationRequest {
+    let mut request = GenerationRequest::new_text_only(samples[0].text.clone());
+    request.texts = samples.iter().map(|sample| sample.text.clone()).collect();
+    request.languages = samples
+        .iter()
+        .map(|sample| sample.language.clone())
+        .collect();
+    request.ref_audios = samples
+        .iter()
+        .map(|sample| {
+            sample
+                .ref_audio
+                .as_ref()
+                .map(|path| ReferenceAudioInput::from_path(path.display().to_string()))
+        })
+        .collect();
+    request.ref_texts = samples
+        .iter()
+        .map(|sample| sample.ref_text.clone())
+        .collect();
+    request.instructs = samples
+        .iter()
+        .map(|sample| sample.instruct.clone())
+        .collect();
+    request.voice_clone_prompts = vec![None; samples.len()];
+    request.speeds = samples.iter().map(|sample| sample.speed).collect();
+    request.durations = samples.iter().map(|sample| sample.duration).collect();
+    request.generation_config.num_step = num_step;
+    request.generation_config.guidance_scale = guidance_scale;
+    request.generation_config.t_shift = t_shift;
+    request.generation_config.audio_chunk_duration = audio_chunk_duration;
+    request.generation_config.audio_chunk_threshold = audio_chunk_threshold;
+    request.generation_config.preprocess_prompt = preprocess_prompt;
+    request.generation_config.postprocess_output = postprocess_output;
+    request.generation_config.layer_penalty_factor = layer_penalty_factor;
+    request.generation_config.position_temperature = position_temperature;
+    request.generation_config.class_temperature = class_temperature;
+    request.generation_config.denoise = denoise;
+    request
+}
+
+fn read_test_list(
+    path: &PathBuf,
+    lang_id_fallback: Option<&str>,
+) -> Result<Vec<BatchSample>, OmniVoiceError> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut samples = Vec::new();
+    for (line_no, line) in reader.lines().enumerate() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let Some(id) = value.get("id").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let Some(text) = value.get("text").and_then(|value| value.as_str()) else {
+            return Err(OmniVoiceError::InvalidData(format!(
+                "test list line {} is missing required field `text`",
+                line_no + 1
+            )));
+        };
+        let language = lang_id_fallback
+            .map(str::to_string)
+            .or_else(|| {
+                value
+                    .get("language_id")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            })
+            .or_else(|| {
+                value
+                    .get("language_name")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            });
+        samples.push(BatchSample {
+            id: id.to_string(),
+            text: text.to_string(),
+            ref_audio: value
+                .get("ref_audio")
+                .and_then(|value| value.as_str())
+                .map(PathBuf::from),
+            ref_text: value
+                .get("ref_text")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            instruct: value
+                .get("instruct")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            language,
+            duration: value
+                .get("duration")
+                .and_then(|value| value.as_f64())
+                .map(|value| value as f32),
+            speed: value
+                .get("speed")
+                .and_then(|value| value.as_f64())
+                .map(|value| value as f32),
+        });
+    }
+    Ok(samples)
+}
+
+fn cluster_samples_by_batch_size(
+    samples: &[BatchSample],
+    frontend: &Frontend,
+    processor: &ReferenceAudioProcessor,
+    batch_size: usize,
+) -> Result<Vec<BatchJob>, OmniVoiceError> {
+    if batch_size == 0 {
+        return Err(OmniVoiceError::InvalidRequest(
+            "--batch-size must be > 0".to_string(),
+        ));
+    }
+    let mut samples_with_duration = samples
+        .iter()
+        .map(|sample| {
+            estimate_sample_total_duration(frontend, processor, sample)
+                .map(|duration| (sample.clone(), duration))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    samples_with_duration.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let sorted = samples_with_duration
+        .into_iter()
+        .map(|(sample, _)| sample)
+        .collect::<Vec<_>>();
+    Ok(sorted
+        .chunks(batch_size)
+        .map(|chunk| BatchJob {
+            samples: chunk.to_vec(),
+        })
+        .collect())
+}
+
+fn cluster_samples_by_duration(
+    samples: &[BatchSample],
+    frontend: &Frontend,
+    processor: &ReferenceAudioProcessor,
+    batch_duration: f32,
+) -> Result<Vec<BatchJob>, OmniVoiceError> {
+    let mut samples_with_duration = samples
+        .iter()
+        .map(|sample| {
+            estimate_sample_total_duration(frontend, processor, sample)
+                .map(|duration| (sample.clone(), duration))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    samples_with_duration.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut jobs = Vec::new();
+    let mut current_samples = Vec::new();
+    let mut current_duration = 0.0f32;
+    for (sample, duration) in samples_with_duration {
+        if duration > batch_duration {
+            if !current_samples.is_empty() {
+                jobs.push(BatchJob {
+                    samples: std::mem::take(&mut current_samples),
+                });
+                current_duration = 0.0;
+            }
+            jobs.push(BatchJob {
+                samples: vec![sample],
+            });
+            continue;
+        }
+        if current_samples.is_empty() || current_duration + duration <= batch_duration {
+            current_duration += duration;
+            current_samples.push(sample);
+        } else {
+            jobs.push(BatchJob {
+                samples: std::mem::take(&mut current_samples),
+            });
+            current_duration = duration;
+            current_samples.push(sample);
+        }
+    }
+    if !current_samples.is_empty() {
+        jobs.push(BatchJob {
+            samples: current_samples,
+        });
+    }
+    Ok(jobs)
+}
+
+fn estimate_sample_total_duration(
+    frontend: &Frontend,
+    processor: &ReferenceAudioProcessor,
+    sample: &BatchSample,
+) -> Result<f32, OmniVoiceError> {
+    let ref_duration = if let Some(ref_audio) = &sample.ref_audio {
+        let input = ReferenceAudioInput::from_path(ref_audio.display().to_string());
+        let waveform = processor.load_input(&input)?;
+        waveform.samples.len() as f32 / waveform.sample_rate as f32
+    } else {
+        0.0
+    };
+    let estimated_generation_seconds = if let Some(duration) = sample.duration {
+        duration
+    } else {
+        let num_ref_audio_tokens = if ref_duration > 0.0 {
+            Some((ref_duration * frontend.frame_rate() as f32).max(1.0) as usize)
+        } else {
+            None
+        };
+        frontend.estimate_target_tokens(
+            &sample.text,
+            sample.ref_text.as_deref(),
+            num_ref_audio_tokens,
+            sample.speed.unwrap_or(1.0),
+        ) as f32
+            / frontend.frame_rate() as f32
+    };
+    Ok(ref_duration + estimated_generation_seconds)
+}
+
+fn resolve_batch_devices(
+    device: DeviceSpec,
+    nj_per_gpu: usize,
+) -> Result<Vec<DeviceSpec>, OmniVoiceError> {
+    let base_devices = match device {
+        DeviceSpec::Auto => {
+            let cuda_devices = detect_cuda_devices();
+            if !cuda_devices.is_empty() {
+                cuda_devices
+            } else if detect_metal_device_available() {
+                vec![DeviceSpec::Metal]
+            } else {
+                vec![DeviceSpec::Cpu]
+            }
+        }
+        explicit => vec![explicit],
+    };
+    let mut worker_devices = Vec::with_capacity(base_devices.len() * nj_per_gpu);
+    for base_device in base_devices {
+        for _ in 0..nj_per_gpu {
+            worker_devices.push(base_device);
+        }
+    }
+    Ok(worker_devices)
+}
+
+fn detect_cuda_devices() -> Vec<DeviceSpec> {
+    #[cfg(feature = "cuda")]
+    {
+        let mut devices = Vec::new();
+        for index in 0..16 {
+            match Device::new_cuda(index) {
+                Ok(device) => {
+                    drop(device);
+                    devices.push(DeviceSpec::Cuda(index));
+                }
+                Err(_) => break,
+            }
+        }
+        devices
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Vec::new()
+    }
+}
+
+fn detect_metal_device_available() -> bool {
+    #[cfg(feature = "metal")]
+    {
+        Device::new_metal(0).is_ok()
+    }
+    #[cfg(not(feature = "metal"))]
+    {
+        false
+    }
+}
+
 fn run_prepare_prompt(
     model_dir: PathBuf,
     reference_root: PathBuf,
@@ -911,6 +1721,7 @@ fn run_prepare_prompt(
     device: DeviceSpec,
     dtype: DTypeSpec,
 ) -> Result<(), OmniVoiceError> {
+    let model_dir = resolve_model_root(&model_dir)?;
     let options = RuntimeOptions::new(model_dir)
         .with_device(device)
         .with_dtype(dtype);
@@ -978,6 +1789,7 @@ fn run_stage1_prepare(
     device: DeviceSpec,
     dtype: DTypeSpec,
 ) -> Result<(), OmniVoiceError> {
+    let model_dir = resolve_model_root(&model_dir)?;
     let options = RuntimeOptions::new(model_dir)
         .with_device(device)
         .with_dtype(dtype);
@@ -1019,6 +1831,7 @@ fn run_stage1_decode(
     device: DeviceSpec,
     dtype: DTypeSpec,
 ) -> Result<(), OmniVoiceError> {
+    let model_dir = resolve_model_root(&model_dir)?;
     let options = RuntimeOptions::new(model_dir)
         .with_device(device)
         .with_dtype(dtype);
@@ -1072,6 +1885,7 @@ fn run_stage0_generate(
     device: DeviceSpec,
     dtype: DTypeSpec,
 ) -> Result<(), OmniVoiceError> {
+    let model_dir = resolve_model_root(&model_dir)?;
     let options = RuntimeOptions::new(model_dir)
         .with_device(device)
         .with_dtype(dtype);
@@ -1122,6 +1936,7 @@ fn run_stage0_debug(
     device: DeviceSpec,
     dtype: DTypeSpec,
 ) -> Result<(), OmniVoiceError> {
+    let model_dir = resolve_model_root(&model_dir)?;
     let options = RuntimeOptions::new(model_dir)
         .with_device(device)
         .with_dtype(dtype);
@@ -1224,13 +2039,14 @@ fn parse_bool_arg(args: &[String], index: usize, name: &str) -> Result<bool, Omn
 fn usage() -> String {
     [
         "usage:",
-        "  omnivoice-cli artifacts validate --model-dir <path> [--reference-root <path>]",
-        "  omnivoice-cli infer --model-dir <path> --text <text> --output <wav> [--language <lang>] [--ref-audio <wav>] [--ref-text <text>] [--instruct <text>] [--duration <seconds>] [--speed <factor>] [--asr-model <model>] [--device auto|cuda:N|metal|cpu] [--dtype auto|f16|bf16|f32] [--seed <u64>]",
-        "  omnivoice-cli prepare-prompt --model-dir <path> --reference-root <path> --case <id> [--device auto|cuda:N|metal|cpu] [--dtype auto|f16|bf16|f32]",
-        "  omnivoice-cli stage1-prepare --model-dir <path> --reference-root <path> --case <id> [--device auto|cuda:N|metal|cpu] [--dtype auto|f16|bf16|f32]",
-        "  omnivoice-cli stage1-decode --model-dir <path> --reference-root <path> --case <id> --out <wav> [--raw] [--device auto|cuda:N|metal|cpu] [--dtype auto|f16|bf16|f32]",
-        "  omnivoice-cli stage0-generate --model-dir <path> --reference-root <path> --case <id> --out <json> [--device auto|cuda:N|metal|cpu] [--dtype auto|f16|bf16|f32]",
-        "  omnivoice-cli stage0-debug --model-dir <path> --reference-root <path> --case <id> [--device auto|cuda:N|metal|cpu] [--dtype auto|f16|bf16|f32]",
+        "  omnivoice-cli artifacts validate --model <path-or-hf-repo> [--reference-root <path>]",
+        "  omnivoice-cli infer --model <path> --text <text> --output <wav> [--language <lang>] [--ref-audio <wav>] [--ref-text <text>] [--instruct <text>] [--duration <seconds>] [--speed <factor>] [--asr-model <model>] [--device auto|cuda:N|metal|cpu] [--dtype auto|f16|bf16|f32] [--seed <u64>]",
+        "  omnivoice-cli infer-batch --model <path-or-hf-repo> --test-list <jsonl> --res-dir <dir> [--device auto|cuda:N|metal|cpu] [--dtype auto|f16|bf16|f32] [--batch-size <n>] [--batch-duration <seconds>] [--nj-per-gpu <n>] [--warmup <n>]",
+        "  omnivoice-cli prepare-prompt --model <path-or-hf-repo> --reference-root <path> --case <id> [--device auto|cuda:N|metal|cpu] [--dtype auto|f16|bf16|f32]",
+        "  omnivoice-cli stage1-prepare --model <path-or-hf-repo> --reference-root <path> --case <id> [--device auto|cuda:N|metal|cpu] [--dtype auto|f16|bf16|f32]",
+        "  omnivoice-cli stage1-decode --model <path-or-hf-repo> --reference-root <path> --case <id> --out <wav> [--raw] [--device auto|cuda:N|metal|cpu] [--dtype auto|f16|bf16|f32]",
+        "  omnivoice-cli stage0-generate --model <path-or-hf-repo> --reference-root <path> --case <id> --out <json> [--device auto|cuda:N|metal|cpu] [--dtype auto|f16|bf16|f32]",
+        "  omnivoice-cli stage0-debug --model <path-or-hf-repo> --reference-root <path> --case <id> [--device auto|cuda:N|metal|cpu] [--dtype auto|f16|bf16|f32]",
     ]
     .join("\n")
 }
