@@ -235,3 +235,128 @@ jobs:
 
       - name: Run omnivoice-cli tests (metal)
         run: cargo test -p omnivoice-cli --features metal -- --test-threads=1
+
+      - name: Generate metal listening samples
+        if: always()
+        continue-on-error: true
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import shutil
+          import subprocess
+          from pathlib import Path
+
+          root = Path(os.environ["OMNIVOICE_ROOT"])
+          samples_dir = Path(os.environ["RUNNER_TEMP"]) / "omnivoice-audio"
+          reference_root = root / "artifacts" / "python_reference_stage7_cuda_f32_dense"
+          samples_dir.mkdir(parents=True, exist_ok=True)
+
+          cases = [
+              ("det_auto_en_short", "metal-auto"),
+              ("det_design_en_british", "metal-design"),
+          ]
+          manifest = []
+
+          for case_id, prefix in cases:
+              case_path = reference_root / case_id / "case.json"
+              case = json.loads(case_path.read_text(encoding="utf-8"))
+              output_path = samples_dir / f"{prefix}.wav"
+              stdout_path = samples_dir / f"{prefix}.stdout.log"
+              stderr_path = samples_dir / f"{prefix}.stderr.log"
+
+              generation = case.get("generation", {})
+              command = [
+                  "cargo",
+                  "run",
+                  "-p",
+                  "omnivoice-cli",
+                  "--features",
+                  "metal",
+                  "--",
+                  "infer",
+                  "--model-dir",
+                  str(root / "model"),
+                  "--text",
+                  case["text"],
+                  "--output",
+                  str(output_path),
+                  "--device",
+                  "metal",
+                  "--dtype",
+                  "f32",
+                  "--seed",
+                  "1234",
+                  "--num-step",
+                  str(generation.get("num_step", 32)),
+                  "--guidance-scale",
+                  str(generation.get("guidance_scale", 2.0)),
+                  "--t-shift",
+                  str(generation.get("t_shift", 0.1)),
+                  "--layer-penalty-factor",
+                  str(generation.get("layer_penalty_factor", 5.0)),
+                  "--position-temperature",
+                  str(generation.get("position_temperature", 0.0)),
+                  "--class-temperature",
+                  str(generation.get("class_temperature", 0.0)),
+                  "--preprocess-prompt",
+                  str(generation.get("preprocess_prompt", True)).lower(),
+                  "--postprocess-output",
+                  str(generation.get("postprocess_output", True)).lower(),
+                  "--denoise",
+                  str(generation.get("denoise", True)).lower(),
+              ]
+
+              if case.get("language"):
+                  command.extend(["--language", case["language"]])
+              if case.get("instruct"):
+                  command.extend(["--instruct", case["instruct"]])
+
+              result = subprocess.run(
+                  command,
+                  cwd=root,
+                  capture_output=True,
+                  text=True,
+              )
+              stdout_path.write_text(result.stdout, encoding="utf-8")
+              stderr_path.write_text(result.stderr, encoding="utf-8")
+
+              reference_wav = reference_root / case_id / "final.wav"
+              reference_copy = samples_dir / f"{prefix}.reference.wav"
+              shutil.copy2(reference_wav, reference_copy)
+              (samples_dir / f"{prefix}.case.json").write_text(
+                  json.dumps(case, indent=2, ensure_ascii=False) + "\n",
+                  encoding="utf-8",
+              )
+
+              manifest.append(
+                  {
+                      "case_id": case_id,
+                      "artifact_prefix": prefix,
+                      "command": command,
+                      "output": output_path.name,
+                      "reference_output": reference_copy.name,
+                      "stdout_log": stdout_path.name,
+                      "stderr_log": stderr_path.name,
+                      "exit_code": result.returncode,
+                  }
+              )
+
+              if result.returncode != 0:
+                  raise SystemExit(
+                      f"sample generation failed for {case_id} with exit code {result.returncode}"
+                  )
+
+          (samples_dir / "manifest.json").write_text(
+              json.dumps({"samples": manifest}, indent=2, ensure_ascii=False) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload metal listening samples
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: omnivoice-metal-samples
+          path: ${{ runner.temp }}/omnivoice-audio
+          if-no-files-found: warn
