@@ -1,0 +1,14 @@
+{
+  "repo_id": "k2-fsa/OmniVoice",
+  "paths": [
+    "config.json",
+    "model.safetensors",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "chat_template.jinja",
+    "audio_tokenizer/config.json",
+    "audio_tokenizer/model.safetensors",
+    "audio_tokenizer/preprocessor_config.json",
+    "audio_tokenizer/LICENSE"
+  ]
+}

@@ -68,38 +68,16 @@ jobs:
           import os
           from pathlib import Path
 
-          from huggingface_hub import hf_hub_download, snapshot_download
+          from huggingface_hub import snapshot_download
 
           workspace = Path(os.environ["OMNIVOICE_ROOT"])
           model_root = workspace / "model"
           model_root.mkdir(parents=True, exist_ok=True)
 
-          repo_id = os.environ["OMNIVOICE_MODEL_REPO"]
-          manifest_cache = Path(
-              hf_hub_download(
-                  repo_id=repo_id,
-                  filename="omnivoice.artifacts.json",
-                  repo_type="model",
-              )
-          )
-          manifest = json.loads(manifest_cache.read_text(encoding="utf-8"))
-
-          allow_patterns = [
-              "omnivoice.artifacts.json",
-              manifest["generator"]["config"],
-              manifest["generator"]["weights"],
-              manifest["text_tokenizer"]["tokenizer"],
-              manifest["text_tokenizer"]["tokenizer_config"],
-              manifest["audio_tokenizer"]["config"],
-              manifest["audio_tokenizer"]["weights"],
-              manifest["audio_tokenizer"]["preprocessor_config"],
-          ]
-          chat_template = manifest["text_tokenizer"].get("metadata", {}).get("chat_template")
-          if chat_template:
-              allow_patterns.append(chat_template)
-          audio_license = manifest["audio_tokenizer"].get("metadata", {}).get("license")
-          if audio_license:
-              allow_patterns.append(audio_license)
+          allowlist_path = workspace / ".github" / "ci" / "omnivoice-model-allowlist.json"
+          allowlist = json.loads(allowlist_path.read_text(encoding="utf-8"))
+          repo_id = allowlist["repo_id"]
+          allow_patterns = allowlist["paths"]
 
           snapshot_download(
               repo_id=repo_id,
