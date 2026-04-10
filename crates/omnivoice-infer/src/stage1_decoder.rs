@@ -246,6 +246,15 @@ impl Stage1RuntimePlan {
     ) -> Result<Self> {
         let bundle = Stage1DecoderBundle::from_runtime_artifacts(runtime)?;
         let device = options.resolve_device()?;
+        Self::from_runtime_artifacts_with_device(options, runtime, bundle, device)
+    }
+
+    pub fn from_runtime_artifacts_with_device(
+        options: RuntimeOptions,
+        runtime: &RuntimeArtifacts,
+        bundle: Stage1DecoderBundle,
+        device: Device,
+    ) -> Result<Self> {
         let runtime_dtype = options.resolve_dtype_for_runtime_device(&device);
 
         Ok(Self {

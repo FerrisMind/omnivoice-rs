@@ -277,6 +277,14 @@ impl Stage0RuntimePlan {
         runtime: &RuntimeArtifacts,
     ) -> Result<Self> {
         let device = options.resolve_device()?;
+        Self::from_runtime_artifacts_with_device(options, runtime, device)
+    }
+
+    pub fn from_runtime_artifacts_with_device(
+        options: RuntimeOptions,
+        runtime: &RuntimeArtifacts,
+        device: Device,
+    ) -> Result<Self> {
         let runtime_dtype = options.resolve_dtype_for_runtime_device(&device);
         Ok(Self {
             config: Stage0Config::from_artifacts(runtime.generator())?,

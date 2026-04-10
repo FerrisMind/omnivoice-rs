@@ -48,12 +48,23 @@ impl Phase3Pipeline {
     pub fn from_options(options: RuntimeOptions) -> Result<Self> {
         let runtime_artifacts = options.load_runtime_artifacts()?;
         let frontend = Frontend::from_runtime_artifacts(&runtime_artifacts)?;
-        let audio_tokenizer =
-            AudioTokenizerRuntimePlan::from_runtime_artifacts(options.clone(), &runtime_artifacts)?;
-        let stage0 =
-            Stage0RuntimePlan::from_runtime_artifacts(options.clone(), &runtime_artifacts)?;
-        let stage1 =
-            Stage1RuntimePlan::from_runtime_artifacts(options.clone(), &runtime_artifacts)?;
+        let shared_device = options.resolve_device()?;
+        let audio_tokenizer = AudioTokenizerRuntimePlan::from_runtime_artifacts_with_device(
+            options.clone(),
+            &runtime_artifacts,
+            shared_device.clone(),
+        )?;
+        let stage0 = Stage0RuntimePlan::from_runtime_artifacts_with_device(
+            options.clone(),
+            &runtime_artifacts,
+            shared_device.clone(),
+        )?;
+        let stage1 = Stage1RuntimePlan::from_runtime_artifacts_with_device(
+            options.clone(),
+            &runtime_artifacts,
+            crate::stage1_decoder::Stage1DecoderBundle::from_runtime_artifacts(&runtime_artifacts)?,
+            shared_device,
+        )?;
 
         Ok(Self {
             runtime_artifacts,
