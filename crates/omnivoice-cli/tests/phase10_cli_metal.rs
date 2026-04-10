@@ -244,3 +244,33 @@ fn phase10_cli_infer_metal_auto_device_dtype_succeeds() {
         &actual, &expected, 20_000, 3.0e-2, 5.0e-2, 0.55,
     );
 }
+
+fn assert_audio_matches_reference_with_frame_tolerance(
+    actual: &DecodedAudio,
+    expected: &DecodedAudio,
+    max_frame_delta: usize,
+    mae_limit: f32,
+    rmse_limit: f32,
+    max_abs_limit: f32,
+) {
+    assert_eq!(actual.sample_rate, expected.sample_rate);
+    let frame_delta = actual.frame_count().abs_diff(expected.frame_count());
+    assert!(
+        frame_delta <= max_frame_delta,
+        "frame delta {} exceeds {} (actual={}, reference={})",
+        frame_delta,
+        max_frame_delta,
+        actual.frame_count(),
+        expected.frame_count()
+    );
+    let compare_len = actual.frame_count().min(expected.frame_count());
+    let actual = DecodedAudio::new(actual.samples[..compare_len].to_vec(), actual.sample_rate);
+    let expected = DecodedAudio::new(
+        expected.samples[..compare_len].to_vec(),
+        expected.sample_rate,
+    );
+    let metrics = actual.parity_metrics(&expected).unwrap();
+    assert!(metrics.mae < mae_limit, "{metrics:?}");
+    assert!(metrics.rmse < rmse_limit, "{metrics:?}");
+    assert!(metrics.max_abs < max_abs_limit, "{metrics:?}");
+}
