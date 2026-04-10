@@ -1,5 +1,7 @@
 #![cfg(feature = "cuda")]
 
+mod support;
+
 use omnivoice_infer::{
     artifacts::ReferenceArtifactBundle,
     contracts::{GeneratedTokens, GenerationRequest, ReferenceAudioInput, VoiceClonePrompt},
@@ -7,22 +9,7 @@ use omnivoice_infer::{
     pipeline::Phase3Pipeline,
     runtime::{DTypeSpec, DeviceSpec, RuntimeOptions},
 };
-
-fn model_root() -> &'static str {
-    "H:/omnivoice/model"
-}
-
-fn reference_root() -> &'static str {
-    "H:/omnivoice/artifacts/python_reference"
-}
-
-fn deterministic_reference_root() -> &'static str {
-    "H:/omnivoice/artifacts/python_reference_stage7_cuda_f32_dense"
-}
-
-fn ref_audio_path() -> &'static str {
-    "H:/omnivoice/ref.wav"
-}
+use support::{deterministic_reference_root, model_root, ref_audio_path, reference_root};
 
 fn cuda_f32_pipeline() -> Phase3Pipeline {
     Phase3Pipeline::from_options(

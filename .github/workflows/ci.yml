@@ -1,0 +1,226 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  OMNIVOICE_MODEL_REPO: k2-fsa/OmniVoice
+  OMNIVOICE_WHISPER_REPO: oxide-lab/whisper-large-v3-turbo-GGUF
+  OMNIVOICE_FIXTURES_TAG: ci-fixtures-v1
+  OMNIVOICE_FIXTURES_ASSET: omnivoice-ci-fixtures-v1.tar.zst
+
+jobs:
+  linux-clippy:
+    name: Linux Clippy
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  macos-metal:
+    name: macOS Metal
+    runs-on: macos-15
+    env:
+      OMNIVOICE_ROOT: ${{ github.workspace }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install CI Python dependencies
+        run: python -m pip install --upgrade pip huggingface_hub zstandard
+
+      - name: Download OmniVoice model bundle
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          from huggingface_hub import hf_hub_download, snapshot_download
+
+          workspace = Path(os.environ["OMNIVOICE_ROOT"])
+          model_root = workspace / "model"
+          model_root.mkdir(parents=True, exist_ok=True)
+
+          repo_id = os.environ["OMNIVOICE_MODEL_REPO"]
+          manifest_cache = Path(
+              hf_hub_download(
+                  repo_id=repo_id,
+                  filename="omnivoice.artifacts.json",
+                  repo_type="model",
+              )
+          )
+          manifest = json.loads(manifest_cache.read_text(encoding="utf-8"))
+
+          allow_patterns = [
+              "omnivoice.artifacts.json",
+              manifest["generator"]["config"],
+              manifest["generator"]["weights"],
+              manifest["text_tokenizer"]["tokenizer"],
+              manifest["text_tokenizer"]["tokenizer_config"],
+              manifest["audio_tokenizer"]["config"],
+              manifest["audio_tokenizer"]["weights"],
+              manifest["audio_tokenizer"]["preprocessor_config"],
+          ]
+          chat_template = manifest["text_tokenizer"].get("metadata", {}).get("chat_template")
+          if chat_template:
+              allow_patterns.append(chat_template)
+          audio_license = manifest["audio_tokenizer"].get("metadata", {}).get("license")
+          if audio_license:
+              allow_patterns.append(audio_license)
+
+          snapshot_download(
+              repo_id=repo_id,
+              repo_type="model",
+              allow_patterns=allow_patterns,
+              local_dir=model_root,
+          )
+          PY
+
+      - name: Download Whisper ASR assets
+        run: |
+          python - <<'PY'
+          import os
+          import shutil
+          from pathlib import Path
+
+          from huggingface_hub import hf_hub_download, list_repo_files
+
+          workspace = Path(os.environ["OMNIVOICE_ROOT"])
+          whisper_root = workspace / "model" / "whisper"
+          whisper_root.mkdir(parents=True, exist_ok=True)
+
+          repo_id = os.environ["OMNIVOICE_WHISPER_REPO"]
+          repo_files = sorted(list_repo_files(repo_id=repo_id, repo_type="model"))
+
+          def first_matching(predicate, description):
+              for entry in repo_files:
+                  if predicate(entry):
+                      return entry
+              raise RuntimeError(f"Missing required Whisper file: {description}")
+
+          config_file = first_matching(lambda path: path.endswith("config.json"), "config.json")
+          tokenizer_file = first_matching(
+              lambda path: path.endswith("tokenizer.json"),
+              "tokenizer.json",
+          )
+          gguf_files = [
+              path
+              for path in repo_files
+              if path.lower().endswith(".gguf") and "whisper.cpp/" not in path.lower()
+          ]
+          if not gguf_files:
+              raise RuntimeError("Missing valid Whisper GGUF weights")
+          gguf_files.sort(key=lambda path: (0 if "q4_0" in path.lower() else 1, path))
+          selected_weights = gguf_files[0]
+
+          for remote_path in [config_file, tokenizer_file, selected_weights]:
+              cached = Path(
+                  hf_hub_download(
+                      repo_id=repo_id,
+                      filename=remote_path,
+                      repo_type="model",
+                  )
+              )
+              shutil.copy2(cached, whisper_root / Path(remote_path).name)
+          PY
+
+      - name: Download CI fixtures bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/omnivoice-fixtures"
+          gh release download "$OMNIVOICE_FIXTURES_TAG" \
+            --pattern "$OMNIVOICE_FIXTURES_ASSET" \
+            --dir "$RUNNER_TEMP/omnivoice-fixtures"
+
+      - name: Extract CI fixtures bundle
+        run: |
+          python - <<'PY'
+          import os
+          import tarfile
+          from pathlib import Path
+
+          import zstandard
+
+          workspace = Path(os.environ["OMNIVOICE_ROOT"])
+          asset_name = os.environ["OMNIVOICE_FIXTURES_ASSET"]
+          archive = Path(os.environ["RUNNER_TEMP"]) / "omnivoice-fixtures" / asset_name
+
+          with archive.open("rb") as source:
+              dctx = zstandard.ZstdDecompressor()
+              with dctx.stream_reader(source) as reader:
+                  with tarfile.open(fileobj=reader, mode="r|") as tar:
+                      tar.extractall(path=workspace)
+          PY
+
+      - name: Validate downloaded inputs
+        run: |
+          required_files=(
+            "$OMNIVOICE_ROOT/model/model.safetensors"
+            "$OMNIVOICE_ROOT/model/audio_tokenizer/model.safetensors"
+            "$OMNIVOICE_ROOT/model/whisper/config.json"
+            "$OMNIVOICE_ROOT/model/whisper/tokenizer.json"
+            "$OMNIVOICE_ROOT/artifacts/python_reference/manifest.json"
+            "$OMNIVOICE_ROOT/artifacts/python_reference_cpu_strict/manifest.json"
+            "$OMNIVOICE_ROOT/artifacts/python_reference_stage0_deterministic/manifest.json"
+            "$OMNIVOICE_ROOT/artifacts/python_reference_stage0_deterministic_cpu_strict/manifest.json"
+            "$OMNIVOICE_ROOT/artifacts/python_reference_stage7_cuda_f32_dense/manifest.json"
+            "$OMNIVOICE_ROOT/artifacts/live_oracles/clone_prompt.json"
+            "$OMNIVOICE_ROOT/ref.wav"
+          )
+
+          for path in "${required_files[@]}"; do
+            if [[ ! -f "$path" ]]; then
+              echo "Missing required CI input: $path" >&2
+              exit 1
+            fi
+          done
+
+          shopt -s nullglob
+          ggufs=("$OMNIVOICE_ROOT"/model/whisper/*.gguf)
+          if (( ${#ggufs[@]} == 0 )); then
+            echo "Missing Whisper GGUF weights in $OMNIVOICE_ROOT/model/whisper" >&2
+            exit 1
+          fi
+
+      - name: Run clippy (metal)
+        run: cargo clippy --workspace --all-targets --features metal -- -D warnings
+
+      - name: Run omnivoice-infer tests (metal)
+        run: cargo test -p omnivoice-infer --features metal -- --test-threads=1
+
+      - name: Run omnivoice-cli tests (metal)
+        run: cargo test -p omnivoice-cli --features metal -- --test-threads=1

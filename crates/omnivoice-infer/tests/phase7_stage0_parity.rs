@@ -1,5 +1,7 @@
 #![cfg(feature = "cuda")]
 
+mod support;
+
 use omnivoice_infer::{
     artifacts::ReferenceArtifactBundle,
     contracts::GeneratedTokens,
@@ -7,13 +9,10 @@ use omnivoice_infer::{
     pipeline::Phase3Pipeline,
     runtime::{DTypeSpec, DeviceSpec, RuntimeOptions},
 };
+use support::{deterministic_reference_root, model_root};
 
-fn model_root() -> &'static str {
-    "H:/omnivoice/model"
-}
-
-fn reference_root() -> &'static str {
-    "H:/omnivoice/artifacts/python_reference_stage7_cuda_f32_dense"
+fn reference_root() -> std::path::PathBuf {
+    deterministic_reference_root()
 }
 
 fn cuda_f32_pipeline() -> Phase3Pipeline {
@@ -86,7 +85,7 @@ fn phase7_stage0_cuda_f16_chunked_matches_gpu_contract() {
 fn phase7_stage0_cuda_f32_request_auto_matches_reference_tokens() {
     let _guard = acquire_gpu_test_lock().unwrap();
     let bundle = ReferenceArtifactBundle::from_root(
-        "H:/omnivoice/artifacts/python_reference_stage7_cuda_f32_dense",
+        reference_root(),
     )
     .unwrap();
     let case = bundle.case_by_id("det_auto_en_short").unwrap();

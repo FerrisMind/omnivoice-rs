@@ -1,5 +1,6 @@
 use std::{fs, path::Path};
 
+use candle_core::{Device, Tensor};
 use serde::Deserialize;
 use tokenizers::Tokenizer;
 
@@ -30,6 +31,92 @@ pub struct Frontend {
     audio_mask_id: i64,
     frame_rate: usize,
     duration_estimator: RuleDurationEstimator,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DeviceVoiceClonePrompt {
+    pub ref_audio_tokens: Tensor,
+    pub ref_text: String,
+    pub ref_rms: Option<f32>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DeviceGenerationTask {
+    pub texts: Vec<String>,
+    pub target_lens: Vec<usize>,
+    pub langs: Vec<Option<String>>,
+    pub instructs: Vec<Option<String>>,
+    pub ref_texts: Vec<Option<String>>,
+    pub ref_audio_tokens: Vec<Option<Tensor>>,
+    pub ref_rms: Vec<Option<f32>>,
+    pub speed: Vec<f32>,
+    pub generation_config: crate::contracts::GenerationConfig,
+}
+
+impl DeviceGenerationTask {
+    pub fn batch_size(&self) -> usize {
+        self.texts.len()
+    }
+
+    pub fn target_lens(&self) -> &[usize] {
+        &self.target_lens
+    }
+
+    pub fn get_indices(&self, frame_rate: usize) -> (Vec<usize>, Vec<usize>) {
+        let threshold =
+            (self.generation_config.audio_chunk_threshold * frame_rate as f32).max(1.0) as usize;
+        let mut short_idx = Vec::new();
+        let mut long_idx = Vec::new();
+        for (index, target_len) in self.target_lens.iter().copied().enumerate() {
+            if target_len <= threshold {
+                short_idx.push(index);
+            } else {
+                long_idx.push(index);
+            }
+        }
+        (short_idx, long_idx)
+    }
+
+    pub fn slice_task(&self, indices: &[usize]) -> Self {
+        Self {
+            texts: indices
+                .iter()
+                .map(|&index| self.texts[index].clone())
+                .collect(),
+            target_lens: indices
+                .iter()
+                .map(|&index| self.target_lens[index])
+                .collect(),
+            langs: indices
+                .iter()
+                .map(|&index| self.langs[index].clone())
+                .collect(),
+            instructs: indices
+                .iter()
+                .map(|&index| self.instructs[index].clone())
+                .collect(),
+            ref_texts: indices
+                .iter()
+                .map(|&index| self.ref_texts[index].clone())
+                .collect(),
+            ref_audio_tokens: indices
+                .iter()
+                .map(|&index| self.ref_audio_tokens[index].clone())
+                .collect(),
+            ref_rms: indices.iter().map(|&index| self.ref_rms[index]).collect(),
+            speed: indices.iter().map(|&index| self.speed[index]).collect(),
+            generation_config: self.generation_config.clone(),
+        }
+    }
+
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedPromptDevice {
+    pub input_ids: Tensor,
+    pub audio_mask: Tensor,
+    pub total_length: usize,
+    pub audio_mask_id: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,6 +228,100 @@ impl Frontend {
         })
     }
 
+    pub(crate) fn build_task_with_device_prompts(
+        &self,
+        request: &GenerationRequest,
+        voice_clone_prompts: &[Option<DeviceVoiceClonePrompt>],
+    ) -> Result<DeviceGenerationTask> {
+        let batch_size = request.texts.len();
+        if voice_clone_prompts.len() != batch_size {
+            return Err(OmniVoiceError::InvalidRequest(format!(
+                "device voice_clone_prompts should contain {batch_size} items, got {}",
+                voice_clone_prompts.len()
+            )));
+        }
+        let languages = normalize_option_list(&request.languages, batch_size, "languages")?
+            .into_iter()
+            .map(|item| resolve_language(item.as_deref()))
+            .collect();
+        let request_ref_texts = normalize_option_list(&request.ref_texts, batch_size, "ref_texts")?;
+        let instructs_raw = normalize_option_list(&request.instructs, batch_size, "instructs")?;
+        let requested_speeds = normalize_option_f32_list(&request.speeds, batch_size)?;
+        let durations = normalize_option_f32_list(&request.durations, batch_size)?;
+
+        let mut instructs = Vec::with_capacity(batch_size);
+        for (index, item) in instructs_raw.into_iter().enumerate() {
+            let use_zh = contains_cjk(&request.texts[index]);
+            instructs.push(resolve_instruct(item.as_deref(), use_zh)?);
+        }
+
+        let mut ref_texts = Vec::with_capacity(batch_size);
+        let mut ref_audio_tokens = Vec::with_capacity(batch_size);
+        let mut ref_rms = Vec::with_capacity(batch_size);
+        let mut target_lens = Vec::with_capacity(batch_size);
+        let mut effective_speeds = Vec::with_capacity(batch_size);
+
+        for (index, text) in request.texts.iter().enumerate() {
+            let (reference_text, reference_audio_tokens, reference_rms) =
+                if let Some(prompt) = voice_clone_prompts[index].clone() {
+                    (
+                        Some(prompt.ref_text),
+                        Some(prompt.ref_audio_tokens),
+                        prompt.ref_rms,
+                    )
+                } else {
+                    (request_ref_texts[index].clone(), None, None)
+                };
+
+            let requested_speed = requested_speeds[index].unwrap_or(1.0);
+            let estimated_target_length = self.estimate_target_tokens(
+                text,
+                reference_text.as_deref(),
+                reference_audio_tokens
+                    .as_ref()
+                    .map(|tokens| tokens.dims2())
+                    .transpose()?
+                    .map(|(_, steps)| steps),
+                if durations[index].is_some() {
+                    1.0
+                } else {
+                    requested_speed
+                },
+            );
+
+            let (target_length, effective_speed) = if let Some(duration_seconds) = durations[index]
+            {
+                let target_tokens = (duration_seconds * self.frame_rate as f32).max(1.0) as usize;
+                let speed = if target_tokens > 0 {
+                    estimated_target_length as f32 / target_tokens as f32
+                } else {
+                    1.0
+                };
+                (target_tokens, speed)
+            } else {
+                (estimated_target_length, requested_speed)
+            };
+
+            ref_texts.push(reference_text);
+            ref_audio_tokens.push(reference_audio_tokens);
+            ref_rms.push(reference_rms);
+            target_lens.push(target_length);
+            effective_speeds.push(effective_speed);
+        }
+
+        Ok(DeviceGenerationTask {
+            texts: request.texts.clone(),
+            target_lens,
+            langs: languages,
+            instructs,
+            ref_texts,
+            ref_audio_tokens,
+            ref_rms,
+            speed: effective_speeds,
+            generation_config: request.generation_config.clone(),
+        })
+    }
+
     pub fn prepare_prompt(&self, task: &GenerationTask, index: usize) -> Result<PreparedPrompt> {
         let text = task.texts.get(index).ok_or_else(|| {
             OmniVoiceError::InvalidRequest(format!("missing task item at {index}"))
@@ -222,6 +403,85 @@ impl Frontend {
             target_start_idx,
             total_length,
             target_length,
+            audio_mask_id: self.audio_mask_id,
+        })
+    }
+
+    pub(crate) fn prepare_prompt_device(
+        &self,
+        task: &DeviceGenerationTask,
+        index: usize,
+        device: &Device,
+    ) -> Result<PreparedPromptDevice> {
+        let text = task.texts.get(index).ok_or_else(|| {
+            OmniVoiceError::InvalidRequest(format!("missing task item at {index}"))
+        })?;
+        let lang = task.langs.get(index).cloned().flatten();
+        let instruct = task.instructs.get(index).cloned().flatten();
+        let ref_text = task.ref_texts.get(index).cloned().flatten();
+        let ref_audio_tokens = task.ref_audio_tokens.get(index).cloned().flatten();
+        let target_length = *task.target_lens.get(index).ok_or_else(|| {
+            OmniVoiceError::InvalidRequest(format!("missing target length at {index}"))
+        })?;
+
+        let mut style_text = String::new();
+        if task.generation_config.denoise && ref_audio_tokens.is_some() {
+            style_text.push_str("<|denoise|>");
+        }
+        style_text.push_str(&format!(
+            "<|lang_start|>{}<|lang_end|><|instruct_start|>{}<|instruct_end|>",
+            lang.clone().unwrap_or_else(|| "None".to_string()),
+            instruct.clone().unwrap_or_else(|| "None".to_string())
+        ));
+        let style_encoding = self.tokenizer.encode(style_text, false)?;
+        let style_token_ids = style_encoding.get_ids().to_vec();
+
+        let full_text = combine_text(text, ref_text.as_deref());
+        let text_prompt = format!("<|text_start|>{full_text}<|text_end|>");
+        let text_encoding = self.tokenizer.encode(text_prompt, false)?;
+        let text_token_ids = text_encoding.get_ids().to_vec();
+
+        let style_len = style_token_ids.len();
+        let text_len = text_token_ids.len();
+        let ref_audio_length = ref_audio_tokens
+            .as_ref()
+            .map(|tokens| tokens.dims2())
+            .transpose()?
+            .map(|(_, steps)| steps)
+            .unwrap_or(0);
+        let total_length = style_len + text_len + ref_audio_length + target_length;
+
+        let mut input_ids_data =
+            vec![self.audio_mask_id; self.num_audio_codebook * total_length];
+        for codebook in 0..self.num_audio_codebook {
+            let row_offset = codebook * total_length;
+            for (position, token_id) in style_token_ids.iter().enumerate() {
+                input_ids_data[row_offset + position] = i64::from(*token_id);
+            }
+            for (position, token_id) in text_token_ids.iter().enumerate() {
+                input_ids_data[row_offset + style_len + position] = i64::from(*token_id);
+            }
+        }
+        let input_ids = Tensor::from_vec(
+            input_ids_data,
+            (1, self.num_audio_codebook, total_length),
+            device,
+        )?;
+        if let Some(reference_tokens) = ref_audio_tokens {
+            input_ids.slice_set(&reference_tokens.unsqueeze(0)?, 2, style_len + text_len)?;
+        }
+
+        let mut audio_mask_data = vec![0u8; total_length];
+        let audio_start_idx = total_length - target_length - ref_audio_length;
+        for mask_value in &mut audio_mask_data[audio_start_idx..] {
+            *mask_value = 1;
+        }
+        let audio_mask = Tensor::from_vec(audio_mask_data, (1, total_length), device)?;
+
+        Ok(PreparedPromptDevice {
+            input_ids,
+            audio_mask,
+            total_length,
             audio_mask_id: self.audio_mask_id,
         })
     }

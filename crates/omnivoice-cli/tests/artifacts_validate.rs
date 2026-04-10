@@ -1,9 +1,53 @@
-use std::process::Command;
+#![allow(dead_code)]
+
+use std::{path::PathBuf, process::Command};
 
 #[cfg(feature = "cuda")]
 use omnivoice_infer::{
     artifacts::ReferenceArtifactBundle, contracts::DecodedAudio, gpu_lock::acquire_gpu_test_lock,
 };
+
+fn repo_root() -> PathBuf {
+    std::env::var_os("OMNIVOICE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .to_path_buf()
+        })
+}
+
+fn model_root() -> PathBuf {
+    repo_root().join("model")
+}
+
+fn reference_root() -> PathBuf {
+    repo_root().join("artifacts").join("python_reference")
+}
+
+#[cfg(feature = "cuda")]
+fn stage0_reference_root() -> PathBuf {
+    repo_root()
+        .join("artifacts")
+        .join("python_reference_stage0_deterministic")
+}
+
+#[cfg(feature = "cuda")]
+fn stage0_cpu_strict_reference_root() -> PathBuf {
+    repo_root()
+        .join("artifacts")
+        .join("python_reference_stage0_deterministic_cpu_strict")
+}
+
+#[cfg(feature = "cuda")]
+fn deterministic_reference_root() -> PathBuf {
+    repo_root()
+        .join("artifacts")
+        .join("python_reference_stage7_cuda_f32_dense")
+}
 
 #[test]
 fn artifacts_validate_smoke_test() {
@@ -13,9 +57,9 @@ fn artifacts_validate_smoke_test() {
             "artifacts",
             "validate",
             "--model-dir",
-            "H:\\omnivoice\\model",
+            &model_root().display().to_string(),
             "--reference-root",
-            "H:\\omnivoice\\artifacts\\python_reference",
+            &reference_root().display().to_string(),
         ])
         .output()
         .unwrap();
@@ -56,9 +100,9 @@ fn prepare_prompt_smoke_test() {
         .args([
             "prepare-prompt",
             "--model-dir",
-            "H:\\omnivoice\\model",
+            &model_root().display().to_string(),
             "--reference-root",
-            "H:\\omnivoice\\artifacts\\python_reference",
+            &reference_root().display().to_string(),
             "--case",
             "debug_auto_en_short",
             "--device",
@@ -92,9 +136,9 @@ fn stage1_prepare_smoke_test() {
         .args([
             "stage1-prepare",
             "--model-dir",
-            "H:\\omnivoice\\model",
+            &model_root().display().to_string(),
             "--reference-root",
-            "H:\\omnivoice\\artifacts\\python_reference",
+            &reference_root().display().to_string(),
             "--case",
             "debug_auto_en_short",
             "--device",
@@ -128,14 +172,19 @@ fn stage1_decode_raw_smoke_test() {
         .args([
             "stage1-decode",
             "--model-dir",
-            "H:\\omnivoice\\model",
+            &model_root().display().to_string(),
             "--reference-root",
-            "H:\\omnivoice\\artifacts\\python_reference",
+            &reference_root().display().to_string(),
             "--case",
             "debug_auto_en_short",
             "--raw",
             "--out",
-            "H:\\omnivoice\\artifacts\\phase5-test\\debug_raw.wav",
+            &repo_root()
+                .join("artifacts")
+                .join("phase5-test")
+                .join("debug_raw.wav")
+                .display()
+                .to_string(),
             "--device",
             "cuda:0",
             "--dtype",
@@ -171,13 +220,18 @@ fn stage1_decode_final_smoke_test() {
         .args([
             "stage1-decode",
             "--model-dir",
-            "H:\\omnivoice\\model",
+            &model_root().display().to_string(),
             "--reference-root",
-            "H:\\omnivoice\\artifacts\\python_reference",
+            &reference_root().display().to_string(),
             "--case",
             "debug_auto_en_short",
             "--out",
-            "H:\\omnivoice\\artifacts\\phase5-test\\debug_final.wav",
+            &repo_root()
+                .join("artifacts")
+                .join("phase5-test")
+                .join("debug_final.wav")
+                .display()
+                .to_string(),
             "--device",
             "cuda:0",
             "--dtype",
@@ -213,13 +267,18 @@ fn stage0_generate_smoke_test() {
         .args([
             "stage0-generate",
             "--model-dir",
-            "H:\\omnivoice\\model",
+            &model_root().display().to_string(),
             "--reference-root",
-            "H:\\omnivoice\\artifacts\\python_reference_stage0_deterministic",
+            &stage0_reference_root().display().to_string(),
             "--case",
             "det_auto_en_short",
             "--out",
-            "H:\\omnivoice\\artifacts\\phase6-test\\det_auto_en_short.json",
+            &repo_root()
+                .join("artifacts")
+                .join("phase6-test")
+                .join("det_auto_en_short.json")
+                .display()
+                .to_string(),
             "--device",
             "cuda:0",
             "--dtype",
@@ -251,9 +310,9 @@ fn stage0_debug_smoke_test() {
         .args([
             "stage0-debug",
             "--model-dir",
-            "H:\\omnivoice\\model",
+            &model_root().display().to_string(),
             "--reference-root",
-            "H:\\omnivoice\\artifacts\\python_reference_stage0_deterministic_cpu_strict",
+            &stage0_cpu_strict_reference_root().display().to_string(),
             "--case",
             "det_debug_auto_en_short",
             "--device",
@@ -285,20 +344,23 @@ fn infer_cuda_auto_matches_reference_audio() {
     let _guard = acquire_gpu_test_lock().unwrap();
     let binary = env!("CARGO_BIN_EXE_omnivoice-cli");
     let bundle = ReferenceArtifactBundle::from_root(
-        "H:\\omnivoice\\artifacts\\python_reference_stage7_cuda_f32_dense",
+        deterministic_reference_root(),
     )
     .unwrap();
     let case = bundle.case_by_id("det_auto_en_short").unwrap();
     let request = case.build_generation_request().unwrap();
-    let output_path = "H:\\omnivoice\\artifacts\\phase7-test\\cli_auto_en_short.wav";
+    let output_path = repo_root()
+        .join("artifacts")
+        .join("phase7-test")
+        .join("cli_auto_en_short.wav");
     let mut args = vec![
         "infer".to_string(),
         "--model-dir".to_string(),
-        "H:\\omnivoice\\model".to_string(),
+        model_root().display().to_string(),
         "--text".to_string(),
         request.texts[0].clone(),
         "--output".to_string(),
-        output_path.to_string(),
+        output_path.display().to_string(),
         "--device".to_string(),
         "cuda:0".to_string(),
         "--dtype".to_string(),

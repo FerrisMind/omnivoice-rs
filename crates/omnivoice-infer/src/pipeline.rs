@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use candle_core::Tensor;
+use candle_core::{DType, Device, Tensor};
 
 use crate::{
     artifacts::{ReferenceArtifactBundle, RuntimeArtifacts},
@@ -12,8 +12,10 @@ use crate::{
         PreparedPromptSequence, ReferenceAudioInput, VoiceClonePrompt, WaveformInput,
     },
     error::Result,
-    frontend::add_punctuation,
-    frontend::Frontend,
+    frontend::{
+        add_punctuation, DeviceGenerationTask, DeviceVoiceClonePrompt, Frontend,
+        PreparedPromptDevice,
+    },
     reference_prompt::{ReferencePromptBuilder, ReferencePromptOptions},
     runtime::RuntimeOptions,
     stage0_loop::pack_cfg_batch,
@@ -25,6 +27,11 @@ use crate::{
 enum GeneratedTensorTokens {
     Single(Tensor),
     Chunked(Vec<Tensor>),
+}
+
+struct MaterializedDeviceRequest {
+    request: GenerationRequest,
+    device_voice_clone_prompts: Vec<Option<DeviceVoiceClonePrompt>>,
 }
 
 #[derive(Debug)]
@@ -173,9 +180,14 @@ impl Phase3Pipeline {
     }
 
     pub fn generate(&self, request: &GenerationRequest) -> Result<Vec<DecodedAudio>> {
-        let request = self.materialize_request(request)?;
-        let task = self.frontend.build_task(&request)?;
-        self.generate_audio_from_task(&task)
+        let materialized = self.materialize_device_request(request)?;
+        let task = self
+            .frontend
+            .build_task_with_device_prompts(
+                &materialized.request,
+                &materialized.device_voice_clone_prompts,
+            )?;
+        self.generate_audio_from_device_task(&task)
     }
 
     pub fn generate_stage0_from_reference_case(
@@ -373,6 +385,88 @@ impl Phase3Pipeline {
         Ok(request)
     }
 
+    fn materialize_device_request(
+        &self,
+        request: &GenerationRequest,
+    ) -> Result<MaterializedDeviceRequest> {
+        let batch_size = request.texts.len();
+        let mut request = request.clone();
+        request.ref_audios = normalize_option_ref_audio(&request.ref_audios, batch_size)?;
+        request.ref_texts = normalize_option_strings(&request.ref_texts, batch_size, "ref_texts")?;
+        request.voice_clone_prompts =
+            normalize_option_prompts(&request.voice_clone_prompts, batch_size)?;
+
+        let mut device_voice_clone_prompts = Vec::with_capacity(batch_size);
+        for index in 0..batch_size {
+            if let Some(prompt) = request.voice_clone_prompts[index].clone() {
+                device_voice_clone_prompts.push(Some(DeviceVoiceClonePrompt {
+                    ref_audio_tokens: prompt.ref_audio_tokens.to_candle(self.stage0.device())?,
+                    ref_text: prompt.ref_text,
+                    ref_rms: prompt.ref_rms,
+                }));
+                continue;
+            }
+            if let Some(ref_audio) = request.ref_audios[index].clone() {
+                device_voice_clone_prompts.push(Some(
+                    self.create_device_voice_clone_prompt_from_audio(
+                        &ref_audio,
+                        request.ref_texts[index].as_deref(),
+                        request.generation_config.preprocess_prompt,
+                        request.asr_model.as_deref(),
+                    )?,
+                ));
+                continue;
+            }
+            device_voice_clone_prompts.push(None);
+        }
+        request.ref_audios = vec![None; batch_size];
+        Ok(MaterializedDeviceRequest {
+            request,
+            device_voice_clone_prompts,
+        })
+    }
+
+    fn create_device_voice_clone_prompt_from_audio(
+        &self,
+        ref_audio: &ReferenceAudioInput,
+        ref_text: Option<&str>,
+        preprocess_prompt: bool,
+        asr_model: Option<&str>,
+    ) -> Result<DeviceVoiceClonePrompt> {
+        let processor = ReferenceAudioProcessor::new(
+            self.runtime_artifacts.contracts().sample_rate,
+            self.runtime_artifacts.contracts().hop_length,
+        );
+        let prepared = processor.prepare_prompt_audio(ref_audio, ref_text, preprocess_prompt)?;
+        let resolved_ref_text = match prepared.ref_text {
+            Some(ref_text) => ref_text,
+            None => {
+                let resolved_ref_text = self.transcribe_waveform(
+                    &WaveformInput::mono(
+                        prepared.waveform.clone(),
+                        self.runtime_artifacts.contracts().sample_rate,
+                    ),
+                    asr_model,
+                )?;
+                if preprocess_prompt {
+                    add_punctuation(&resolved_ref_text)
+                } else {
+                    resolved_ref_text
+                }
+            }
+        };
+        let ref_audio_tokens = self.audio_tokenizer.encode_waveform_device(
+            &prepared.waveform,
+            self.runtime_artifacts.contracts().sample_rate,
+        )?;
+
+        Ok(DeviceVoiceClonePrompt {
+            ref_audio_tokens,
+            ref_text: resolved_ref_text,
+            ref_rms: prepared.ref_rms,
+        })
+    }
+
     fn generate_tokens_from_task(
         &self,
         task: &crate::contracts::GenerationTask,
@@ -405,9 +499,9 @@ impl Phase3Pipeline {
             .collect()
     }
 
-    fn generate_audio_from_task(
+    fn generate_audio_from_device_task(
         &self,
-        task: &crate::contracts::GenerationTask,
+        task: &DeviceGenerationTask,
     ) -> Result<Vec<DecodedAudio>> {
         let mut results = vec![None; task.batch_size()];
         let (short_idx, long_idx) = task.get_indices(self.frontend.frame_rate());
@@ -486,19 +580,22 @@ impl Phase3Pipeline {
 
     fn generate_iterative_task_device(
         &self,
-        task: &crate::contracts::GenerationTask,
+        task: &DeviceGenerationTask,
     ) -> Result<Vec<Tensor>> {
         let mut prepared = Vec::with_capacity(task.batch_size());
-        let mut cond_lens = Vec::with_capacity(task.batch_size());
         for index in 0..task.batch_size() {
-            let prompt = self.frontend.prepare_prompt(task, index)?;
-            cond_lens.push(prompt.total_length);
+            let prompt = self
+                .frontend
+                .prepare_prompt_device(task, index, self.stage0.device())?;
             prepared.push(prompt);
         }
-        let batched = pack_cfg_batch(&prepared, task.target_lens())?;
-        let batch = self
-            .stage0
-            .prepare_batch(&batched, &cond_lens, task.target_lens())?;
+        let batch = pack_cfg_batch_device(
+            &prepared,
+            task.target_lens(),
+            self.stage0.config().num_audio_codebook,
+            self.stage0.device(),
+            self.stage0.runtime_dtype(),
+        )?;
         self.stage0.generate_deterministic_device(
             &batch,
             &Stage0DeterministicConfig {
@@ -684,7 +781,7 @@ impl Phase3Pipeline {
 
     fn generate_chunked_task_device(
         &self,
-        task: &crate::contracts::GenerationTask,
+        task: &DeviceGenerationTask,
     ) -> Result<Vec<Vec<Tensor>>> {
         let all_chunks = (0..task.batch_size())
             .map(|index| {
@@ -757,8 +854,7 @@ impl Phase3Pipeline {
                     vec![None; first_indices.len()],
                 )?;
                 for (item_index, generated) in first_indices.iter().copied().zip(generated) {
-                    first_chunk_refs[item_index] =
-                        Some(crate::stage0_model::tensor_to_i64_tensor2(&generated)?);
+                    first_chunk_refs[item_index] = Some(generated.clone());
                     first_chunk_texts[item_index] = Some(all_chunks[item_index][0].clone());
                     chunk_results[item_index].push(generated);
                 }
@@ -812,27 +908,29 @@ impl Phase3Pipeline {
 
     fn run_chunk_batch_device(
         &self,
-        task: &crate::contracts::GenerationTask,
+        task: &DeviceGenerationTask,
         indices: &[usize],
         texts: Vec<String>,
-        ref_audio_tokens: Vec<Option<crate::contracts::I64Tensor2>>,
+        ref_audio_tokens: Vec<Option<Tensor>>,
         ref_texts: Vec<Option<String>>,
     ) -> Result<Vec<Tensor>> {
         let target_lens = indices
             .iter()
             .enumerate()
             .map(|(local_index, item_index)| {
-                self.frontend.estimate_target_tokens(
+                let num_ref_audio_tokens = ref_audio_tokens[local_index]
+                    .as_ref()
+                    .map(|tokens| tokens.dims2().map(|(_, steps)| steps))
+                    .transpose()?;
+                Ok(self.frontend.estimate_target_tokens(
                     &texts[local_index],
                     ref_texts[local_index].as_deref(),
-                    ref_audio_tokens[local_index]
-                        .as_ref()
-                        .map(|tokens| tokens.dims().1),
+                    num_ref_audio_tokens,
                     task.speed[*item_index],
-                )
+                ))
             })
-            .collect::<Vec<_>>();
-        let sub_task = crate::contracts::GenerationTask {
+            .collect::<Result<Vec<_>>>()?;
+        let sub_task = DeviceGenerationTask {
             texts,
             target_lens,
             langs: indices
@@ -899,6 +997,158 @@ impl Phase3Pipeline {
         self.stage0
             .prepare_batch(&batched, &cond_lens, &target_lens)
     }
+}
+
+fn pack_cfg_batch_device(
+    prepared: &[PreparedPromptDevice],
+    target_lens: &[usize],
+    num_audio_codebook: usize,
+    device: &Device,
+    runtime_dtype: DType,
+) -> Result<PreparedInferenceBatch> {
+    if prepared.is_empty() {
+        return Err(crate::error::OmniVoiceError::InvalidRequest(
+            "prepared prompts cannot be empty".to_string(),
+        ));
+    }
+    if prepared.len() != target_lens.len() {
+        return Err(crate::error::OmniVoiceError::InvalidRequest(format!(
+            "prepared prompt count {} does not match target lens {}",
+            prepared.len(),
+            target_lens.len()
+        )));
+    }
+
+    let max_c_len = prepared
+        .iter()
+        .map(|prompt| prompt.total_length)
+        .max()
+        .unwrap_or_default();
+    let max_target_len = target_lens.iter().copied().max().unwrap_or(0);
+    let audio_mask_id = prepared[0].audio_mask_id;
+
+    let mut cond_inputs = Vec::with_capacity(prepared.len());
+    let mut cond_audio_masks = Vec::with_capacity(prepared.len());
+    let mut cond_attention_masks = Vec::with_capacity(prepared.len());
+    let mut uncond_inputs = Vec::with_capacity(prepared.len());
+    let mut uncond_audio_masks = Vec::with_capacity(prepared.len());
+    let mut uncond_attention_masks = Vec::with_capacity(prepared.len());
+    let mut cond_lens = Vec::with_capacity(prepared.len());
+
+    for (prompt, target_len) in prepared.iter().zip(target_lens.iter().copied()) {
+        cond_lens.push(prompt.total_length);
+        cond_inputs.push(pad_input_ids_tensor(
+            &prompt.input_ids,
+            max_c_len,
+            audio_mask_id,
+            num_audio_codebook,
+            device,
+        )?);
+        cond_audio_masks.push(pad_mask_tensor(&prompt.audio_mask, max_c_len, device)?);
+        cond_attention_masks.push(build_attention_mask_tensor(
+            prompt.total_length,
+            max_c_len,
+            None,
+            device,
+        )?);
+
+        let uncond_source = prompt
+            .input_ids
+            .narrow(candle_core::D::Minus1, prompt.total_length - target_len, target_len)?;
+        let uncond_mask_source = prompt
+            .audio_mask
+            .narrow(candle_core::D::Minus1, prompt.total_length - target_len, target_len)?;
+        uncond_inputs.push(pad_input_ids_tensor(
+            &uncond_source,
+            max_c_len,
+            audio_mask_id,
+            num_audio_codebook,
+            device,
+        )?);
+        uncond_audio_masks.push(pad_mask_tensor(&uncond_mask_source, max_c_len, device)?);
+        uncond_attention_masks.push(build_attention_mask_tensor(
+            target_len,
+            max_c_len,
+            Some(target_len),
+            device,
+        )?);
+    }
+
+    let input_tensor_refs = cond_inputs
+        .iter()
+        .chain(uncond_inputs.iter())
+        .collect::<Vec<_>>();
+    let audio_mask_refs = cond_audio_masks
+        .iter()
+        .chain(uncond_audio_masks.iter())
+        .collect::<Vec<_>>();
+    let attention_mask_refs = cond_attention_masks
+        .iter()
+        .chain(uncond_attention_masks.iter())
+        .collect::<Vec<_>>();
+
+    Ok(PreparedInferenceBatch {
+        input_ids: Tensor::cat(&input_tensor_refs, 0)?,
+        audio_mask: Tensor::cat(&audio_mask_refs, 0)?,
+        attention_mask: Tensor::cat(&attention_mask_refs, 0)?,
+        tokens_init: Tensor::full(
+            audio_mask_id,
+            (prepared.len(), num_audio_codebook, max_target_len),
+            device,
+        )?,
+        target_lens: target_lens.to_vec(),
+        cond_lens,
+        runtime_dtype,
+    })
+}
+
+fn pad_input_ids_tensor(
+    input_ids: &Tensor,
+    max_c_len: usize,
+    audio_mask_id: i64,
+    num_audio_codebook: usize,
+    device: &Device,
+) -> Result<Tensor> {
+    let (_, _, current_len) = input_ids.dims3()?;
+    if current_len >= max_c_len {
+        return Ok(input_ids.clone());
+    }
+    let padding = Tensor::full(
+        audio_mask_id,
+        (1, num_audio_codebook, max_c_len - current_len),
+        device,
+    )?;
+    Tensor::cat(&[input_ids, &padding], 2).map_err(Into::into)
+}
+
+fn pad_mask_tensor(mask: &Tensor, max_c_len: usize, device: &Device) -> Result<Tensor> {
+    let (_, current_len) = mask.dims2()?;
+    if current_len >= max_c_len {
+        return Ok(mask.clone());
+    }
+    let padding = Tensor::zeros((1, max_c_len - current_len), DType::U8, device)?;
+    Tensor::cat(&[mask, &padding], 1).map_err(Into::into)
+}
+
+fn build_attention_mask_tensor(
+    active_len: usize,
+    max_c_len: usize,
+    diagonal_from: Option<usize>,
+    device: &Device,
+) -> Result<Tensor> {
+    let mut values = vec![0u8; max_c_len * max_c_len];
+    for row in 0..active_len {
+        let row_offset = row * max_c_len;
+        for column in 0..active_len {
+            values[row_offset + column] = 1;
+        }
+    }
+    if let Some(start) = diagonal_from {
+        for index in start..max_c_len {
+            values[index * max_c_len + index] = 1;
+        }
+    }
+    Ok(Tensor::from_vec(values, (1, 1, max_c_len, max_c_len), device)?)
 }
 
 fn normalize_option_strings(

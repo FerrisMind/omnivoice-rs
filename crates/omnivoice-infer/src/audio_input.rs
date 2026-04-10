@@ -485,7 +485,7 @@ mod tests {
 
     #[test]
     fn generic_audio_loader_decodes_reference_wav() {
-        let waveform = load_audio_file("H:/omnivoice/ref.wav").unwrap();
+        let waveform = load_audio_file(crate::paths::ref_audio_path()).unwrap();
         assert!(waveform.sample_rate > 0);
         assert!(waveform.channels >= 1);
         assert!(!waveform.samples.is_empty());

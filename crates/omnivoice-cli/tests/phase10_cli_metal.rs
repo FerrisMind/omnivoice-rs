@@ -1,4 +1,4 @@
-#![cfg(feature = "metal")]
+#![cfg(all(feature = "metal", target_os = "macos"))]
 
 use std::{path::PathBuf, process::Command};
 
@@ -235,8 +235,12 @@ fn phase10_cli_infer_metal_auto_device_dtype_succeeds() {
     assert!(stdout.contains("command=infer"));
     assert!(stdout.contains("device=Auto"));
     assert!(stdout.contains("dtype=Auto"));
+    assert!(stdout.contains("resolved_device=Metal"));
+    assert!(stdout.contains("resolved_dtype=F16"));
 
     let actual = DecodedAudio::read_wav(&output_path).unwrap();
-    assert_eq!(actual.sample_rate, 24_000);
-    assert!(!actual.samples.is_empty());
+    let expected = case.load_final_audio().unwrap();
+    assert_audio_matches_reference_with_frame_tolerance(
+        &actual, &expected, 20_000, 3.0e-2, 5.0e-2, 0.55,
+    );
 }

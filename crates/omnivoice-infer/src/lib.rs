@@ -8,6 +8,7 @@ pub mod contracts;
 pub mod error;
 pub mod frontend;
 pub mod gpu_lock;
+mod paths;
 pub mod pipeline;
 pub mod postprocess;
 pub mod reference_prompt;

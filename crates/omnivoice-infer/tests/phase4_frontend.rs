@@ -1,3 +1,5 @@
+mod support;
+
 use omnivoice_infer::{
     artifacts::ReferenceArtifactBundle,
     audio_input::ReferenceAudioProcessor,
@@ -9,14 +11,7 @@ use omnivoice_infer::{
     pipeline::Phase3Pipeline,
     runtime::{DTypeSpec, DeviceSpec, RuntimeOptions},
 };
-
-fn model_root() -> &'static str {
-    "H:/omnivoice/model"
-}
-
-fn reference_root() -> &'static str {
-    "H:/omnivoice/artifacts/python_reference"
-}
+use support::{model_root, reference_root, ref_audio_path, stage0_reference_root};
 
 #[test]
 fn language_resolution_matches_omnivoice_lang_map() {
@@ -223,7 +218,9 @@ fn reference_audio_preprocessing_matches_python_prompt_contract() {
     let processor = ReferenceAudioProcessor::new(24_000, 960);
     let prepared = processor
         .prepare_prompt_audio(
-            &omnivoice_infer::contracts::ReferenceAudioInput::from_path("H:/omnivoice/ref.wav"),
+            &omnivoice_infer::contracts::ReferenceAudioInput::from_path(
+                ref_audio_path().display().to_string(),
+            ),
             Some("State-of-the-art text-to-speech model for 600+ languages, supporting"),
             true,
         )
@@ -341,8 +338,8 @@ fn prepare_prompt_matches_deterministic_reference_batch() {
     );
 }
 
-fn deterministic_reference_root() -> &'static str {
-    "H:/omnivoice/artifacts/python_reference_stage0_deterministic"
+fn deterministic_reference_root() -> std::path::PathBuf {
+    stage0_reference_root()
 }
 
 fn assert_close(actual: f32, expected: f32, tolerance: f32) {

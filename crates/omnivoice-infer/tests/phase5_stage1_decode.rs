@@ -1,18 +1,13 @@
+mod support;
+
 use omnivoice_infer::{
     artifacts::ReferenceArtifactBundle, gpu_lock::acquire_gpu_test_lock, pipeline::Phase3Pipeline,
     runtime::RuntimeOptions,
 };
+use support::{model_root, reference_root};
 
 #[cfg(feature = "cuda")]
 use omnivoice_infer::runtime::{DTypeSpec, DeviceSpec};
-
-fn model_root() -> &'static str {
-    "H:/omnivoice/model"
-}
-
-fn reference_root() -> &'static str {
-    "H:/omnivoice/artifacts/python_reference"
-}
 
 #[cfg(feature = "cuda")]
 fn cuda_f32_pipeline() -> Phase3Pipeline {

@@ -15,7 +15,10 @@ use hf_hub::{
 };
 
 use omnivoice_infer::{
-    artifacts::{ReferenceArtifactBundle, RuntimeArtifactManifest, RuntimeArtifacts},
+    artifacts::{
+        ReferenceArtifactBundle, RuntimeArtifactManifest, RuntimeArtifacts,
+        RUNTIME_MANIFEST_FILE_NAME,
+    },
     audio_input::ReferenceAudioProcessor,
     contracts::{GeneratedTokens, GenerationRequest, PreparedPromptSequence, ReferenceAudioInput},
     frontend::Frontend,
@@ -1035,28 +1038,8 @@ fn download_model_snapshot(model_id: &str) -> Result<PathBuf, OmniVoiceError> {
 
     let manifest: RuntimeArtifactManifest =
         serde_json::from_str(&fs::read_to_string(&manifest_path)?)?;
-    download_repo_file(&repo, "config.json")?;
-    download_repo_file(&repo, &manifest.generator.config.to_string_lossy())?;
-    download_repo_file(&repo, &manifest.generator.weights.to_string_lossy())?;
-    download_repo_file(&repo, &manifest.text_tokenizer.tokenizer.to_string_lossy())?;
-    download_repo_file(
-        &repo,
-        &manifest.text_tokenizer.tokenizer_config.to_string_lossy(),
-    )?;
-    if let Some(chat_template) = manifest.text_tokenizer.metadata.chat_template.as_ref() {
-        download_repo_file(&repo, &chat_template.to_string_lossy())?;
-    }
-    download_repo_file(&repo, &manifest.audio_tokenizer.config.to_string_lossy())?;
-    download_repo_file(&repo, &manifest.audio_tokenizer.weights.to_string_lossy())?;
-    download_repo_file(
-        &repo,
-        &manifest
-            .audio_tokenizer
-            .preprocessor_config
-            .to_string_lossy(),
-    )?;
-    if let Some(license) = manifest.audio_tokenizer.metadata.license.as_ref() {
-        download_repo_file(&repo, &license.to_string_lossy())?;
+    for target in manifest_download_targets(&manifest) {
+        download_repo_file(&repo, &target)?;
     }
 
     Ok(snapshot_root.to_path_buf())
@@ -1066,6 +1049,38 @@ fn download_repo_file(repo: &ApiRepo, relative_path: &str) -> Result<PathBuf, Om
     let normalized = relative_path.replace('\\', "/");
     repo.get(&normalized)
         .map_err(|error| OmniVoiceError::InvalidData(error.to_string()))
+}
+
+fn manifest_download_targets(manifest: &RuntimeArtifactManifest) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut targets = Vec::new();
+    for path in [
+        Some(manifest.generator.config.as_path()),
+        Some(manifest.generator.weights.as_path()),
+        Some(manifest.text_tokenizer.tokenizer.as_path()),
+        Some(manifest.text_tokenizer.tokenizer_config.as_path()),
+        manifest
+            .text_tokenizer
+            .metadata
+            .chat_template
+            .as_deref(),
+        Some(manifest.audio_tokenizer.config.as_path()),
+        Some(manifest.audio_tokenizer.weights.as_path()),
+        Some(manifest.audio_tokenizer.preprocessor_config.as_path()),
+        manifest.audio_tokenizer.metadata.license.as_deref(),
+    ] {
+        let Some(path) = path else {
+            continue;
+        };
+        let normalized = path.to_string_lossy().replace('\\', "/");
+        if normalized == RUNTIME_MANIFEST_FILE_NAME {
+            continue;
+        }
+        if seen.insert(normalized.clone()) {
+            targets.push(normalized);
+        }
+    }
+    targets
 }
 
 fn run_artifacts_validate(
@@ -1219,6 +1234,11 @@ fn run_infer(
     println!("device={:?}", options.device());
     println!("dtype={:?}", options.dtype());
     println!(
+        "resolved_device={}",
+        describe_runtime_device(pipeline.stage0().device())
+    );
+    println!("resolved_dtype={:?}", pipeline.stage0().runtime_dtype());
+    println!(
         "seed={}",
         options
             .seed()
@@ -1336,6 +1356,23 @@ fn run_infer_batch(
     println!("device={:?}", device);
     println!("dtype={:?}", dtype);
     println!("worker_count={}", worker_devices.len());
+    println!("resolved_workers={}", worker_devices.len());
+    println!(
+        "resolved_worker_devices={}",
+        worker_devices
+            .iter()
+            .map(|device| format!("{device:?}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    println!(
+        "resolved_worker_dtypes={}",
+        worker_devices
+            .iter()
+            .map(|device| format!("{:?}", dtype.resolve_for_device(*device)))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
     println!("batch_count={}", jobs.len());
     println!("sample_count={}", samples.len());
     println!("written_files={}", totals.samples_written);
@@ -1703,12 +1740,20 @@ fn detect_cuda_devices() -> Vec<DeviceSpec> {
     }
 }
 
+fn describe_runtime_device(device: &Device) -> String {
+    match device.location() {
+        candle_core::DeviceLocation::Cpu => format!("{:?}", DeviceSpec::Cpu),
+        candle_core::DeviceLocation::Cuda { gpu_id } => format!("{:?}", DeviceSpec::Cuda(gpu_id)),
+        candle_core::DeviceLocation::Metal { gpu_id: _ } => format!("{:?}", DeviceSpec::Metal),
+    }
+}
+
 fn detect_metal_device_available() -> bool {
-    #[cfg(feature = "metal")]
+    #[cfg(all(feature = "metal", target_os = "macos"))]
     {
         Device::new_metal(0).is_ok()
     }
-    #[cfg(not(feature = "metal"))]
+    #[cfg(not(all(feature = "metal", target_os = "macos")))]
     {
         false
     }
@@ -1734,6 +1779,11 @@ fn run_prepare_prompt(
     println!("model_root={}", options.model_root().display());
     println!("device={:?}", options.device());
     println!("dtype={:?}", options.dtype());
+    println!(
+        "resolved_device={}",
+        describe_runtime_device(pipeline.stage0().device())
+    );
+    println!("resolved_dtype={:?}", pipeline.stage0().runtime_dtype());
     println!("kind={}", prepared.kind());
     println!("stage0_loaded={}", pipeline.stage0().is_loaded());
     println!("stage1_loaded={}", pipeline.stage1().is_loaded());
@@ -1802,6 +1852,11 @@ fn run_stage1_prepare(
     println!("model_root={}", options.model_root().display());
     println!("device={:?}", options.device());
     println!("dtype={:?}", options.dtype());
+    println!(
+        "resolved_device={}",
+        describe_runtime_device(pipeline.stage0().device())
+    );
+    println!("resolved_dtype={:?}", pipeline.stage0().runtime_dtype());
     println!("token_dims={:?}", decode.token_dims()?);
     println!("token_dtype={:?}", decode.tokens.dtype());
     println!("sample_rate={}", decode.sample_rate);
@@ -1864,6 +1919,11 @@ fn run_stage1_decode(
     println!("model_root={}", options.model_root().display());
     println!("device={:?}", options.device());
     println!("dtype={:?}", options.dtype());
+    println!(
+        "resolved_device={}",
+        describe_runtime_device(pipeline.stage0().device())
+    );
+    println!("resolved_dtype={:?}", pipeline.stage0().runtime_dtype());
     println!("out={}", out.display());
     println!("sample_rate={}", decoded.sample_rate);
     println!("frame_count={}", decoded.frame_count());
@@ -1910,6 +1970,11 @@ fn run_stage0_generate(
     println!("model_root={}", options.model_root().display());
     println!("device={:?}", options.device());
     println!("dtype={:?}", options.dtype());
+    println!(
+        "resolved_device={}",
+        describe_runtime_device(pipeline.stage0().device())
+    );
+    println!("resolved_dtype={:?}", pipeline.stage0().runtime_dtype());
     println!("out={}", out.display());
     println!("stage0_loaded={}", pipeline.stage0().is_loaded());
     println!("stage1_loaded={}", pipeline.stage1().is_loaded());
@@ -1949,6 +2014,11 @@ fn run_stage0_debug(
     println!("model_root={}", options.model_root().display());
     println!("device={:?}", options.device());
     println!("dtype={:?}", options.dtype());
+    println!(
+        "resolved_device={}",
+        describe_runtime_device(pipeline.stage0().device())
+    );
+    println!("resolved_dtype={:?}", pipeline.stage0().runtime_dtype());
     println!("token_dims={:?}", debug.tokens.dims());
     println!("stage0_loaded={}", pipeline.stage0().is_loaded());
     println!("stage1_loaded={}", pipeline.stage1().is_loaded());
@@ -2048,5 +2118,70 @@ fn usage() -> String {
         "  omnivoice-cli stage0-generate --model <path-or-hf-repo> --reference-root <path> --case <id> --out <json> [--device auto|cuda:N|metal|cpu] [--dtype auto|f16|bf16|f32]",
         "  omnivoice-cli stage0-debug --model <path-or-hf-repo> --reference-root <path> --case <id> [--device auto|cuda:N|metal|cpu] [--dtype auto|f16|bf16|f32]",
     ]
-    .join("\n")
+        .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::manifest_download_targets;
+    use omnivoice_infer::artifacts::RuntimeArtifactManifest;
+
+    #[test]
+    fn manifest_download_targets_are_manifest_scoped_and_deduplicated() {
+        let manifest: RuntimeArtifactManifest = serde_json::from_str(
+            r#"{
+                "version": 1,
+                "generator": {
+                    "config": "config.json",
+                    "weights": "model.safetensors",
+                    "required_prefixes": ["llm"],
+                    "ignored_keys": []
+                },
+                "text_tokenizer": {
+                    "tokenizer": "tokenizer.json",
+                    "tokenizer_config": "tokenizer_config.json",
+                    "metadata": {
+                        "chat_template": "chat_template.jinja"
+                    }
+                },
+                "audio_tokenizer": {
+                    "config": "audio_tokenizer/config.json",
+                    "weights": "audio_tokenizer/model.safetensors",
+                    "preprocessor_config": "audio_tokenizer/preprocessor_config.json",
+                    "required_prefixes": ["quantizer"],
+                    "metadata": {
+                        "license": "audio_tokenizer/LICENSE"
+                    }
+                },
+                "contracts": {
+                    "num_audio_codebooks": 8,
+                    "audio_vocab_size": 1025,
+                    "audio_mask_id": 1024,
+                    "token_id_min": 0,
+                    "token_id_max": 1023,
+                    "sample_rate": 24000,
+                    "hop_length": 960,
+                    "frame_rate": 25
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let targets = manifest_download_targets(&manifest);
+
+        assert_eq!(
+            targets,
+            vec![
+                "config.json",
+                "model.safetensors",
+                "tokenizer.json",
+                "tokenizer_config.json",
+                "chat_template.jinja",
+                "audio_tokenizer/config.json",
+                "audio_tokenizer/model.safetensors",
+                "audio_tokenizer/preprocessor_config.json",
+                "audio_tokenizer/LICENSE",
+            ]
+        );
+    }
 }

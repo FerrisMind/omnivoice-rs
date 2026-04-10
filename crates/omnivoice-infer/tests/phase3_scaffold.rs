@@ -1,3 +1,5 @@
+mod support;
+
 use candle_core::{DType, Device};
 use omnivoice_infer::{
     artifacts::{ArtifactCase, ReferenceArtifactBundle},
@@ -6,14 +8,7 @@ use omnivoice_infer::{
     pipeline::Phase3Pipeline,
     runtime::{auto_device_resolution_order, DTypeSpec, DeviceSpec, RuntimeOptions},
 };
-
-fn model_root() -> &'static str {
-    "H:/omnivoice/model"
-}
-
-fn reference_root() -> &'static str {
-    "H:/omnivoice/artifacts/python_reference"
-}
+use support::{model_root, reference_root};
 
 #[test]
 fn runtime_options_default_to_auto_gpu_first() {
@@ -39,16 +34,25 @@ fn runtime_options_default_to_auto_gpu_first() {
 fn auto_device_resolution_order_is_gpu_first() {
     let order = auto_device_resolution_order();
     assert_eq!(order.last().copied(), Some(DeviceSpec::Cpu));
-    #[cfg(all(feature = "cuda", feature = "metal"))]
+    #[cfg(all(feature = "cuda", feature = "metal", target_os = "macos"))]
     assert_eq!(
         order,
         &[DeviceSpec::Cuda(0), DeviceSpec::Metal, DeviceSpec::Cpu]
     );
-    #[cfg(all(feature = "cuda", not(feature = "metal")))]
+    #[cfg(all(
+        feature = "cuda",
+        not(all(feature = "metal", target_os = "macos"))
+    ))]
     assert_eq!(order, &[DeviceSpec::Cuda(0), DeviceSpec::Cpu]);
-    #[cfg(all(not(feature = "cuda"), feature = "metal"))]
+    #[cfg(all(
+        not(feature = "cuda"),
+        all(feature = "metal", target_os = "macos")
+    ))]
     assert_eq!(order, &[DeviceSpec::Metal, DeviceSpec::Cpu]);
-    #[cfg(all(not(feature = "cuda"), not(feature = "metal")))]
+    #[cfg(all(
+        not(feature = "cuda"),
+        not(all(feature = "metal", target_os = "macos"))
+    ))]
     assert_eq!(order, &[DeviceSpec::Cpu]);
 }
 

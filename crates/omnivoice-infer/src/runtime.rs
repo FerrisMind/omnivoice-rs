@@ -160,17 +160,26 @@ impl RuntimeOptions {
     }
 }
 
-#[cfg(all(feature = "cuda", feature = "metal"))]
+#[cfg(all(feature = "cuda", feature = "metal", target_os = "macos"))]
 const AUTO_DEVICE_ORDER: [DeviceSpec; 3] =
     [DeviceSpec::Cuda(0), DeviceSpec::Metal, DeviceSpec::Cpu];
 
-#[cfg(all(feature = "cuda", not(feature = "metal")))]
+#[cfg(all(
+    feature = "cuda",
+    not(all(feature = "metal", target_os = "macos"))
+))]
 const AUTO_DEVICE_ORDER: [DeviceSpec; 2] = [DeviceSpec::Cuda(0), DeviceSpec::Cpu];
 
-#[cfg(all(not(feature = "cuda"), feature = "metal"))]
+#[cfg(all(
+    not(feature = "cuda"),
+    all(feature = "metal", target_os = "macos")
+))]
 const AUTO_DEVICE_ORDER: [DeviceSpec; 2] = [DeviceSpec::Metal, DeviceSpec::Cpu];
 
-#[cfg(all(not(feature = "cuda"), not(feature = "metal")))]
+#[cfg(all(
+    not(feature = "cuda"),
+    not(all(feature = "metal", target_os = "macos"))
+))]
 const AUTO_DEVICE_ORDER: [DeviceSpec; 1] = [DeviceSpec::Cpu];
 
 pub fn auto_device_resolution_order() -> &'static [DeviceSpec] {
@@ -190,7 +199,7 @@ fn resolve_auto_device() -> Result<Device> {
             }
             DeviceSpec::Metal =>
             {
-                #[cfg(feature = "metal")]
+                #[cfg(all(feature = "metal", target_os = "macos"))]
                 if let Ok(device) = Device::new_metal(0) {
                     return Ok(device);
                 }
@@ -214,12 +223,12 @@ fn resolve_cuda_device(index: usize) -> Result<Device> {
     )))
 }
 
-#[cfg(feature = "metal")]
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn resolve_metal_device() -> Result<Device> {
     Ok(Device::new_metal(0)?)
 }
 
-#[cfg(not(feature = "metal"))]
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
 fn resolve_metal_device() -> Result<Device> {
     Err(OmniVoiceError::Unsupported(
         "metal device requires the `metal` feature".to_string(),

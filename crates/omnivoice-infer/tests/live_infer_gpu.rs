@@ -1,5 +1,7 @@
 #![cfg(feature = "cuda")]
 
+mod support;
+
 use omnivoice_infer::{
     artifacts::ReferenceArtifactBundle,
     contracts::{
@@ -9,22 +11,7 @@ use omnivoice_infer::{
     pipeline::Phase3Pipeline,
     runtime::{DTypeSpec, DeviceSpec, RuntimeOptions},
 };
-
-fn model_root() -> &'static str {
-    "H:/omnivoice/model"
-}
-
-fn reference_root() -> &'static str {
-    "H:/omnivoice/artifacts/python_reference"
-}
-
-fn deterministic_reference_root() -> &'static str {
-    "H:/omnivoice/artifacts/python_reference_stage7_cuda_f32_dense"
-}
-
-fn ref_audio_path() -> &'static str {
-    "H:/omnivoice/ref.wav"
-}
+use support::{deterministic_reference_root, model_root, ref_audio_path, reference_root};
 
 fn cuda_f32_pipeline() -> Phase3Pipeline {
     Phase3Pipeline::from_options(
@@ -38,7 +25,13 @@ fn cuda_f32_pipeline() -> Phase3Pipeline {
 
 fn live_oracle_clone_prompt() -> (I64Tensor2, String) {
     let value: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string("H:/omnivoice/artifacts/live_oracles/clone_prompt.json").unwrap(),
+        &std::fs::read_to_string(
+            support::repo_root()
+                .join("artifacts")
+                .join("live_oracles")
+                .join("clone_prompt.json"),
+        )
+        .unwrap(),
     )
     .unwrap();
     let dims = value["dims"].as_array().unwrap();

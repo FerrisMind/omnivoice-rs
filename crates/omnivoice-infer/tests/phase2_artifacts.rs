@@ -1,3 +1,5 @@
+mod support;
+
 use std::{
     collections::HashMap,
     fs,
@@ -10,10 +12,7 @@ use omnivoice_infer::{
     artifacts::{ReferenceArtifactBundle, RuntimeArtifacts},
     frontend::Frontend,
 };
-
-fn model_root() -> &'static str {
-    "H:/omnivoice/model"
-}
+use support::model_root;
 
 #[test]
 fn runtime_manifest_matches_real_model_layout() {

@@ -1,17 +1,16 @@
 #![cfg(feature = "cuda")]
 
+mod support;
+
 use omnivoice_infer::{
     gpu_lock::acquire_gpu_test_lock,
     pipeline::Phase3Pipeline,
     runtime::{DTypeSpec, DeviceSpec, RuntimeOptions},
 };
+use support::{deterministic_reference_root, model_root};
 
-fn model_root() -> &'static str {
-    "H:/omnivoice/model"
-}
-
-fn reference_root() -> &'static str {
-    "H:/omnivoice/artifacts/python_reference_stage7_cuda_f32_dense"
+fn reference_root() -> std::path::PathBuf {
+    deterministic_reference_root()
 }
 
 fn cuda_f32_pipeline() -> Phase3Pipeline {

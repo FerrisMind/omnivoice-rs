@@ -1,5 +1,7 @@
 #![cfg(feature = "phase6-tests")]
 
+mod support;
+
 use omnivoice_infer::{
     artifacts::ReferenceArtifactBundle,
     contracts::GeneratedTokens,
@@ -7,18 +9,15 @@ use omnivoice_infer::{
     pipeline::Phase3Pipeline,
     runtime::{DTypeSpec, DeviceSpec, RuntimeOptions},
 };
+use support::{model_root, stage0_cpu_strict_reference_root, stage0_reference_root};
 
-fn model_root() -> &'static str {
-    "H:/omnivoice/model"
-}
-
-fn cpu_reference_root() -> &'static str {
-    "H:/omnivoice/artifacts/python_reference_stage0_deterministic_cpu_strict"
+fn cpu_reference_root() -> std::path::PathBuf {
+    stage0_cpu_strict_reference_root()
 }
 
 #[cfg(feature = "cuda")]
-fn gpu_reference_root() -> &'static str {
-    "H:/omnivoice/artifacts/python_reference_stage0_deterministic"
+fn gpu_reference_root() -> std::path::PathBuf {
+    stage0_reference_root()
 }
 
 #[cfg(feature = "cuda")]

@@ -184,6 +184,17 @@ impl AudioTokenizerRuntimePlan {
         samples: &[f32],
         sample_rate: u32,
     ) -> Result<crate::contracts::I64Tensor2> {
+        let codes = self.encode_waveform_device(samples, sample_rate)?;
+        let (quantizers, steps) = codes.dims2()?;
+        let data = codes
+            .to_device(&Device::Cpu)?
+            .to_dtype(DType::I64)?
+            .flatten_all()?
+            .to_vec1::<i64>()?;
+        crate::contracts::I64Tensor2::new((quantizers, steps), data)
+    }
+
+    pub fn encode_waveform_device(&self, samples: &[f32], sample_rate: u32) -> Result<Tensor> {
         if sample_rate != self.config.sample_rate {
             return Err(OmniVoiceError::InvalidRequest(format!(
                 "audio tokenizer expects {} Hz input, got {sample_rate}",
@@ -209,13 +220,7 @@ impl AudioTokenizerRuntimePlan {
         let codes = self
             .model()?
             .encode(&waveform, semantic_waveform.as_ref())?;
-        let (_, quantizers, steps) = codes.dims3()?;
-        let data = codes
-            .to_device(&Device::Cpu)?
-            .to_dtype(DType::I64)?
-            .flatten_all()?
-            .to_vec1::<i64>()?;
-        crate::contracts::I64Tensor2::new((quantizers, steps), data)
+        Ok(codes.i(0)?.to_dtype(DType::I64)?)
     }
 
     fn model(&self) -> Result<&AudioTokenizerModel> {

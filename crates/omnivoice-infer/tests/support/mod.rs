@@ -1,14 +1,20 @@
+#![allow(dead_code)]
+
 use std::path::PathBuf;
 
 use omnivoice_infer::contracts::{DecodedAudio, I64Tensor2};
 
 pub fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf()
+    std::env::var_os("OMNIVOICE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .to_path_buf()
+        })
 }
 
 pub fn model_root() -> PathBuf {
@@ -23,6 +29,18 @@ pub fn deterministic_reference_root() -> PathBuf {
     repo_root()
         .join("artifacts")
         .join("python_reference_stage7_cuda_f32_dense")
+}
+
+pub fn stage0_reference_root() -> PathBuf {
+    repo_root()
+        .join("artifacts")
+        .join("python_reference_stage0_deterministic")
+}
+
+pub fn stage0_cpu_strict_reference_root() -> PathBuf {
+    repo_root()
+        .join("artifacts")
+        .join("python_reference_stage0_deterministic_cpu_strict")
 }
 
 pub fn ref_audio_path() -> PathBuf {

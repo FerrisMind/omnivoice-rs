@@ -240,6 +240,8 @@ fn phase10_cli_infer_cuda_auto_device_dtype_succeeds() {
     assert!(stdout.contains("command=infer"));
     assert!(stdout.contains("device=Auto"));
     assert!(stdout.contains("dtype=Auto"));
+    assert!(stdout.contains("resolved_device=Cuda(0)"));
+    assert!(stdout.contains("resolved_dtype=F16"));
 
     let actual = DecodedAudio::read_wav(&output_path).unwrap();
     let expected = case.load_final_audio().unwrap();
@@ -313,6 +315,8 @@ fn phase10_cli_infer_batch_cuda_generates_expected_outputs() {
     assert!(stdout.contains("phase_marker=omnivoice-phase10"));
     assert!(stdout.contains("command=infer-batch"));
     assert!(stdout.contains("written_files=2"));
+    assert!(stdout.contains("resolved_workers=1"));
+    assert!(stdout.contains("resolved_worker_devices=Cuda(0)"));
 
     let expected = case.load_final_audio().unwrap();
     let actual_a = DecodedAudio::read_wav(res_dir.join("sample_a.wav")).unwrap();

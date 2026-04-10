@@ -1,3 +1,5 @@
+mod support;
+
 use std::path::Path;
 
 use omnivoice_infer::{
@@ -9,14 +11,7 @@ use omnivoice_infer::{
     stage0_model::Stage0WeightLayout,
     stage1_decoder::Stage1DecoderBundle,
 };
-
-fn model_root() -> &'static str {
-    "H:/omnivoice/model"
-}
-
-fn reference_root() -> &'static str {
-    "H:/omnivoice/artifacts/python_reference"
-}
+use support::{model_root, reference_root};
 
 #[test]
 fn loads_debug_case_contract() {

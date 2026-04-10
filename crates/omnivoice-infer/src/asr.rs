@@ -4,13 +4,16 @@ use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_transformers::models::whisper::{
     self, model::Whisper as WhisperModel, quantized_model::Whisper as QuantizedWhisperModel, Config,
 };
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{
+    api::{sync::Api, Siblings},
+    Repo, RepoType,
+};
 use tokenizers::Tokenizer;
 
 use crate::error::{OmniVoiceError, Result};
 
-const DEFAULT_LOCAL_ASR_MODEL: &str = "H:/omnivoice/model/whisper";
-const DEFAULT_HF_ASR_MODEL: &str = "openai/whisper-large-v3-turbo";
+const DEFAULT_LOCAL_ASR_MODEL: &str = "model/whisper";
+const DEFAULT_HF_ASR_MODEL: &str = "oxide-lab/whisper-large-v3-turbo-GGUF";
 const MEL_FILTERS_80: &[u8] = include_bytes!("../../../tools/whisper/melfilters.bytes");
 const MEL_FILTERS_128: &[u8] = include_bytes!("../../../tools/whisper/melfilters128.bytes");
 
@@ -77,13 +80,14 @@ pub struct WhisperAsr {
 
 impl WhisperAsr {
     pub fn load(model_id_or_path: &str, device: Device) -> Result<Self> {
+        let default_local_model = crate::paths::model_root().join("whisper");
         let requested = if model_id_or_path.is_empty() {
-            DEFAULT_LOCAL_ASR_MODEL
+            default_local_model.display().to_string()
         } else {
-            model_id_or_path
+            model_id_or_path.to_string()
         };
         let (config_path, tokenizer_path, weights_path, quantized) =
-            resolve_model_files(requested)?;
+            resolve_model_files(&requested)?;
         let config: Config = serde_json::from_str(&std::fs::read_to_string(config_path)?)?;
         let tokenizer = Tokenizer::from_file(tokenizer_path).map_err(OmniVoiceError::Tokenizer)?;
         let model = if quantized {
@@ -173,8 +177,9 @@ pub fn default_local_asr_model_path() -> &'static str {
 }
 
 pub fn default_asr_model_spec() -> String {
-    if Path::new(DEFAULT_LOCAL_ASR_MODEL).exists() {
-        DEFAULT_LOCAL_ASR_MODEL.to_string()
+    let local_path = crate::paths::model_root().join("whisper");
+    if local_path.exists() {
+        local_path.display().to_string()
     } else {
         DEFAULT_HF_ASR_MODEL.to_string()
     }
@@ -183,11 +188,7 @@ pub fn default_asr_model_spec() -> String {
 fn resolve_model_files(model_id_or_path: &str) -> Result<(PathBuf, PathBuf, PathBuf, bool)> {
     let local_path = Path::new(model_id_or_path);
     if local_path.exists() {
-        let gguf = local_path
-            .read_dir()?
-            .filter_map(|entry| entry.ok().map(|item| item.path()))
-            .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("gguf"));
-        if let Some(weights) = gguf {
+        if let Some(weights) = find_local_whisper_weights(local_path)? {
             return Ok((
                 local_path.join("config.json"),
                 local_path.join("tokenizer.json"),
@@ -208,16 +209,99 @@ fn resolve_model_files(model_id_or_path: &str) -> Result<(PathBuf, PathBuf, Path
         RepoType::Model,
         "main".to_string(),
     ));
+    let repo_info = repo
+        .info()
+        .map_err(|error| OmniVoiceError::InvalidData(error.to_string()))?;
+    let config_name =
+        find_whisper_repo_file(&repo_info.siblings, |path| path.ends_with("config.json"))?;
+    let tokenizer_name =
+        find_whisper_repo_file(&repo_info.siblings, |path| path.ends_with("tokenizer.json"))?;
+    let weights_name = find_remote_whisper_weights(&repo_info.siblings)?;
     let config = repo
-        .get("config.json")
+        .get(&config_name)
         .map_err(|error| OmniVoiceError::InvalidData(error.to_string()))?;
     let tokenizer = repo
-        .get("tokenizer.json")
+        .get(&tokenizer_name)
         .map_err(|error| OmniVoiceError::InvalidData(error.to_string()))?;
     let weights = repo
-        .get("model.safetensors")
+        .get(&weights_name)
         .map_err(|error| OmniVoiceError::InvalidData(error.to_string()))?;
-    Ok((config, tokenizer, weights, false))
+    Ok((config, tokenizer, weights, true))
+}
+
+fn find_whisper_repo_file(
+    siblings: &[Siblings],
+    predicate: impl Fn(&str) -> bool,
+) -> Result<String> {
+    siblings
+        .iter()
+        .map(|sibling| sibling.rfilename.as_str())
+        .find(|path| predicate(path))
+        .map(str::to_string)
+        .ok_or_else(|| {
+            OmniVoiceError::InvalidData(
+                "remote Whisper repo is missing the required q4_0/config/tokenizer files"
+                    .to_string(),
+            )
+        })
+}
+
+fn find_local_whisper_weights(local_path: &Path) -> Result<Option<PathBuf>> {
+    let mut candidates = local_path
+        .read_dir()?
+        .filter_map(|entry| entry.ok().map(|item| item.path()))
+        .filter(|path| is_supported_whisper_gguf(path.to_string_lossy().as_ref()))
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| compare_whisper_weight_paths(left.as_path(), right.as_path()));
+    Ok(candidates.into_iter().next())
+}
+
+fn find_remote_whisper_weights(siblings: &[Siblings]) -> Result<String> {
+    let mut candidates = siblings
+        .iter()
+        .map(|sibling| sibling.rfilename.as_str())
+        .filter(|path| is_supported_whisper_gguf(path))
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| compare_whisper_weight_names(left, right));
+    candidates
+        .into_iter()
+        .next()
+        .map(str::to_string)
+        .ok_or_else(|| {
+            OmniVoiceError::InvalidData(
+                "remote Whisper repo is missing the required gguf/config/tokenizer files"
+                    .to_string(),
+            )
+        })
+}
+
+fn is_supported_whisper_gguf(path: &str) -> bool {
+    let normalized = path.to_ascii_lowercase().replace('\\', "/");
+    normalized.ends_with(".gguf") && !normalized.contains("whisper.cpp/")
+}
+
+fn compare_whisper_weight_paths(left: &Path, right: &Path) -> std::cmp::Ordering {
+    compare_whisper_weight_names(
+        left.file_name().and_then(|name| name.to_str()).unwrap_or_default(),
+        right.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default(),
+    )
+}
+
+fn compare_whisper_weight_names(left: &str, right: &str) -> std::cmp::Ordering {
+    whisper_weight_rank(left)
+        .cmp(&whisper_weight_rank(right))
+        .then_with(|| left.cmp(right))
+}
+
+fn whisper_weight_rank(path: &str) -> usize {
+    let normalized = path.to_ascii_lowercase();
+    if normalized.contains("q4_0") {
+        0
+    } else {
+        1
+    }
 }
 
 fn load_mel_filters(num_mel_bins: usize) -> Result<Vec<f32>> {
@@ -250,4 +334,105 @@ fn mmap_var_builder(
 ) -> Result<candle_nn::VarBuilder<'static>> {
     let paths = [weights_path];
     Ok(unsafe { candle_nn::VarBuilder::from_mmaped_safetensors(&paths, dtype, device)? })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{find_remote_whisper_weights, resolve_model_files};
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+    use hf_hub::api::Siblings;
+
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "omnivoice-asr-tests-{name}-{}-{nanos}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn local_whisper_selection_accepts_non_q4_0_gguf_when_needed() {
+        let root = unique_temp_dir("gguf-fallback");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("config.json"), "{}").unwrap();
+        fs::write(root.join("tokenizer.json"), "{}").unwrap();
+        fs::write(root.join("weights-q4_1.gguf"), b"gguf").unwrap();
+
+        let (_, _, weights, quantized) =
+            resolve_model_files(root.to_str().unwrap()).unwrap();
+
+        assert!(quantized);
+        assert_eq!(weights.file_name().unwrap(), "weights-q4_1.gguf");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_whisper_selection_prefers_q4_0_gguf_when_present() {
+        let root = unique_temp_dir("gguf-prefer-q4_0");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("config.json"), "{}").unwrap();
+        fs::write(root.join("tokenizer.json"), "{}").unwrap();
+        fs::write(root.join("weights-q8_0.gguf"), b"gguf").unwrap();
+        fs::write(root.join("weights-q4_0.gguf"), b"gguf").unwrap();
+
+        let (_, _, weights, quantized) =
+            resolve_model_files(root.to_str().unwrap()).unwrap();
+
+        assert!(quantized);
+        assert_eq!(weights.file_name().unwrap(), "weights-q4_0.gguf");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_whisper_selection_falls_back_to_safetensors_without_gguf() {
+        let root = unique_temp_dir("safetensors-fallback");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("config.json"), "{}").unwrap();
+        fs::write(root.join("tokenizer.json"), "{}").unwrap();
+        fs::write(root.join("model.safetensors"), b"stub").unwrap();
+
+        let (_, _, weights, quantized) =
+            resolve_model_files(root.to_str().unwrap()).unwrap();
+
+        assert!(!quantized);
+        assert_eq!(weights.file_name().unwrap(), "model.safetensors");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn remote_whisper_selection_prefers_q4_0_then_other_gguf() {
+        let siblings = vec![
+            Siblings {
+                rfilename: "tokenizer.json".to_string(),
+            },
+            Siblings {
+                rfilename: "weights-q8_0.gguf".to_string(),
+            },
+            Siblings {
+                rfilename: "weights-q4_0.gguf".to_string(),
+            },
+        ];
+        assert_eq!(
+            find_remote_whisper_weights(&siblings).unwrap(),
+            "weights-q4_0.gguf"
+        );
+
+        let fallback_siblings = vec![Siblings {
+            rfilename: "weights-q8_0.gguf".to_string(),
+        }];
+        assert_eq!(
+            find_remote_whisper_weights(&fallback_siblings).unwrap(),
+            "weights-q8_0.gguf"
+        );
+    }
 }
