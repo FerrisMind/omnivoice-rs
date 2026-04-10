@@ -865,7 +865,15 @@ fn apply_step_updates_device(
     let flat_predicted = predicted_tokens.flatten_all()?;
     let update_values = flat_predicted.gather(&top_indices, 0)?;
     let flat_current = current_tokens.flatten_all()?;
-    let updated = flat_current.scatter(&top_indices, &update_values, 0)?;
+    let updated = if current_tokens.device().is_metal() && current_tokens.dtype() == DType::I64 {
+        let flat_current = flat_current.to_dtype(DType::U32)?;
+        let update_values = update_values.to_dtype(DType::U32)?;
+        flat_current
+            .scatter(&top_indices, &update_values, 0)?
+            .to_dtype(DType::I64)?
+    } else {
+        flat_current.scatter(&top_indices, &update_values, 0)?
+    };
     updated
         .reshape(current_tokens.shape().dims())
         .map_err(Into::into)
