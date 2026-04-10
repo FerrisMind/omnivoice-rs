@@ -72,6 +72,40 @@ fn phase10_metal_design_matches_reference_audio() {
 }
 
 #[test]
+fn phase10_metal_design_live_audio_matches_token_decode_path() {
+    let _guard = acquire_gpu_test_lock().unwrap();
+    let bundle = ReferenceArtifactBundle::from_root(deterministic_reference_root()).unwrap();
+    let case = bundle.case_by_id("det_design_en_british").unwrap();
+    let request = case.build_generation_request().unwrap();
+    let pipeline = metal_f32_pipeline();
+
+    let actual = pipeline.generate(&request).unwrap();
+    let generated = pipeline.generate_tokens(&request).unwrap();
+    let expected = generated
+        .iter()
+        .map(|tokens| {
+            pipeline.stage1().decode_final(
+                tokens,
+                None,
+                request.generation_config.postprocess_output,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(actual.len(), 1);
+    assert_eq!(expected.len(), 1);
+    assert_audio_matches_reference_with_frame_tolerance(
+        &actual[0],
+        &expected[0],
+        0,
+        1.0e-6,
+        1.0e-6,
+        1.0e-5,
+    );
+}
+
+#[test]
 fn phase10_metal_clone_with_asr_succeeds() {
     let _guard = acquire_gpu_test_lock().unwrap();
     let pipeline = metal_f32_pipeline();
@@ -175,6 +209,67 @@ fn phase10_metal_batch_request_preserves_order() {
         6.0e-3,
         3.0e-2,
         0.7,
+    );
+}
+
+#[test]
+fn phase10_metal_mixed_batch_live_audio_matches_token_decode_path() {
+    let _guard = acquire_gpu_test_lock().unwrap();
+    let bundle = ReferenceArtifactBundle::from_root(deterministic_reference_root()).unwrap();
+    let auto_case = bundle.case_by_id("det_auto_en_short").unwrap();
+    let auto_request = auto_case.build_generation_request().unwrap();
+    let mut long_request = auto_case.build_generation_request().unwrap();
+    long_request.durations = vec![Some(31.0)];
+    let pipeline = metal_f32_pipeline();
+
+    let mut request = GenerationRequest::new_text_only(auto_request.texts[0].clone());
+    request.texts = vec![auto_request.texts[0].clone(), long_request.texts[0].clone()];
+    request.languages = vec![
+        auto_request.languages[0].clone(),
+        long_request.languages[0].clone(),
+    ];
+    request.instructs = vec![
+        auto_request.instructs[0].clone(),
+        long_request.instructs[0].clone(),
+    ];
+    request.ref_texts = vec![None, None];
+    request.ref_audios = vec![None, None];
+    request.voice_clone_prompts = vec![None, None];
+    request.speeds = vec![auto_request.speeds[0], long_request.speeds[0]];
+    request.durations = vec![auto_request.durations[0], long_request.durations[0]];
+    request.generation_config = auto_request.generation_config.clone();
+
+    let actual = pipeline.generate(&request).unwrap();
+    let generated = pipeline.generate_tokens(&request).unwrap();
+    let expected = generated
+        .iter()
+        .map(|tokens| {
+            pipeline.stage1().decode_final(
+                tokens,
+                None,
+                request.generation_config.postprocess_output,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    assert_eq!(actual.len(), 2);
+    assert_eq!(expected.len(), 2);
+    assert_audio_matches_reference_with_frame_tolerance(
+        &actual[0],
+        &expected[0],
+        0,
+        1.0e-6,
+        1.0e-6,
+        1.0e-5,
+    );
+    assert_audio_matches_reference_with_frame_tolerance(
+        &actual[1],
+        &expected[1],
+        0,
+        1.0e-6,
+        1.0e-6,
+        1.0e-5,
     );
 }
 

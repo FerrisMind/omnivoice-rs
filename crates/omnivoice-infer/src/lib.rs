@@ -19,7 +19,7 @@ pub mod stage0_qwen3;
 pub mod stage1_decoder;
 pub mod stage1_model;
 
-pub use contracts::{BoolTensor2, BoolTensor4};
+pub use contracts::{BoolTensor2, BoolTensor4, GeneratedAudioResult, GenerationUsage};
 pub use error::{OmniVoiceError, Result};
 pub use runtime::{DTypeSpec, DeviceSpec, RuntimeOptions};
 

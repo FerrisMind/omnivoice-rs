@@ -1,8 +1,8 @@
 mod support;
 
 use omnivoice_infer::{
-    artifacts::ReferenceArtifactBundle, gpu_lock::acquire_gpu_test_lock, pipeline::Phase3Pipeline,
-    runtime::RuntimeOptions,
+    artifacts::ReferenceArtifactBundle, contracts::GeneratedTokens,
+    gpu_lock::acquire_gpu_test_lock, pipeline::Phase3Pipeline, runtime::RuntimeOptions,
 };
 use support::{model_root, reference_root};
 
@@ -137,6 +137,90 @@ fn chunked_stage1_final_matches_reference_waveform() {
     assert!(metrics.mae < 1.0e-4, "{metrics:?}");
     assert!(metrics.rmse < 2.0e-4, "{metrics:?}");
     assert!(metrics.max_abs < 3.0e-3, "{metrics:?}");
+}
+
+#[test]
+fn design_stage1_tensor_decode_matches_generated_tokens_decode() {
+    let _guard = acquire_gpu_test_lock().unwrap();
+    let pipeline = Phase3Pipeline::from_options(RuntimeOptions::new(model_root())).unwrap();
+    let bundle = ReferenceArtifactBundle::from_root(reference_root()).unwrap();
+    let case = bundle.case_by_id("design_en_british").unwrap();
+    let metadata = case.load_prepared_metadata().unwrap();
+    let GeneratedTokens::Single(tokens) = case.load_generated_tokens().unwrap() else {
+        panic!("expected single token tensor");
+    };
+
+    let prepared = pipeline
+        .stage1()
+        .prepare_decode(&tokens, metadata.ref_rms)
+        .unwrap();
+    let actual = pipeline
+        .stage1()
+        .decode_final_tensor(
+            &prepared.tokens,
+            metadata.ref_rms,
+            metadata.postprocess_output,
+        )
+        .unwrap();
+    let expected = pipeline
+        .stage1()
+        .decode_final(
+            &GeneratedTokens::Single(tokens),
+            metadata.ref_rms,
+            metadata.postprocess_output,
+        )
+        .unwrap();
+    let metrics = actual.parity_metrics(&expected).unwrap();
+
+    assert_eq!(metrics.sample_rate, 24_000);
+    assert_eq!(metrics.frame_count, expected.frame_count());
+    assert!(metrics.mae < 1.0e-6, "{metrics:?}");
+    assert!(metrics.rmse < 1.0e-6, "{metrics:?}");
+    assert!(metrics.max_abs < 1.0e-5, "{metrics:?}");
+}
+
+#[test]
+fn chunked_stage1_tensor_decode_matches_generated_tokens_decode() {
+    let _guard = acquire_gpu_test_lock().unwrap();
+    let pipeline = Phase3Pipeline::from_options(RuntimeOptions::new(model_root())).unwrap();
+    let bundle = ReferenceArtifactBundle::from_root(reference_root()).unwrap();
+    let case = bundle.case_by_id("auto_long_chunked").unwrap();
+    let metadata = case.load_prepared_metadata().unwrap();
+    let GeneratedTokens::Chunked(chunks) = case.load_generated_tokens().unwrap() else {
+        panic!("expected chunked token tensors");
+    };
+
+    let prepared_chunks = chunks
+        .iter()
+        .map(|chunk| pipeline.stage1().prepare_decode(chunk, metadata.ref_rms))
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let actual = pipeline
+        .stage1()
+        .decode_final_tensor_chunks(
+            &prepared_chunks
+                .iter()
+                .map(|item| item.tokens.clone())
+                .collect::<Vec<_>>(),
+            metadata.ref_rms,
+            metadata.postprocess_output,
+        )
+        .unwrap();
+    let expected = pipeline
+        .stage1()
+        .decode_final(
+            &GeneratedTokens::Chunked(chunks),
+            metadata.ref_rms,
+            metadata.postprocess_output,
+        )
+        .unwrap();
+    let metrics = actual.parity_metrics(&expected).unwrap();
+
+    assert_eq!(metrics.sample_rate, 24_000);
+    assert_eq!(metrics.frame_count, expected.frame_count());
+    assert!(metrics.mae < 1.0e-6, "{metrics:?}");
+    assert!(metrics.rmse < 1.0e-6, "{metrics:?}");
+    assert!(metrics.max_abs < 1.0e-5, "{metrics:?}");
 }
 
 #[cfg(feature = "cuda")]

@@ -1,4 +1,8 @@
-use std::{fs::File, io::ErrorKind, path::Path};
+use std::{
+    fs::File,
+    io::{Cursor, ErrorKind, Read, Seek},
+    path::Path,
+};
 
 use symphonia::core::{
     audio::SampleBuffer, codecs::DecoderOptions, errors::Error as SymphoniaError,
@@ -75,6 +79,11 @@ impl ReferenceAudioProcessor {
         }
 
         mono = trim_to_hop_multiple(&mono, self.hop_length);
+        if mono.is_empty() {
+            return Err(OmniVoiceError::InvalidRequest(
+                "reference audio is too short after hop alignment".to_string(),
+            ));
+        }
         let ref_text = ref_text.map(|text| {
             if preprocess_prompt {
                 add_punctuation(text)
@@ -115,6 +124,26 @@ pub fn load_audio_file(path: impl AsRef<Path>) -> Result<WaveformInput> {
     }
 }
 
+pub fn load_audio_bytes(bytes: &[u8], extension_hint: Option<&str>) -> Result<WaveformInput> {
+    match load_audio_bytes_symphonia(bytes, extension_hint) {
+        Ok(waveform) => Ok(waveform),
+        Err(primary) => {
+            let is_wav = extension_hint
+                .map(|value| value.eq_ignore_ascii_case("wav"))
+                .unwrap_or(false);
+            if is_wav {
+                load_wave_reader(Cursor::new(bytes.to_vec())).map_err(|fallback| {
+                    OmniVoiceError::InvalidData(format!(
+                        "failed to decode audio bytes via symphonia ({primary}); wav fallback failed: {fallback}",
+                    ))
+                })
+            } else {
+                Err(primary)
+            }
+        }
+    }
+}
+
 fn load_audio_file_symphonia(path: &Path) -> Result<WaveformInput> {
     let file = File::open(path)?;
     let media_source = MediaSourceStream::new(Box::new(file), Default::default());
@@ -136,10 +165,42 @@ fn load_audio_file_symphonia(path: &Path) -> Result<WaveformInput> {
                 path.display()
             ))
         })?;
+    load_audio_from_probed(path.display().to_string(), probed)
+}
+
+fn load_audio_bytes_symphonia(bytes: &[u8], extension_hint: Option<&str>) -> Result<WaveformInput> {
+    let cursor = Cursor::new(bytes.to_vec());
+    let media_source = MediaSourceStream::new(Box::new(cursor), Default::default());
+    let mut hint = Hint::new();
+    if let Some(extension) = extension_hint {
+        hint.with_extension(extension);
+    }
+    let label = extension_hint
+        .map(|extension| format!("memory.{extension}"))
+        .unwrap_or_else(|| "memory.audio".to_string());
+    let probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            media_source,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .map_err(|error| {
+            OmniVoiceError::InvalidData(format!(
+                "symphonia could not probe in-memory audio payload {label}: {error}",
+            ))
+        })?;
+    load_audio_from_probed(label, probed)
+}
+
+fn load_audio_from_probed(
+    label: String,
+    probed: symphonia::core::probe::ProbeResult,
+) -> Result<WaveformInput> {
     let mut format = probed.format;
-    let track = format.default_track().ok_or_else(|| {
-        OmniVoiceError::InvalidData(format!("no default audio track in {}", path.display()))
-    })?;
+    let track = format
+        .default_track()
+        .ok_or_else(|| OmniVoiceError::InvalidData(format!("no default audio track in {label}")))?;
     let track_id = track.id;
     let mut sample_rate = track.codec_params.sample_rate;
     let mut channels = track.codec_params.channels.map(|value| value.count());
@@ -147,8 +208,7 @@ fn load_audio_file_symphonia(path: &Path) -> Result<WaveformInput> {
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|error| {
             OmniVoiceError::InvalidData(format!(
-                "symphonia could not create decoder for {}: {error}",
-                path.display()
+                "symphonia could not create decoder for {label}: {error}",
             ))
         })?;
     let mut samples = Vec::new();
@@ -161,14 +221,12 @@ fn load_audio_file_symphonia(path: &Path) -> Result<WaveformInput> {
             }
             Err(SymphoniaError::ResetRequired) => {
                 return Err(OmniVoiceError::Unsupported(format!(
-                    "symphonia stream reset is unsupported for {}",
-                    path.display()
+                    "symphonia stream reset is unsupported for {label}",
                 )));
             }
             Err(error) => {
                 return Err(OmniVoiceError::InvalidData(format!(
-                    "symphonia failed reading packet from {}: {error}",
-                    path.display()
+                    "symphonia failed reading packet from {label}: {error}",
                 )));
             }
         };
@@ -184,20 +242,17 @@ fn load_audio_file_symphonia(path: &Path) -> Result<WaveformInput> {
             }
             Err(SymphoniaError::DecodeError(error)) => {
                 return Err(OmniVoiceError::InvalidData(format!(
-                    "symphonia decode error for {}: {error}",
-                    path.display()
+                    "symphonia decode error for {label}: {error}",
                 )));
             }
             Err(SymphoniaError::ResetRequired) => {
                 return Err(OmniVoiceError::Unsupported(format!(
-                    "symphonia decoder reset is unsupported for {}",
-                    path.display()
+                    "symphonia decoder reset is unsupported for {label}",
                 )));
             }
             Err(error) => {
                 return Err(OmniVoiceError::InvalidData(format!(
-                    "symphonia failed decoding {}: {error}",
-                    path.display()
+                    "symphonia failed decoding {label}: {error}",
                 )));
             }
         };
@@ -210,19 +265,15 @@ fn load_audio_file_symphonia(path: &Path) -> Result<WaveformInput> {
     }
 
     let sample_rate = sample_rate.ok_or_else(|| {
-        OmniVoiceError::InvalidData(format!(
-            "missing sample rate metadata in {}",
-            path.display()
-        ))
+        OmniVoiceError::InvalidData(format!("missing sample rate metadata in {label}"))
     })?;
     let channels = channels.ok_or_else(|| {
-        OmniVoiceError::InvalidData(format!("missing channel metadata in {}", path.display()))
+        OmniVoiceError::InvalidData(format!("missing channel metadata in {label}"))
     })?;
 
     if samples.is_empty() {
         return Err(OmniVoiceError::InvalidData(format!(
-            "decoded audio stream is empty in {}",
-            path.display()
+            "decoded audio stream is empty in {label}",
         )));
     }
 
@@ -235,7 +286,15 @@ fn load_audio_file_symphonia(path: &Path) -> Result<WaveformInput> {
 
 pub fn load_wave_file(path: impl AsRef<Path>) -> Result<WaveformInput> {
     let path = path.as_ref();
-    let mut reader = hound::WavReader::open(path)?;
+    let file = File::open(path)?;
+    load_wave_reader(file)
+}
+
+fn load_wave_reader<R>(reader: R) -> Result<WaveformInput>
+where
+    R: Read + Seek,
+{
+    let mut reader = hound::WavReader::new(reader)?;
     let spec = reader.spec();
     let samples = match spec.sample_format {
         hound::SampleFormat::Float => reader

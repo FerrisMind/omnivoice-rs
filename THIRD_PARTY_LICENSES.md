@@ -11,6 +11,7 @@ This file is not a full machine-generated dependency inventory. It is a focused 
 | OmniVoice | Behavioral source of truth for inference, prompt preparation, chunking, and postprocess logic | https://github.com/k2-fsa/OmniVoice | Apache-2.0 |
 | candle | Rust ML runtime used by this workspace; local workspace also references Whisper mel-filter assets from Candle examples | https://github.com/huggingface/candle | Apache-2.0 or MIT |
 | mistral.rs | Crates.io dependencies from the mistral.rs ecosystem are used for audio/quantization support (`mistralrs-quant`, optional `mistralrs-audio`) | https://github.com/EricLBuehler/mistral.rs | MIT |
+| shine-rs | MP3 encoding for `omnivoice-server` OpenAI-compatible speech responses | https://github.com/wshon/shine-rs | LGPL-2.0 |
 
 ## Notes
 
@@ -118,3 +119,18 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## shine-rs
+
+Upstream project: `wshon/shine-rs`
+
+License: LGPL-2.0
+
+Relevant use in this repository:
+
+- `omnivoice-server` MP3 encoding for `/v1/audio/speech`
+
+License reference:
+
+- upstream crate metadata declares `LGPL-2.0`
+- downstream binary distribution should preserve the corresponding license notice and compliance obligations for the encoder dependency

@@ -8,8 +8,9 @@ use crate::{
     audio_input::ReferenceAudioProcessor,
     audio_tokenizer::AudioTokenizerRuntimePlan,
     contracts::{
-        DecodedAudio, GeneratedTokens, GenerationRequest, PreparedInferenceBatch, PreparedPrompt,
-        PreparedPromptSequence, ReferenceAudioInput, VoiceClonePrompt, WaveformInput,
+        DecodedAudio, GeneratedAudioResult, GeneratedTokens, GenerationRequest, GenerationUsage,
+        PreparedInferenceBatch, PreparedPrompt, PreparedPromptSequence, ReferenceAudioInput,
+        VoiceClonePrompt, WaveformInput,
     },
     error::Result,
     frontend::{
@@ -19,7 +20,9 @@ use crate::{
     reference_prompt::{ReferencePromptBuilder, ReferencePromptOptions},
     runtime::RuntimeOptions,
     stage0_loop::pack_cfg_batch,
-    stage0_model::{Stage0DebugRun, Stage0DeterministicConfig, Stage0RuntimePlan},
+    stage0_model::{
+        tensor_to_i64_tensor2, Stage0DebugRun, Stage0DeterministicConfig, Stage0RuntimePlan,
+    },
     stage1_decoder::{PreparedStage1Decode, Stage1DebugRun, Stage1RuntimePlan},
 };
 
@@ -191,14 +194,30 @@ impl Phase3Pipeline {
     }
 
     pub fn generate(&self, request: &GenerationRequest) -> Result<Vec<DecodedAudio>> {
+        Ok(self
+            .generate_with_usage(request)?
+            .into_iter()
+            .map(|result| result.audio)
+            .collect())
+    }
+
+    pub fn generate_with_usage(
+        &self,
+        request: &GenerationRequest,
+    ) -> Result<Vec<GeneratedAudioResult>> {
         let materialized = self.materialize_device_request(request)?;
-        let task = self
-            .frontend
-            .build_task_with_device_prompts(
-                &materialized.request,
-                &materialized.device_voice_clone_prompts,
-            )?;
-        self.generate_audio_from_device_task(&task)
+        let task = self.frontend.build_task_with_device_prompts(
+            &materialized.request,
+            &materialized.device_voice_clone_prompts,
+        )?;
+        let usage = self.estimate_generation_usage(&materialized.request, &task)?;
+        let audio = self.generate_audio_from_device_task(&task)?;
+
+        Ok(audio
+            .into_iter()
+            .zip(usage)
+            .map(|(audio, usage)| GeneratedAudioResult { audio, usage })
+            .collect())
     }
 
     pub fn generate_stage0_from_reference_case(
@@ -534,24 +553,26 @@ impl Phase3Pipeline {
             .into_iter()
             .enumerate()
             .map(|(index, result)| {
-                match result.ok_or_else(|| {
+                let generated = match result.ok_or_else(|| {
                     crate::error::OmniVoiceError::InvalidData(
                         "live generation did not produce a result for one of the items".to_string(),
                     )
                 })? {
-                    GeneratedTensorTokens::Single(tokens) => self.stage1.decode_final_tensor(
-                        &tokens,
-                        task.ref_rms[index],
-                        task.generation_config.postprocess_output,
-                    ),
-                    GeneratedTensorTokens::Chunked(chunks) => {
-                        self.stage1.decode_final_tensor_chunks(
-                            &chunks,
-                            task.ref_rms[index],
-                            task.generation_config.postprocess_output,
-                        )
+                    GeneratedTensorTokens::Single(tokens) => {
+                        GeneratedTokens::Single(tensor_to_i64_tensor2(&tokens)?)
                     }
-                }
+                    GeneratedTensorTokens::Chunked(chunks) => GeneratedTokens::Chunked(
+                        chunks
+                            .iter()
+                            .map(tensor_to_i64_tensor2)
+                            .collect::<Result<Vec<_>>>()?,
+                    ),
+                };
+                self.stage1.decode_final(
+                    &generated,
+                    task.ref_rms[index],
+                    task.generation_config.postprocess_output,
+                )
             })
             .collect()
     }
@@ -589,10 +610,7 @@ impl Phase3Pipeline {
         Ok(generation.tokens)
     }
 
-    fn generate_iterative_task_device(
-        &self,
-        task: &DeviceGenerationTask,
-    ) -> Result<Vec<Tensor>> {
+    fn generate_iterative_task_device(&self, task: &DeviceGenerationTask) -> Result<Vec<Tensor>> {
         let mut prepared = Vec::with_capacity(task.batch_size());
         for index in 0..task.batch_size() {
             let prompt = self
@@ -1008,6 +1026,43 @@ impl Phase3Pipeline {
         self.stage0
             .prepare_batch(&batched, &cond_lens, &target_lens)
     }
+
+    fn estimate_generation_usage(
+        &self,
+        request: &GenerationRequest,
+        task: &DeviceGenerationTask,
+    ) -> Result<Vec<GenerationUsage>> {
+        let mut usage = Vec::with_capacity(task.batch_size());
+        for index in 0..task.batch_size() {
+            let mut input_tokens = self.frontend.count_text_tokens(&request.texts[index])?;
+            if let Some(language) = request
+                .languages
+                .get(index)
+                .and_then(|value| value.as_deref())
+            {
+                input_tokens += self.frontend.count_text_tokens(language)?;
+            }
+            if let Some(instruct) = task.instructs.get(index).and_then(|value| value.as_deref()) {
+                input_tokens += self.frontend.count_text_tokens(instruct)?;
+            }
+            if let Some(prompt) = request
+                .voice_clone_prompts
+                .get(index)
+                .and_then(|value| value.as_ref())
+            {
+                input_tokens += self.frontend.count_text_tokens(&prompt.ref_text)?;
+            } else if let Some(ref_text) = request
+                .ref_texts
+                .get(index)
+                .and_then(|value| value.as_deref())
+            {
+                input_tokens += self.frontend.count_text_tokens(ref_text)?;
+            }
+
+            usage.push(GenerationUsage::new(input_tokens, task.target_lens[index]));
+        }
+        Ok(usage)
+    }
 }
 
 fn pack_cfg_batch_device(
@@ -1063,12 +1118,16 @@ fn pack_cfg_batch_device(
             device,
         )?);
 
-        let uncond_source = prompt
-            .input_ids
-            .narrow(candle_core::D::Minus1, prompt.total_length - target_len, target_len)?;
-        let uncond_mask_source = prompt
-            .audio_mask
-            .narrow(candle_core::D::Minus1, prompt.total_length - target_len, target_len)?;
+        let uncond_source = prompt.input_ids.narrow(
+            candle_core::D::Minus1,
+            prompt.total_length - target_len,
+            target_len,
+        )?;
+        let uncond_mask_source = prompt.audio_mask.narrow(
+            candle_core::D::Minus1,
+            prompt.total_length - target_len,
+            target_len,
+        )?;
         uncond_inputs.push(pad_input_ids_tensor(
             &uncond_source,
             max_c_len,
@@ -1159,7 +1218,11 @@ fn build_attention_mask_tensor(
             values[index * max_c_len + index] = 1;
         }
     }
-    Ok(Tensor::from_vec(values, (1, 1, max_c_len, max_c_len), device)?)
+    Ok(Tensor::from_vec(
+        values,
+        (1, 1, max_c_len, max_c_len),
+        device,
+    )?)
 }
 
 fn normalize_option_strings(
@@ -1208,5 +1271,214 @@ fn normalize_option_prompts(
             "voice_clone_prompts should contain either 1 or {batch_size} items, got {}",
             values.len()
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use candle_core::{DType, Device};
+
+    use super::*;
+    use crate::{
+        artifacts::ReferenceArtifactBundle,
+        runtime::{DTypeSpec, DeviceSpec},
+        stage0_loop::pack_cfg_batch,
+        stage0_model::Stage0RuntimePlan,
+    };
+
+    fn repo_root() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf()
+    }
+
+    fn model_root() -> std::path::PathBuf {
+        repo_root().join("model")
+    }
+
+    fn deterministic_reference_root() -> std::path::PathBuf {
+        repo_root()
+            .join("artifacts")
+            .join("python_reference_stage7_cuda_f32_dense")
+    }
+
+    fn cpu_frontend_and_stage0() -> (Frontend, Stage0RuntimePlan) {
+        let options = RuntimeOptions::new(model_root())
+            .with_device(DeviceSpec::Cpu)
+            .with_dtype(DTypeSpec::F32)
+            .with_seed(1234);
+        let runtime = RuntimeArtifacts::from_model_root(model_root()).unwrap();
+        let frontend = Frontend::from_runtime_artifacts(&runtime).unwrap();
+        let stage0 =
+            Stage0RuntimePlan::from_runtime_artifacts_with_device(options, &runtime, Device::Cpu)
+                .unwrap();
+        (frontend, stage0)
+    }
+
+    fn assert_batch_matches_canonical(request: &GenerationRequest) {
+        let (frontend, stage0) = cpu_frontend_and_stage0();
+        let task = frontend.build_task(request).unwrap();
+        let mut prepared = Vec::with_capacity(task.batch_size());
+        let mut cond_lens = Vec::with_capacity(task.batch_size());
+        for index in 0..task.batch_size() {
+            let prompt = frontend.prepare_prompt(&task, index).unwrap();
+            cond_lens.push(prompt.total_length);
+            prepared.push(prompt);
+        }
+        let canonical_inputs = pack_cfg_batch(&prepared, task.target_lens()).unwrap();
+        let canonical = stage0
+            .prepare_batch(&canonical_inputs, &cond_lens, task.target_lens())
+            .unwrap();
+
+        let device_task = frontend
+            .build_task_with_device_prompts(request, &vec![None; request.texts.len()])
+            .unwrap();
+        let mut prepared_device = Vec::with_capacity(device_task.batch_size());
+        for index in 0..device_task.batch_size() {
+            prepared_device.push(
+                frontend
+                    .prepare_prompt_device(&device_task, index, stage0.device())
+                    .unwrap(),
+            );
+        }
+        let device_prepared = pack_cfg_batch_device(
+            &prepared_device,
+            device_task.target_lens(),
+            stage0.config().num_audio_codebook,
+            stage0.device(),
+            DType::F32,
+        )
+        .unwrap();
+
+        assert_eq!(device_prepared.target_lens, canonical.target_lens);
+        assert_eq!(device_prepared.cond_lens, canonical.cond_lens);
+        assert_eq!(device_prepared.runtime_dtype, canonical.runtime_dtype);
+        assert_eq!(device_prepared.input_ids.dims(), canonical.input_ids.dims());
+        assert_eq!(
+            device_prepared.audio_mask.dims(),
+            canonical.audio_mask.dims()
+        );
+        assert_eq!(
+            device_prepared.attention_mask.dims(),
+            canonical.attention_mask.dims()
+        );
+        assert_eq!(
+            device_prepared.tokens_init.dims(),
+            canonical.tokens_init.dims()
+        );
+        assert_eq!(
+            device_prepared
+                .input_ids
+                .to_device(&Device::Cpu)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<i64>()
+                .unwrap(),
+            canonical
+                .input_ids
+                .to_device(&Device::Cpu)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<i64>()
+                .unwrap(),
+        );
+        assert_eq!(
+            device_prepared
+                .audio_mask
+                .to_device(&Device::Cpu)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<u8>()
+                .unwrap(),
+            canonical
+                .audio_mask
+                .to_device(&Device::Cpu)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<u8>()
+                .unwrap(),
+        );
+        assert_eq!(
+            device_prepared
+                .attention_mask
+                .to_device(&Device::Cpu)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<u8>()
+                .unwrap(),
+            canonical
+                .attention_mask
+                .to_device(&Device::Cpu)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<u8>()
+                .unwrap(),
+        );
+        assert_eq!(
+            device_prepared
+                .tokens_init
+                .to_device(&Device::Cpu)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<i64>()
+                .unwrap(),
+            canonical
+                .tokens_init
+                .to_device(&Device::Cpu)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<i64>()
+                .unwrap(),
+        );
+    }
+
+    #[test]
+    fn device_batch_preparation_matches_canonical_for_design_prompt() {
+        let bundle = ReferenceArtifactBundle::from_root(deterministic_reference_root()).unwrap();
+        let request = bundle
+            .case_by_id("det_design_en_british")
+            .unwrap()
+            .build_generation_request()
+            .unwrap();
+        assert_batch_matches_canonical(&request);
+    }
+
+    #[test]
+    fn device_batch_preparation_matches_canonical_for_mixed_short_and_long_batch() {
+        let bundle = ReferenceArtifactBundle::from_root(deterministic_reference_root()).unwrap();
+        let auto_case = bundle.case_by_id("det_auto_en_short").unwrap();
+        let auto_request = auto_case.build_generation_request().unwrap();
+        let mut long_request = auto_case.build_generation_request().unwrap();
+        long_request.durations = vec![Some(31.0)];
+
+        let mut request = GenerationRequest::new_text_only(auto_request.texts[0].clone());
+        request.texts = vec![auto_request.texts[0].clone(), long_request.texts[0].clone()];
+        request.languages = vec![
+            auto_request.languages[0].clone(),
+            long_request.languages[0].clone(),
+        ];
+        request.instructs = vec![
+            auto_request.instructs[0].clone(),
+            long_request.instructs[0].clone(),
+        ];
+        request.ref_texts = vec![None, None];
+        request.ref_audios = vec![None, None];
+        request.voice_clone_prompts = vec![None, None];
+        request.speeds = vec![auto_request.speeds[0], long_request.speeds[0]];
+        request.durations = vec![auto_request.durations[0], long_request.durations[0]];
+        request.generation_config = auto_request.generation_config.clone();
+
+        assert_batch_matches_canonical(&request);
     }
 }

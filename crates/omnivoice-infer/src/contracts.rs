@@ -621,10 +621,33 @@ pub enum GeneratedTokens {
     Chunked(Vec<I64Tensor2>),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GenerationUsage {
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+    pub total_tokens: usize,
+}
+
+impl GenerationUsage {
+    pub fn new(input_tokens: usize, output_tokens: usize) -> Self {
+        Self {
+            input_tokens,
+            output_tokens,
+            total_tokens: input_tokens + output_tokens,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct DecodedAudio {
     pub samples: Vec<f32>,
     pub sample_rate: u32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GeneratedAudioResult {
+    pub audio: DecodedAudio,
+    pub usage: GenerationUsage,
 }
 
 #[derive(Clone, Debug, PartialEq)]

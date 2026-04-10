@@ -36,6 +36,7 @@ It contains:
 
 - `crates/omnivoice-infer` — the two-stage inference pipeline
 - `crates/omnivoice-cli` — CLI for prompt prep, stage0/stage1 inspection, and full inference
+- `crates/omnivoice-server` — separate OpenAI-compatible HTTP speech server binary
 - `docs/contracts` — phase-by-phase behavior contracts
 - `tools` — local reference and support scripts
 
@@ -56,6 +57,18 @@ cargo run -p omnivoice-cli --features cuda -- infer `
   --seed 1234
 ```
 
+For an OpenAI-compatible speech endpoint, run the separate server binary:
+
+```powershell
+$env:OMNIVOICE_API_KEY="local-dev-token"
+cargo run -p omnivoice-server --features cuda -- `
+  --model-dir H:\omnivoice\model `
+  --host 127.0.0.1 `
+  --port 8000 `
+  --device cuda:0 `
+  --dtype f32
+```
+
 ## 🚀 Key Features
 
 - Two-stage OmniVoice inference pipeline in Rust
@@ -63,6 +76,7 @@ cargo run -p omnivoice-cli --features cuda -- infer `
 - Stage0 and Stage1 parity harnesses against official OmniVoice references
 - Voice clone, voice design, auto voice, batch, and long-form chunked inference
 - CLI workflows for `prepare-prompt`, `stage0-debug`, `stage1-decode`, and `infer`
+- Separate `omnivoice-server` binary with `/v1/models` and `/v1/audio/speech`
 
 ### Hardware Acceleration
 

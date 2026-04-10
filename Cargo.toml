@@ -2,6 +2,7 @@
 members = [
     "crates/omnivoice-infer",
     "crates/omnivoice-cli",
+    "crates/omnivoice-server",
 ]
 resolver = "2"
 

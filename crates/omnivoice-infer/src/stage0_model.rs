@@ -338,6 +338,11 @@ impl Stage0RuntimePlan {
         Ok(self.run_loop_device(prepared, config, &[])?.tokens)
     }
 
+    pub fn set_seed(&self, seed: u64) -> Result<()> {
+        self.device.set_seed(seed)?;
+        Ok(())
+    }
+
     pub fn debug_case(
         &self,
         prepared: &PreparedInferenceBatch,

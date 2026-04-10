@@ -108,7 +108,6 @@ impl DeviceGenerationTask {
             generation_config: self.generation_config.clone(),
         }
     }
-
 }
 
 #[derive(Debug)]
@@ -451,8 +450,7 @@ impl Frontend {
             .unwrap_or(0);
         let total_length = style_len + text_len + ref_audio_length + target_length;
 
-        let mut input_ids_data =
-            vec![self.audio_mask_id; self.num_audio_codebook * total_length];
+        let mut input_ids_data = vec![self.audio_mask_id; self.num_audio_codebook * total_length];
         for codebook in 0..self.num_audio_codebook {
             let row_offset = codebook * total_length;
             for (position, token_id) in style_token_ids.iter().enumerate() {
@@ -525,6 +523,10 @@ impl Frontend {
             estimated
         };
         adjusted.max(1.0) as usize
+    }
+
+    pub fn count_text_tokens(&self, text: &str) -> Result<usize> {
+        Ok(self.tokenizer.encode(text, true)?.len())
     }
 }
 
