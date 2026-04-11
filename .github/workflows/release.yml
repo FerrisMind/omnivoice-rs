@@ -59,7 +59,7 @@ jobs:
           name: omnivoice-bin-macos-arm64.tar.gz
 
   macos-x64:
-    name: macOS x64 (CPU)
+    name: macOS x64 (Metal)
     runs-on: macos-15-intel
 
     steps:
@@ -75,7 +75,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build release binaries
-        run: cargo build --locked --release -p omnivoice-cli -p omnivoice-server
+        run: cargo build --locked --release --features metal -p omnivoice-cli -p omnivoice-server
 
       - name: Determine tag name
         id: tag
@@ -387,7 +387,7 @@ jobs:
 
             **macOS:**
             - [macOS Apple Silicon (arm64, Metal)](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/omnivoice-${{ steps.tag.outputs.name }}-bin-macos-arm64.tar.gz)
-            - [macOS Intel (x64, CPU)](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/omnivoice-${{ steps.tag.outputs.name }}-bin-macos-x64.tar.gz)
+            - [macOS Intel (x64, Metal)](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/omnivoice-${{ steps.tag.outputs.name }}-bin-macos-x64.tar.gz)
 
             **Linux:**
             - [Ubuntu x64 (CPU)](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/omnivoice-${{ steps.tag.outputs.name }}-bin-ubuntu-x64.tar.gz)
