@@ -102,9 +102,10 @@ cargo test -p omnivoice-cli --features cuda --test phase10_cli_cuda -- --nocaptu
 ## 📖 Como Começar a Usar
 
 1. Coloque os assets reais do modelo em `model/`.
-2. Mantenha os materiais oficiais de referência upstream disponíveis localmente para verificação de comportamento.
-3. Execute os testes de GPU de forma sequencial, não todos ao mesmo tempo.
-4. Use `omnivoice-cli infer` para síntese end-to-end.
+2. Se você não passar `--asr-model`, o Whisper usará por padrão `oxide-lab/whisper-large-v3-turbo-GGUF` e baixará o conjunto compatível com Candle: `config.json`, `tokenizer.json` e `whisper-large-v3-turbo-q4_0.gguf`.
+3. Mantenha os materiais oficiais de referência upstream disponíveis localmente para verificação de comportamento.
+4. Execute os testes de GPU de forma sequencial, não todos ao mesmo tempo.
+5. Use `omnivoice-cli infer` para síntese end-to-end.
 
 ## 🖥️ Requisitos do Sistema
 

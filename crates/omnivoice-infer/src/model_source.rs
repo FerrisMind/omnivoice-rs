@@ -16,7 +16,7 @@ use crate::{
 };
 
 pub const DEFAULT_OMNIVOICE_REPO: &str = "k2-fsa/OmniVoice";
-pub const DEFAULT_WHISPER_REPO: &str = "oxide-lab/whisper-base-GGUF";
+pub const DEFAULT_WHISPER_REPO: &str = "oxide-lab/whisper-large-v3-turbo-GGUF";
 
 const OFFICIAL_OMNIVOICE_MANIFEST_JSON: &str = include_str!("../assets/omnivoice.artifacts.json");
 

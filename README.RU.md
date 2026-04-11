@@ -110,7 +110,7 @@ cargo test -p omnivoice-cli --features cuda --test phase10_cli_cuda -- --nocaptu
 ## 📖 Как начать использовать
 
 1. Либо передайте `--model <local-path>`, либо дайте CLI/server автоматически разрешить `k2-fsa/OmniVoice` из Hugging Face.
-2. Если не передавать `--asr-model`, Whisper по умолчанию берётся из `oxide-lab/whisper-base-GGUF` и скачивает Candle-совместимый набор `config.json`, `tokenizer.json`, `whisper-base-q4_0.gguf`.
+2. Если не передавать `--asr-model`, Whisper по умолчанию берётся из `oxide-lab/whisper-large-v3-turbo-GGUF` и скачивает Candle-совместимый набор `config.json`, `tokenizer.json`, `whisper-large-v3-turbo-q4_0.gguf`.
 3. Держите официальные upstream-референсы локально доступными для проверки поведения.
 4. Запускайте GPU-тесты последовательно, а не все сразу.
 5. Используйте `omnivoice-cli infer` для end-to-end синтеза.

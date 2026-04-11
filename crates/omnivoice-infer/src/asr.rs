@@ -19,7 +19,7 @@ const DEFAULT_LOCAL_ASR_DIR_NAME: &str = "whisper";
 const DEFAULT_HF_ASR_MODEL: &str = DEFAULT_WHISPER_REPO;
 const DEFAULT_WHISPER_CONFIG_FILE: &str = "config.json";
 const DEFAULT_WHISPER_TOKENIZER_FILE: &str = "tokenizer.json";
-const DEFAULT_WHISPER_Q4_0_FILE: &str = "whisper-base-q4_0.gguf";
+const DEFAULT_WHISPER_Q4_0_FILE: &str = "whisper-large-v3-turbo-q4_0.gguf";
 const MEL_FILTERS_80: &[u8] = include_bytes!("../../../tools/whisper/melfilters.bytes");
 const MEL_FILTERS_128: &[u8] = include_bytes!("../../../tools/whisper/melfilters128.bytes");
 
@@ -522,13 +522,13 @@ mod tests {
                 rfilename: "tokenizer.json".to_string(),
             },
             Siblings {
-                rfilename: "whisper-base-q4_0.gguf".to_string(),
+                rfilename: "whisper-large-v3-turbo-q4_0.gguf".to_string(),
             },
             Siblings {
-                rfilename: "whisper-base-q8_0.gguf".to_string(),
+                rfilename: "whisper-large-v3-turbo-q8_0.gguf".to_string(),
             },
             Siblings {
-                rfilename: "whisper.cpp/whisper-base-q4_0.gguf".to_string(),
+                rfilename: "whisper.cpp/whisper-large-v3-turbo-q4_0.gguf".to_string(),
             },
         ];
 
@@ -536,7 +536,7 @@ mod tests {
 
         assert_eq!(assets.config, "config.json");
         assert_eq!(assets.tokenizer, "tokenizer.json");
-        assert_eq!(assets.weights, "whisper-base-q4_0.gguf");
+        assert_eq!(assets.weights, "whisper-large-v3-turbo-q4_0.gguf");
     }
 
     #[test]
@@ -549,15 +549,15 @@ mod tests {
                 rfilename: "tokenizer.json".to_string(),
             },
             Siblings {
-                rfilename: "whisper-base-q4_1.gguf".to_string(),
+                rfilename: "whisper-large-v3-turbo-q4_1.gguf".to_string(),
             },
             Siblings {
-                rfilename: "whisper-base-q8_0.gguf".to_string(),
+                rfilename: "whisper-large-v3-turbo-q8_0.gguf".to_string(),
             },
         ];
 
         let error = find_remote_whisper_assets(DEFAULT_HF_ASR_MODEL, &siblings).unwrap_err();
 
-        assert!(error.to_string().contains("whisper-base-q4_0.gguf"));
+        assert!(error.to_string().contains("whisper-large-v3-turbo-q4_0.gguf"));
     }
 }
