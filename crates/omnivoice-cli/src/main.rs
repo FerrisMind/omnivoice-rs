@@ -20,9 +20,116 @@ use omnivoice_infer::{
     workspace_phase_marker, DTypeSpec, DeviceSpec, OmniVoiceError, RuntimeOptions,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvocationMode {
+    Multi,
+    InferWrapper,
+    InferBatchWrapper,
+}
+
 fn main() -> Result<(), OmniVoiceError> {
+    run_from_env(InvocationMode::Multi)
+}
+
+pub fn run_from_env(mode: InvocationMode) -> Result<(), OmniVoiceError> {
     let args: Vec<String> = env::args().skip(1).collect();
-    let command = CliCommand::parse(&args)?;
+    run_with_args(mode, &args)
+}
+
+fn run_with_args(mode: InvocationMode, args: &[String]) -> Result<(), OmniVoiceError> {
+    if let Some(help) = requested_help(mode, args) {
+        println!("{help}");
+        return Ok(());
+    }
+
+    let command = parse_entrypoint_command(mode, args)?;
+    execute_command(command)
+}
+
+fn parse_entrypoint_command(
+    mode: InvocationMode,
+    args: &[String],
+) -> Result<CliCommand, OmniVoiceError> {
+    let parsed = match mode {
+        InvocationMode::Multi => CliCommand::parse(args),
+        InvocationMode::InferWrapper => parse_wrapper_command("infer", args),
+        InvocationMode::InferBatchWrapper => parse_wrapper_command("infer-batch", args),
+    };
+
+    parsed.map_err(|error| rewrite_usage_for_mode(mode, error))
+}
+
+fn parse_wrapper_command(command: &str, args: &[String]) -> Result<CliCommand, OmniVoiceError> {
+    let mut forwarded = Vec::with_capacity(args.len() + 1);
+    forwarded.push(command.to_string());
+    forwarded.extend(args.iter().cloned());
+    CliCommand::parse(&forwarded)
+}
+
+fn rewrite_usage_for_mode(mode: InvocationMode, error: OmniVoiceError) -> OmniVoiceError {
+    let replacement = match mode {
+        InvocationMode::Multi => return error,
+        InvocationMode::InferWrapper => infer_usage("omnivoice-infer"),
+        InvocationMode::InferBatchWrapper => infer_batch_usage("omnivoice-infer-batch"),
+    };
+
+    match error {
+        OmniVoiceError::InvalidRequest(message) => {
+            OmniVoiceError::InvalidRequest(message.replace(&usage(), &replacement))
+        }
+        other => other,
+    }
+}
+
+fn requested_help(mode: InvocationMode, args: &[String]) -> Option<String> {
+    match mode {
+        InvocationMode::Multi => {
+            if args.len() == 1 && is_help_flag(&args[0]) {
+                return Some(usage());
+            }
+
+            let subcommand_help = args.iter().skip(1).any(|arg| is_help_flag(arg));
+            match args.first().map(String::as_str) {
+                Some("artifacts") if subcommand_help => {
+                    Some(artifacts_validate_usage("omnivoice-cli artifacts"))
+                }
+                Some("infer") if subcommand_help => Some(infer_usage("omnivoice-cli infer")),
+                Some("infer-batch") if subcommand_help => {
+                    Some(infer_batch_usage("omnivoice-cli infer-batch"))
+                }
+                Some("prepare-prompt") if subcommand_help => {
+                    Some(prepare_prompt_usage("omnivoice-cli prepare-prompt"))
+                }
+                Some("stage1-prepare") if subcommand_help => {
+                    Some(stage1_prepare_usage("omnivoice-cli stage1-prepare"))
+                }
+                Some("stage1-decode") if subcommand_help => {
+                    Some(stage1_decode_usage("omnivoice-cli stage1-decode"))
+                }
+                Some("stage0-generate") if subcommand_help => {
+                    Some(stage0_generate_usage("omnivoice-cli stage0-generate"))
+                }
+                Some("stage0-debug") if subcommand_help => {
+                    Some(stage0_debug_usage("omnivoice-cli stage0-debug"))
+                }
+                _ => None,
+            }
+        }
+        InvocationMode::InferWrapper if args.iter().any(|arg| is_help_flag(arg)) => {
+            Some(infer_usage("omnivoice-infer"))
+        }
+        InvocationMode::InferBatchWrapper if args.iter().any(|arg| is_help_flag(arg)) => {
+            Some(infer_batch_usage("omnivoice-infer-batch"))
+        }
+        _ => None,
+    }
+}
+
+fn is_help_flag(value: &str) -> bool {
+    matches!(value, "--help" | "-h")
+}
+
+fn execute_command(command: CliCommand) -> Result<(), OmniVoiceError> {
     match command {
         CliCommand::ArtifactsValidate {
             model_dir,
@@ -388,11 +495,11 @@ fn parse_infer(args: &[String]) -> Result<CliCommand, OmniVoiceError> {
                 language = Some(required_value(args, index, "--language")?.to_string());
                 index += 2;
             }
-            "--ref-audio" => {
+            "--ref-audio" | "--ref_audio" => {
                 ref_audio = Some(PathBuf::from(required_value(args, index, "--ref-audio")?));
                 index += 2;
             }
-            "--ref-text" => {
+            "--ref-text" | "--ref_text" => {
                 ref_text = Some(required_value(args, index, "--ref-text")?.to_string());
                 index += 2;
             }
@@ -420,35 +527,35 @@ fn parse_infer(args: &[String]) -> Result<CliCommand, OmniVoiceError> {
                 dtype = DTypeSpec::parse(required_value(args, index, "--dtype")?)?;
                 index += 2;
             }
-            "--num-step" => {
+            "--num-step" | "--num_step" => {
                 num_step = parse_usize_arg(args, index, "--num-step")?;
                 index += 2;
             }
-            "--guidance-scale" => {
+            "--guidance-scale" | "--guidance_scale" => {
                 guidance_scale = parse_f32_arg(args, index, "--guidance-scale")?;
                 index += 2;
             }
-            "--t-shift" => {
+            "--t-shift" | "--t_shift" => {
                 t_shift = parse_f32_arg(args, index, "--t-shift")?;
                 index += 2;
             }
-            "--layer-penalty-factor" => {
+            "--layer-penalty-factor" | "--layer_penalty_factor" => {
                 layer_penalty_factor = parse_f32_arg(args, index, "--layer-penalty-factor")?;
                 index += 2;
             }
-            "--position-temperature" => {
+            "--position-temperature" | "--position_temperature" => {
                 position_temperature = parse_f32_arg(args, index, "--position-temperature")?;
                 index += 2;
             }
-            "--class-temperature" => {
+            "--class-temperature" | "--class_temperature" => {
                 class_temperature = parse_f32_arg(args, index, "--class-temperature")?;
                 index += 2;
             }
-            "--preprocess-prompt" => {
+            "--preprocess-prompt" | "--preprocess_prompt" => {
                 preprocess_prompt = parse_bool_arg(args, index, "--preprocess-prompt")?;
                 index += 2;
             }
-            "--postprocess-output" => {
+            "--postprocess-output" | "--postprocess_output" => {
                 postprocess_output = parse_bool_arg(args, index, "--postprocess-output")?;
                 index += 2;
             }
@@ -456,11 +563,11 @@ fn parse_infer(args: &[String]) -> Result<CliCommand, OmniVoiceError> {
                 denoise = parse_bool_arg(args, index, "--denoise")?;
                 index += 2;
             }
-            "--audio-chunk-duration" => {
+            "--audio-chunk-duration" | "--audio_chunk_duration" => {
                 audio_chunk_duration = parse_f32_arg(args, index, "--audio-chunk-duration")?;
                 index += 2;
             }
-            "--audio-chunk-threshold" => {
+            "--audio-chunk-threshold" | "--audio_chunk_threshold" => {
                 audio_chunk_threshold = parse_f32_arg(args, index, "--audio-chunk-threshold")?;
                 index += 2;
             }
@@ -2012,26 +2119,112 @@ fn parse_bool_arg(args: &[String], index: usize, name: &str) -> Result<bool, Omn
     }
 }
 
+fn device_usage_values() -> &'static str {
+    "auto|cuda|cuda:N|mps|metal|cpu"
+}
+
+fn artifacts_validate_usage(program: &str) -> String {
+    format!("usage:\n  {program} validate [--model <path-or-hf-repo>] [--reference-root <path>]")
+}
+
+fn infer_usage(program: &str) -> String {
+    format!(
+        concat!(
+            "usage:\n  {program} [--model <path-or-hf-repo>] --text <text> --output <wav> ",
+            "[--language <lang>] [--ref_audio <wav>] [--ref_text <text>] [--instruct <text>] ",
+            "[--duration <seconds>] [--speed <factor>] [--asr-model <path-or-hf-repo>] ",
+            "[--device {device}] [--dtype auto|f16|bf16|f32] [--num_step <n>] ",
+            "[--guidance_scale <value>] [--t_shift <value>] [--layer_penalty_factor <value>] ",
+            "[--position_temperature <value>] [--class_temperature <value>] ",
+            "[--preprocess_prompt <bool>] [--postprocess_output <bool>] [--denoise <bool>] ",
+            "[--audio_chunk_duration <seconds>] [--audio_chunk_threshold <seconds>] [--seed <u64>]\n\n",
+            "aliases:\n  --ref-audio, --ref-text, --num-step, --guidance-scale, --t-shift,\n",
+            "  --layer-penalty-factor, --position-temperature, --class-temperature,\n",
+            "  --preprocess-prompt, --postprocess-output, --audio-chunk-duration,\n",
+            "  --audio-chunk-threshold"
+        ),
+        program = program,
+        device = device_usage_values(),
+    )
+}
+
+fn infer_batch_usage(program: &str) -> String {
+    format!(
+        concat!(
+            "usage:\n  {program} [--model <path-or-hf-repo>] --test_list <jsonl> --res_dir <dir> ",
+            "[--device {device}] [--dtype auto|f16|bf16|f32] [--num_step <n>] ",
+            "[--guidance_scale <value>] [--t_shift <value>] [--nj_per_gpu <n>] ",
+            "[--audio_chunk_duration <seconds>] [--audio_chunk_threshold <seconds>] ",
+            "[--batch_duration <seconds>] [--batch_size <n>] [--warmup <n>] ",
+            "[--preprocess_prompt <bool>] [--postprocess_output <bool>] ",
+            "[--layer_penalty_factor <value>] [--position_temperature <value>] ",
+            "[--class_temperature <value>] [--denoise <bool>] [--lang_id <lang>] [--seed <u64>]\n\n",
+            "aliases:\n  --test-list, --res-dir, --num-step, --guidance-scale, --t-shift,\n",
+            "  --nj-per-gpu, --audio-chunk-duration, --audio-chunk-threshold,\n",
+            "  --batch-duration, --batch-size, --preprocess-prompt,\n",
+            "  --postprocess-output, --layer-penalty-factor,\n",
+            "  --position-temperature, --class-temperature, --lang-id"
+        ),
+        program = program,
+        device = device_usage_values(),
+    )
+}
+
+fn prepare_prompt_usage(program: &str) -> String {
+    format!(
+        "usage:\n  {program} [--model <path-or-hf-repo>] --reference-root <path> --case <id> [--device {}] [--dtype auto|f16|bf16|f32]",
+        device_usage_values()
+    )
+}
+
+fn stage1_prepare_usage(program: &str) -> String {
+    format!(
+        "usage:\n  {program} [--model <path-or-hf-repo>] --reference-root <path> --case <id> [--device {}] [--dtype auto|f16|bf16|f32]",
+        device_usage_values()
+    )
+}
+
+fn stage1_decode_usage(program: &str) -> String {
+    format!(
+        "usage:\n  {program} [--model <path-or-hf-repo>] --reference-root <path> --case <id> --out <wav> [--raw] [--device {}] [--dtype auto|f16|bf16|f32]",
+        device_usage_values()
+    )
+}
+
+fn stage0_generate_usage(program: &str) -> String {
+    format!(
+        "usage:\n  {program} [--model <path-or-hf-repo>] --reference-root <path> --case <id> --out <json> [--device {}] [--dtype auto|f16|bf16|f32]",
+        device_usage_values()
+    )
+}
+
+fn stage0_debug_usage(program: &str) -> String {
+    format!(
+        "usage:\n  {program} [--model <path-or-hf-repo>] --reference-root <path> --case <id> [--device {}] [--dtype auto|f16|bf16|f32]",
+        device_usage_values()
+    )
+}
+
 fn usage() -> String {
     [
         "usage:",
         "  omnivoice-cli artifacts validate [--model <path-or-hf-repo>] [--reference-root <path>]",
-        "  omnivoice-cli infer [--model <path-or-hf-repo>] --text <text> --output <wav> [--language <lang>] [--ref-audio <wav>] [--ref-text <text>] [--instruct <text>] [--duration <seconds>] [--speed <factor>] [--asr-model <path-or-hf-repo>] [--device auto|cuda:N|metal|cpu] [--dtype auto|f16|bf16|f32] [--seed <u64>]",
-        "  omnivoice-cli infer-batch [--model <path-or-hf-repo>] --test-list <jsonl> --res-dir <dir> [--device auto|cuda:N|metal|cpu] [--dtype auto|f16|bf16|f32] [--batch-size <n>] [--batch-duration <seconds>] [--nj-per-gpu <n>] [--warmup <n>]",
-        "  omnivoice-cli prepare-prompt [--model <path-or-hf-repo>] --reference-root <path> --case <id> [--device auto|cuda:N|metal|cpu] [--dtype auto|f16|bf16|f32]",
-        "  omnivoice-cli stage1-prepare [--model <path-or-hf-repo>] --reference-root <path> --case <id> [--device auto|cuda:N|metal|cpu] [--dtype auto|f16|bf16|f32]",
-        "  omnivoice-cli stage1-decode [--model <path-or-hf-repo>] --reference-root <path> --case <id> --out <wav> [--raw] [--device auto|cuda:N|metal|cpu] [--dtype auto|f16|bf16|f32]",
-        "  omnivoice-cli stage0-generate [--model <path-or-hf-repo>] --reference-root <path> --case <id> --out <json> [--device auto|cuda:N|metal|cpu] [--dtype auto|f16|bf16|f32]",
-        "  omnivoice-cli stage0-debug [--model <path-or-hf-repo>] --reference-root <path> --case <id> [--device auto|cuda:N|metal|cpu] [--dtype auto|f16|bf16|f32]",
+        "  omnivoice-cli infer [--model <path-or-hf-repo>] --text <text> --output <wav> [--language <lang>] [--ref-audio <wav>] [--ref-text <text>] [--instruct <text>] [--duration <seconds>] [--speed <factor>] [--asr-model <path-or-hf-repo>] [--device auto|cuda|cuda:N|mps|metal|cpu] [--dtype auto|f16|bf16|f32] [--seed <u64>]",
+        "  omnivoice-cli infer-batch [--model <path-or-hf-repo>] --test-list <jsonl> --res-dir <dir> [--device auto|cuda|cuda:N|mps|metal|cpu] [--dtype auto|f16|bf16|f32] [--batch-size <n>] [--batch-duration <seconds>] [--nj-per-gpu <n>] [--warmup <n>]",
+        "  omnivoice-cli prepare-prompt [--model <path-or-hf-repo>] --reference-root <path> --case <id> [--device auto|cuda|cuda:N|mps|metal|cpu] [--dtype auto|f16|bf16|f32]",
+        "  omnivoice-cli stage1-prepare [--model <path-or-hf-repo>] --reference-root <path> --case <id> [--device auto|cuda|cuda:N|mps|metal|cpu] [--dtype auto|f16|bf16|f32]",
+        "  omnivoice-cli stage1-decode [--model <path-or-hf-repo>] --reference-root <path> --case <id> --out <wav> [--raw] [--device auto|cuda|cuda:N|mps|metal|cpu] [--dtype auto|f16|bf16|f32]",
+        "  omnivoice-cli stage0-generate [--model <path-or-hf-repo>] --reference-root <path> --case <id> --out <json> [--device auto|cuda|cuda:N|mps|metal|cpu] [--dtype auto|f16|bf16|f32]",
+        "  omnivoice-cli stage0-debug [--model <path-or-hf-repo>] --reference-root <path> --case <id> [--device auto|cuda|cuda:N|mps|metal|cpu] [--dtype auto|f16|bf16|f32]",
     ]
         .join("\n")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::CliCommand;
+    use super::{parse_entrypoint_command, requested_help, CliCommand, InvocationMode};
     use omnivoice_infer::{
-        artifacts::RuntimeArtifactManifest, model_source::manifest_download_targets,
+        artifacts::RuntimeArtifactManifest, model_source::manifest_download_targets, DeviceSpec,
     };
     use std::path::PathBuf;
 
@@ -2124,5 +2317,194 @@ mod tests {
                 "audio_tokenizer/LICENSE",
             ]
         );
+    }
+
+    #[test]
+    fn infer_wrapper_help_uses_wrapper_program_name() {
+        let help = requested_help(InvocationMode::InferWrapper, &["--help".to_string()])
+            .expect("wrapper help should be available");
+
+        assert!(help.contains("omnivoice-infer"));
+        assert!(!help.contains("omnivoice-cli infer ["));
+    }
+
+    #[test]
+    fn infer_subcommand_help_uses_subcommand_program_name() {
+        let help = requested_help(
+            InvocationMode::Multi,
+            &["infer".to_string(), "--help".to_string()],
+        )
+        .expect("subcommand help should be available");
+
+        assert!(help.contains("omnivoice-cli infer"));
+        assert!(!help.contains("omnivoice-infer-batch"));
+    }
+
+    #[test]
+    fn infer_wrapper_accepts_official_underscore_aliases() {
+        let command = parse_entrypoint_command(
+            InvocationMode::InferWrapper,
+            &[
+                "--model".to_string(),
+                "checkpoint".to_string(),
+                "--text".to_string(),
+                "hello".to_string(),
+                "--output".to_string(),
+                "out.wav".to_string(),
+                "--ref_audio".to_string(),
+                "ref.wav".to_string(),
+                "--ref_text".to_string(),
+                "reference".to_string(),
+                "--num_step".to_string(),
+                "16".to_string(),
+                "--guidance_scale".to_string(),
+                "2.5".to_string(),
+                "--t_shift".to_string(),
+                "0.2".to_string(),
+                "--layer_penalty_factor".to_string(),
+                "4.0".to_string(),
+                "--position_temperature".to_string(),
+                "1.0".to_string(),
+                "--class_temperature".to_string(),
+                "0.5".to_string(),
+                "--postprocess_output".to_string(),
+                "false".to_string(),
+                "--preprocess_prompt".to_string(),
+                "false".to_string(),
+                "--audio_chunk_duration".to_string(),
+                "12.0".to_string(),
+                "--audio_chunk_threshold".to_string(),
+                "24.0".to_string(),
+                "--device".to_string(),
+                "cuda".to_string(),
+            ],
+        )
+        .unwrap();
+
+        match command {
+            CliCommand::Infer {
+                model_dir,
+                ref_audio,
+                ref_text,
+                num_step,
+                guidance_scale,
+                t_shift,
+                layer_penalty_factor,
+                position_temperature,
+                class_temperature,
+                postprocess_output,
+                preprocess_prompt,
+                audio_chunk_duration,
+                audio_chunk_threshold,
+                device,
+                ..
+            } => {
+                assert_eq!(model_dir, PathBuf::from("checkpoint"));
+                assert_eq!(ref_audio, Some(PathBuf::from("ref.wav")));
+                assert_eq!(ref_text.as_deref(), Some("reference"));
+                assert_eq!(num_step, 16);
+                assert_eq!(guidance_scale, 2.5);
+                assert_eq!(t_shift, 0.2);
+                assert_eq!(layer_penalty_factor, 4.0);
+                assert_eq!(position_temperature, 1.0);
+                assert_eq!(class_temperature, 0.5);
+                assert!(!postprocess_output);
+                assert!(!preprocess_prompt);
+                assert_eq!(audio_chunk_duration, 12.0);
+                assert_eq!(audio_chunk_threshold, 24.0);
+                assert_eq!(device, DeviceSpec::Cuda(0));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn infer_batch_wrapper_accepts_official_underscore_aliases() {
+        let command = parse_entrypoint_command(
+            InvocationMode::InferBatchWrapper,
+            &[
+                "--model".to_string(),
+                "checkpoint".to_string(),
+                "--test_list".to_string(),
+                "cases.jsonl".to_string(),
+                "--res_dir".to_string(),
+                "results".to_string(),
+                "--num_step".to_string(),
+                "8".to_string(),
+                "--guidance_scale".to_string(),
+                "1.5".to_string(),
+                "--t_shift".to_string(),
+                "0.3".to_string(),
+                "--nj_per_gpu".to_string(),
+                "2".to_string(),
+                "--audio_chunk_duration".to_string(),
+                "10.0".to_string(),
+                "--audio_chunk_threshold".to_string(),
+                "20.0".to_string(),
+                "--batch_duration".to_string(),
+                "60.0".to_string(),
+                "--batch_size".to_string(),
+                "4".to_string(),
+                "--preprocess_prompt".to_string(),
+                "false".to_string(),
+                "--postprocess_output".to_string(),
+                "false".to_string(),
+                "--layer_penalty_factor".to_string(),
+                "4.0".to_string(),
+                "--position_temperature".to_string(),
+                "1.0".to_string(),
+                "--class_temperature".to_string(),
+                "0.25".to_string(),
+                "--lang_id".to_string(),
+                "en".to_string(),
+                "--device".to_string(),
+                "mps".to_string(),
+            ],
+        )
+        .unwrap();
+
+        match command {
+            CliCommand::InferBatch {
+                model_dir,
+                test_list,
+                res_dir,
+                num_step,
+                guidance_scale,
+                t_shift,
+                nj_per_gpu,
+                audio_chunk_duration,
+                audio_chunk_threshold,
+                batch_duration,
+                batch_size,
+                preprocess_prompt,
+                postprocess_output,
+                layer_penalty_factor,
+                position_temperature,
+                class_temperature,
+                lang_id,
+                device,
+                ..
+            } => {
+                assert_eq!(model_dir, PathBuf::from("checkpoint"));
+                assert_eq!(test_list, PathBuf::from("cases.jsonl"));
+                assert_eq!(res_dir, PathBuf::from("results"));
+                assert_eq!(num_step, 8);
+                assert_eq!(guidance_scale, 1.5);
+                assert_eq!(t_shift, 0.3);
+                assert_eq!(nj_per_gpu, 2);
+                assert_eq!(audio_chunk_duration, 10.0);
+                assert_eq!(audio_chunk_threshold, 20.0);
+                assert_eq!(batch_duration, 60.0);
+                assert_eq!(batch_size, 4);
+                assert!(!preprocess_prompt);
+                assert!(!postprocess_output);
+                assert_eq!(layer_penalty_factor, 4.0);
+                assert_eq!(position_temperature, 1.0);
+                assert_eq!(class_temperature, 0.25);
+                assert_eq!(lang_id.as_deref(), Some("en"));
+                assert_eq!(device, DeviceSpec::Metal);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 }

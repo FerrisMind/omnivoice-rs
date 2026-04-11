@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+default-run = "omnivoice-cli"
 
 [dependencies]
 omnivoice-infer = { path = "../omnivoice-infer" }
@@ -15,3 +16,11 @@ hf-hub.workspace = true
 default = []
 cuda = ["omnivoice-infer/cuda"]
 metal = ["omnivoice-infer/metal"]
+
+[[bin]]
+name = "omnivoice-infer"
+path = "src/bin/omnivoice-infer.rs"
+
+[[bin]]
+name = "omnivoice-infer-batch"
+path = "src/bin/omnivoice-infer-batch.rs"

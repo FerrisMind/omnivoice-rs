@@ -215,6 +215,18 @@ fn phase10_cli_infer_metal_auto_device_dtype_succeeds() {
         "auto".to_string(),
         "--seed".to_string(),
         "1234".to_string(),
+        "--num-step".to_string(),
+        "32".to_string(),
+        "--guidance-scale".to_string(),
+        "2.0".to_string(),
+        "--t-shift".to_string(),
+        "0.1".to_string(),
+        "--layer-penalty-factor".to_string(),
+        "5.0".to_string(),
+        "--position-temperature".to_string(),
+        "0.0".to_string(),
+        "--class-temperature".to_string(),
+        "0.0".to_string(),
     ];
     if let Some(language) = request.languages[0].clone() {
         args.push("--language".to_string());
@@ -234,7 +246,7 @@ fn phase10_cli_infer_metal_auto_device_dtype_succeeds() {
     assert!(stdout.contains("device=Auto"));
     assert!(stdout.contains("dtype=Auto"));
     assert!(stdout.contains("resolved_device=Metal"));
-    assert!(stdout.contains("resolved_dtype=F16"));
+    assert!(stdout.contains("resolved_dtype=F32"));
 
     let actual = DecodedAudio::read_wav(&output_path).unwrap();
     let expected = case.load_final_audio().unwrap();

@@ -25,6 +25,12 @@ impl DeviceSpec {
         if normalized == "cpu" {
             return Ok(Self::Cpu);
         }
+        if normalized == "cuda" {
+            return Ok(Self::Cuda(0));
+        }
+        if normalized == "mps" {
+            return Ok(Self::Metal);
+        }
         if normalized == "metal" {
             return Ok(Self::Metal);
         }
@@ -235,4 +241,23 @@ fn resolve_metal_device() -> Result<Device> {
     Err(OmniVoiceError::Unsupported(
         "metal device requires the `metal` feature".to_string(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DeviceSpec;
+
+    #[test]
+    fn device_spec_accepts_official_aliases() {
+        assert_eq!(DeviceSpec::parse("cuda").unwrap(), DeviceSpec::Cuda(0));
+        assert_eq!(DeviceSpec::parse("mps").unwrap(), DeviceSpec::Metal);
+    }
+
+    #[test]
+    fn device_spec_still_accepts_existing_spellings() {
+        assert_eq!(DeviceSpec::parse("auto").unwrap(), DeviceSpec::Auto);
+        assert_eq!(DeviceSpec::parse("cpu").unwrap(), DeviceSpec::Cpu);
+        assert_eq!(DeviceSpec::parse("cuda:3").unwrap(), DeviceSpec::Cuda(3));
+        assert_eq!(DeviceSpec::parse("metal").unwrap(), DeviceSpec::Metal);
+    }
 }

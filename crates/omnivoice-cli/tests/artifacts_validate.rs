@@ -86,7 +86,7 @@ fn cli_usage_prefers_gpu_first_devices() {
     assert!(!output.status.success());
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("--device auto|cuda:N|metal|cpu"));
+    assert!(stderr.contains("--device auto|cuda|cuda:N|mps|metal|cpu"));
     assert!(stderr.contains("--dtype auto|f16|bf16|f32"));
     assert!(stderr.contains("infer-batch"));
 }
