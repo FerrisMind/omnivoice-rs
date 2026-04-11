@@ -1,7 +1,5 @@
 # Phase 8 Stage0 Contract
 
-Author: FerrisMind
-
 ## Input Contract
 - Stage0 consumes packed cond/uncond batches created from `PreparedPrompt`.
 - Cond branch carries full prompt context; uncond branch carries only the target-audio tail.

@@ -1,7 +1,5 @@
 # Phase 10 Reference Prompt Contract
 
-Author: FerrisMind
-
 ## Input Contract
 - `ReferenceAudioInput::FilePath` accepts common audio files through crates.io decoding, not only WAV.
 - `(waveform, sample_rate)` remains a valid direct input path and is unchanged.

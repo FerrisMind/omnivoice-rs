@@ -1,7 +1,5 @@
 # Phase 10 Stage1 And Postprocess Contract
 
-Author: FerrisMind
-
 ## Input Contract
 - Stage1 decode remains driven by generated audio tokens plus optional `ref_rms`.
 - GPU-first execution applies to full inference acceptance; host-side postprocess is allowed as explicit offload.

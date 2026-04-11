@@ -1,7 +1,5 @@
 # Phase 8 Frontend Contract
 
-Author: FerrisMind
-
 ## Input Contract
 - Frontend consumes `GenerationRequest` and normalizes all list-shaped fields to batch size.
 - `voice_clone_prompts` override raw `ref_audios/ref_texts` for prompt construction.

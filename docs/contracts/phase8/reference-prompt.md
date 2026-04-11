@@ -1,7 +1,5 @@
 # Phase 8 Reference Prompt Contract
 
-Author: FerrisMind
-
 ## Input Contract
 - Input is either a file path or an in-memory waveform.
 - Waveform is downmixed to mono before any prompt-specific processing.

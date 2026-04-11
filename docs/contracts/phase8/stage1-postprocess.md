@@ -1,7 +1,5 @@
 # Phase 8 Stage1 And Postprocess Contract
 
-Author: FerrisMind
-
 ## Input Contract
 - Stage1 accepts generated audio tokens as `(C, T)` or a chunked list of `(C, T)` tensors.
 - Token IDs must remain inside `[token_id_min, token_id_max]` and use exactly `num_audio_codebooks` rows.

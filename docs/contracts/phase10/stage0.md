@@ -1,7 +1,5 @@
 # Phase 10 Stage0 Contract
 
-Author: FerrisMind
-
 ## Input Contract
 - Stage0 still consumes packed cond/uncond batches built from `PreparedPrompt`.
 - Phase 10 keeps exact-token CUDA main-case parity as diagnostic-only when divergence is attributable to Candle numeric drift.

@@ -1,7 +1,5 @@
 # Phase 9 Frontend Contract
 
-Author: FerrisMind
-
 ## Input Contract
 - `RuntimeOptions::Auto` is GPU-first by contract: `cuda:0 -> metal -> cpu`.
 - Frontend prompt assembly remains device-agnostic; primary acceptance executes it through CUDA/Metal pipelines.
