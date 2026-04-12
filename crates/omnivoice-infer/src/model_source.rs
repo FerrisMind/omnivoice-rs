@@ -119,7 +119,7 @@ fn download_tts_snapshot(repo_id: &str) -> Result<PathBuf> {
             }
             Ok(snapshot_root)
         }
-        Err(error) if repo_id == DEFAULT_OMNIVOICE_REPO => {
+        Err(_error) if repo_id == DEFAULT_OMNIVOICE_REPO => {
             download_official_omnivoice_snapshot(&repo)
         }
         Err(error) => Err(OmniVoiceError::InvalidData(format!(
