@@ -5,6 +5,7 @@ use std::{fs, path::PathBuf, process::Command};
 use omnivoice_infer::{
     artifacts::ReferenceArtifactBundle, contracts::DecodedAudio, gpu_lock::acquire_gpu_test_lock,
 };
+use serde_json::json;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -27,6 +28,16 @@ fn deterministic_reference_root() -> PathBuf {
     repo_root()
         .join("artifacts")
         .join("python_reference_stage7_cuda_f32_dense")
+}
+
+fn multiline_non_english_text() -> String {
+    [
+        "第一行 你好世界，我们正在验证多行中文长文本推理。",
+        "第二行\t这里包含额外空白和换行，用来覆盖上游兼容的文本归一化。",
+        "第三行 这一段继续拉长文本，确保请求稳定进入 chunked inference 路径。",
+        "第四行 我们需要确认后续分块和参考提示都保持在合法音频 token 域内。",
+    ]
+    .join("\n")
 }
 
 #[test]
@@ -339,6 +350,81 @@ fn phase10_cli_infer_batch_cuda_generates_expected_outputs() {
     assert_audio_matches_reference_with_frame_tolerance(
         &actual_b, &expected, 480, 3.0e-3, 1.0e-2, 0.4,
     );
+}
+
+#[test]
+fn phase10_cli_infer_batch_cuda_multiline_non_english_clone_succeeds() {
+    let _guard = acquire_gpu_test_lock().unwrap();
+    let binary = env!("CARGO_BIN_EXE_omnivoice-cli");
+    let batch_root = repo_root()
+        .join("artifacts")
+        .join("phase10-batch-multiline-zh");
+    let test_list = batch_root.join("test_list.jsonl");
+    let res_dir = batch_root.join("results");
+    fs::create_dir_all(&res_dir).unwrap();
+    fs::write(
+        &test_list,
+        format!(
+            "{}\n",
+            json!({
+                "id": "multiline_zh",
+                "text": multiline_non_english_text(),
+                "ref_audio": repo_root().join("ref.wav").display().to_string(),
+                "language_id": "zh",
+                "duration": 31.0
+            })
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(binary)
+        .args([
+            "infer-batch",
+            "--model",
+            &model_root().display().to_string(),
+            "--test-list",
+            &test_list.display().to_string(),
+            "--res-dir",
+            &res_dir.display().to_string(),
+            "--batch-size",
+            "1",
+            "--device",
+            "cuda:0",
+            "--dtype",
+            "auto",
+            "--seed",
+            "1234",
+            "--num-step",
+            "32",
+            "--guidance-scale",
+            "2.0",
+            "--t-shift",
+            "0.1",
+            "--layer-penalty-factor",
+            "5.0",
+            "--position-temperature",
+            "0.0",
+            "--class-temperature",
+            "0.0",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("phase_marker=omnivoice-phase10"));
+    assert!(stdout.contains("command=infer-batch"));
+    assert!(stdout.contains("written_files=1"));
+    assert!(stdout.contains("resolved_worker_devices=Cuda(0)"));
+
+    let actual = DecodedAudio::read_wav(res_dir.join("multiline_zh.wav")).unwrap();
+    assert_eq!(actual.sample_rate, 24_000);
+    assert!(actual.frame_count() > 0);
+    assert!(!actual.samples.is_empty());
 }
 
 fn assert_audio_matches_reference_with_frame_tolerance(

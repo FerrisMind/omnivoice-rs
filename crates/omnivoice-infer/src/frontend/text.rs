@@ -3,6 +3,7 @@ use std::{collections::HashSet, sync::OnceLock};
 use regex::Regex;
 
 static NEWLINE_REGEX: OnceLock<Regex> = OnceLock::new();
+static SPACE_REGEX: OnceLock<Regex> = OnceLock::new();
 
 const EMOTION_TAGS: &[&str] = &[
     "[sigh]",
@@ -46,7 +47,8 @@ pub fn combine_text(text: &str, ref_text: Option<&str>) -> String {
         text.trim().to_string()
     };
 
-    full_text = newline_regex().replace_all(&full_text, ".").into_owned();
+    full_text = newline_regex().replace_all(&full_text, "").into_owned();
+    full_text = space_regex().replace_all(&full_text, " ").into_owned();
     full_text = remove_spaces_around_cjk(&full_text);
     remove_whitespace_before_emotion_tags(&full_text)
 }
@@ -146,7 +148,11 @@ fn is_cjk(ch: char) -> bool {
 }
 
 fn newline_regex() -> &'static Regex {
-    NEWLINE_REGEX.get_or_init(|| Regex::new(r"[ \t]*\r?\n[\s]*").expect("valid newline regex"))
+    NEWLINE_REGEX.get_or_init(|| Regex::new(r"[\r\n]+").expect("valid newline regex"))
+}
+
+fn space_regex() -> &'static Regex {
+    SPACE_REGEX.get_or_init(|| Regex::new(r"[ \t]+").expect("valid space regex"))
 }
 
 fn remove_spaces_around_cjk(text: &str) -> String {

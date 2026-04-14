@@ -57,9 +57,13 @@ fn text_preprocessing_matches_omnivoice_helpers() {
 
     assert_eq!(
         combine_text("你好 [question-en]\nworld", Some(" reference ")),
-        "reference你好[question-en].world"
+        "reference你好[question-en]world"
     );
     assert_eq!(combine_text("hello [laughter]", None), "hello [laughter]");
+    assert_eq!(
+        combine_text("  第二行\t\t内容\r\n 第三行  ", Some(" 第一行 ")),
+        "第一行第二行内容第三行"
+    );
 
     assert_eq!(
         chunk_text_punctuation("Mr. Smith arrived. Dr. Brown stayed.", 20, Some(3)),

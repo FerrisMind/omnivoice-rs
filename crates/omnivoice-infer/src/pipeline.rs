@@ -12,7 +12,7 @@ use crate::{
         PreparedInferenceBatch, PreparedPrompt, PreparedPromptSequence, ReferenceAudioInput,
         VoiceClonePrompt, WaveformInput,
     },
-    error::Result,
+    error::{OmniVoiceError, Result},
     frontend::{
         add_punctuation, DeviceGenerationTask, DeviceVoiceClonePrompt, Frontend,
         PreparedPromptDevice,
@@ -383,6 +383,59 @@ impl Phase3Pipeline {
         &self.stage1
     }
 
+    fn validate_ref_audio_tokens(
+        &self,
+        tokens: &crate::contracts::I64Tensor2,
+        context: &str,
+    ) -> Result<()> {
+        let (rows, cols) = tokens.dims();
+        self.validate_ref_audio_token_shape(rows, cols, context)?;
+        self.validate_ref_audio_token_values(tokens.data.iter().copied(), context)
+    }
+
+    fn validate_device_ref_audio_tokens(&self, tokens: &Tensor, context: &str) -> Result<()> {
+        let (rows, cols) = tokens.dims2()?;
+        self.validate_ref_audio_token_shape(rows, cols, context)?;
+        let flat = tokens
+            .to_device(&Device::Cpu)?
+            .flatten_all()?
+            .to_vec1::<i64>()?;
+        self.validate_ref_audio_token_values(flat.into_iter(), context)
+    }
+
+    fn validate_ref_audio_token_shape(
+        &self,
+        rows: usize,
+        cols: usize,
+        context: &str,
+    ) -> Result<()> {
+        let expected_codebooks = self.stage0.config().num_audio_codebook;
+        if rows != expected_codebooks {
+            return Err(OmniVoiceError::InvalidData(format!(
+                "{context}: ref_audio_tokens expected {expected_codebooks} codebooks, got shape ({rows}, {cols})"
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_ref_audio_token_values<I>(&self, tokens: I, context: &str) -> Result<()>
+    where
+        I: IntoIterator<Item = i64>,
+    {
+        let audio_mask_id = self.stage0.config().audio_mask_id;
+        if let Some((flat_index, token)) = tokens
+            .into_iter()
+            .enumerate()
+            .find(|(_, token)| *token < 0 || *token >= audio_mask_id)
+        {
+            return Err(OmniVoiceError::InvalidData(format!(
+                "{context}: ref_audio_tokens[{flat_index}]={token} is outside valid range 0..={}",
+                audio_mask_id.saturating_sub(1)
+            )));
+        }
+        Ok(())
+    }
+
     fn materialize_request(&self, request: &GenerationRequest) -> Result<GenerationRequest> {
         let batch_size = request.texts.len();
         let mut request = request.clone();
@@ -392,7 +445,11 @@ impl Phase3Pipeline {
             normalize_option_prompts(&request.voice_clone_prompts, batch_size)?;
 
         for index in 0..batch_size {
-            if request.voice_clone_prompts[index].is_some() {
+            if let Some(prompt) = request.voice_clone_prompts[index].as_ref() {
+                self.validate_ref_audio_tokens(
+                    &prompt.ref_audio_tokens,
+                    &format!("request item {index}"),
+                )?;
                 continue;
             }
             if let Some(ref_audio) = request.ref_audios[index].clone() {
@@ -424,6 +481,10 @@ impl Phase3Pipeline {
         let mut device_voice_clone_prompts = Vec::with_capacity(batch_size);
         for index in 0..batch_size {
             if let Some(prompt) = request.voice_clone_prompts[index].clone() {
+                self.validate_ref_audio_tokens(
+                    &prompt.ref_audio_tokens,
+                    &format!("request item {index}"),
+                )?;
                 device_voice_clone_prompts.push(Some(DeviceVoiceClonePrompt {
                     ref_audio_tokens: prompt.ref_audio_tokens.to_candle(self.stage0.device())?,
                     ref_text: prompt.ref_text,
@@ -675,6 +736,7 @@ impl Phase3Pipeline {
                 }
                 let generated = self.run_chunk_batch(
                     task,
+                    chunk_index,
                     &indices,
                     indices
                         .iter()
@@ -702,6 +764,7 @@ impl Phase3Pipeline {
             if !first_indices.is_empty() {
                 let generated = self.run_chunk_batch(
                     task,
+                    0,
                     &first_indices,
                     first_indices
                         .iter()
@@ -747,6 +810,7 @@ impl Phase3Pipeline {
                     .collect::<Result<Vec<_>>>()?;
                 let generated = self.run_chunk_batch(
                     task,
+                    chunk_index,
                     &indices,
                     indices
                         .iter()
@@ -766,11 +830,23 @@ impl Phase3Pipeline {
     fn run_chunk_batch(
         &self,
         task: &crate::contracts::GenerationTask,
+        chunk_index: usize,
         indices: &[usize],
         texts: Vec<String>,
         ref_audio_tokens: Vec<Option<crate::contracts::I64Tensor2>>,
         ref_texts: Vec<Option<String>>,
     ) -> Result<Vec<crate::contracts::I64Tensor2>> {
+        for (local_index, maybe_tokens) in ref_audio_tokens.iter().enumerate() {
+            if let Some(tokens) = maybe_tokens {
+                self.validate_ref_audio_tokens(
+                    tokens,
+                    &format!(
+                        "chunked CPU item {} chunk {}",
+                        indices[local_index], chunk_index
+                    ),
+                )?;
+            }
+        }
         let target_lens = indices
             .iter()
             .enumerate()
@@ -845,6 +921,7 @@ impl Phase3Pipeline {
                 }
                 let generated = self.run_chunk_batch_device(
                     task,
+                    chunk_index,
                     &indices,
                     indices
                         .iter()
@@ -872,6 +949,7 @@ impl Phase3Pipeline {
             if !first_indices.is_empty() {
                 let generated = self.run_chunk_batch_device(
                     task,
+                    0,
                     &first_indices,
                     first_indices
                         .iter()
@@ -917,6 +995,7 @@ impl Phase3Pipeline {
                     .collect::<Result<Vec<_>>>()?;
                 let generated = self.run_chunk_batch_device(
                     task,
+                    chunk_index,
                     &indices,
                     indices
                         .iter()
@@ -936,11 +1015,23 @@ impl Phase3Pipeline {
     fn run_chunk_batch_device(
         &self,
         task: &DeviceGenerationTask,
+        chunk_index: usize,
         indices: &[usize],
         texts: Vec<String>,
         ref_audio_tokens: Vec<Option<Tensor>>,
         ref_texts: Vec<Option<String>>,
     ) -> Result<Vec<Tensor>> {
+        for (local_index, maybe_tokens) in ref_audio_tokens.iter().enumerate() {
+            if let Some(tokens) = maybe_tokens {
+                self.validate_device_ref_audio_tokens(
+                    tokens,
+                    &format!(
+                        "chunked device item {} chunk {}",
+                        indices[local_index], chunk_index
+                    ),
+                )?;
+            }
+        }
         let target_lens = indices
             .iter()
             .enumerate()

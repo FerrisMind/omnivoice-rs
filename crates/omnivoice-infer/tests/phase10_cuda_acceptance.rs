@@ -6,7 +6,8 @@ use candle_core::DType;
 use omnivoice_infer::{
     artifacts::ReferenceArtifactBundle,
     contracts::{
-        DecodedAudio, GenerationRequest, ReferenceAudioInput, VoiceClonePrompt, WaveformInput,
+        DecodedAudio, GenerationRequest, I64Tensor2, ReferenceAudioInput, VoiceClonePrompt,
+        WaveformInput,
     },
     gpu_lock::acquire_gpu_test_lock,
     pipeline::Phase3Pipeline,
@@ -36,6 +37,16 @@ fn auto_pipeline() -> Phase3Pipeline {
             .with_seed(1234),
     )
     .unwrap()
+}
+
+fn multiline_non_english_text() -> String {
+    [
+        "第一行 你好世界，我们正在验证多行中文长文本推理。",
+        "第二行\t这里包含额外空白和换行，用来覆盖上游兼容的文本归一化。",
+        "第三行 这一段继续拉长文本，确保请求稳定进入 chunked inference 路径。",
+        "第四行 我们需要确认后续分块和参考提示都保持在合法音频 token 域内。",
+    ]
+    .join("\n")
 }
 
 #[test]
@@ -115,6 +126,29 @@ fn phase10_cuda_clone_with_prebuilt_prompt_matches_reference_audio() {
         pipeline.generate_tokens(&request).unwrap(),
         pipeline.generate_tokens(&expected_request).unwrap()
     );
+}
+
+#[test]
+fn phase10_cuda_invalid_voice_clone_prompt_fails_before_kernel_launch() {
+    let _guard = acquire_gpu_test_lock().unwrap();
+    let mut tokens = vec![0_i64; 8 * 16];
+    tokens[5] = 1024;
+
+    let mut request = GenerationRequest::new_text_only(multiline_non_english_text());
+    request.languages = vec![Some("zh".to_string())];
+    request.durations = vec![Some(31.0)];
+    request.ref_audios = vec![None];
+    request.ref_texts = vec![None];
+    request.voice_clone_prompts = vec![Some(VoiceClonePrompt {
+        ref_audio_tokens: I64Tensor2::new((8, 16), tokens).unwrap(),
+        ref_text: "参考文本".to_string(),
+        ref_rms: Some(0.1),
+    })];
+
+    let error = cuda_f32_pipeline().generate(&request).unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("request item 0"), "{message}");
+    assert!(message.contains("outside valid range"), "{message}");
 }
 
 #[test]

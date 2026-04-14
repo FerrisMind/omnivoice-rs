@@ -21,6 +21,16 @@ fn cuda_f32_pipeline() -> Phase3Pipeline {
     .unwrap()
 }
 
+fn multiline_non_english_text() -> String {
+    [
+        "第一行 你好世界，我们正在验证多行中文长文本推理。",
+        "第二行\t这里包含额外空白和换行，用来覆盖上游兼容的文本归一化。",
+        "第三行 这一段继续拉长文本，确保请求稳定进入 chunked inference 路径。",
+        "第四行 我们需要确认后续分块和参考提示都保持在合法音频 token 域内。",
+    ]
+    .join("\n")
+}
+
 #[test]
 fn phase8_chunked_inference_rejects_mixed_reference_batch() {
     let _guard = acquire_gpu_test_lock().unwrap();
@@ -151,6 +161,37 @@ fn phase8_long_form_clone_preserves_original_reference_for_each_chunk() {
 }
 
 #[test]
+fn phase8_long_form_multiline_non_english_clone_chunks_stay_in_audio_domain() {
+    let _guard = acquire_gpu_test_lock().unwrap();
+    let pipeline = cuda_f32_pipeline();
+    let prompt = pipeline
+        .create_voice_clone_prompt_from_audio(
+            &ReferenceAudioInput::from_path(ref_audio_path()),
+            Some("State-of-the-art text-to-speech model for 600+ languages, supporting"),
+            true,
+            None,
+        )
+        .unwrap();
+
+    let mut request = GenerationRequest::new_text_only(multiline_non_english_text());
+    request.languages = vec![Some("zh".to_string())];
+    request.ref_audios = vec![None];
+    request.ref_texts = vec![None];
+    request.voice_clone_prompts = vec![Some(prompt)];
+    request.durations = vec![Some(31.0)];
+
+    let generated = pipeline.generate_tokens(&request).unwrap();
+    let chunks = expect_chunked(generated.into_iter().next().unwrap());
+    assert!(
+        chunks.len() > 1,
+        "expected multiline text to trigger chunking"
+    );
+    for chunk in &chunks {
+        assert_token_domain(&chunk.data);
+    }
+}
+
+#[test]
 fn phase8_raw_reference_and_prebuilt_prompt_generate_identical_tokens() {
     let _guard = acquire_gpu_test_lock().unwrap();
     let pipeline = cuda_f32_pipeline();
@@ -223,4 +264,8 @@ fn expect_chunked(tokens: GeneratedTokens) -> Vec<omnivoice_infer::contracts::I6
         GeneratedTokens::Single(_) => panic!("expected chunked token tensors"),
         GeneratedTokens::Chunked(chunks) => chunks,
     }
+}
+
+fn assert_token_domain(tokens: &[i64]) {
+    assert!(tokens.iter().all(|token| (0..=1023).contains(token)));
 }
