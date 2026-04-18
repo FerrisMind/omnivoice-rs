@@ -56,6 +56,18 @@ fn prepare_prompt_audio_preprocess_skips_long_trim_when_ref_text_is_provided() {
 }
 
 #[test]
+fn prepare_prompt_audio_preprocess_clamps_non_ms_aligned_reference_audio() {
+    let processor = ReferenceAudioProcessor::new(24_000, 10);
+    let input = ReferenceAudioInput::Waveform(WaveformInput::mono(vec![0.2; 23_999], 24_000));
+
+    let prepared = processor.prepare_prompt_audio(&input, None, true).unwrap();
+
+    assert_eq!(prepared.ref_text, None);
+    assert_eq!(prepared.waveform.len(), 23_990);
+    assert_eq!(prepared.waveform.len() % 10, 0);
+}
+
+#[test]
 fn postprocess_helpers_match_python_volume_and_padding_contracts() {
     let auto_normalized = peak_normalize_auto_voice(&[1.0, -0.25]).unwrap();
     let auto_peak = auto_normalized

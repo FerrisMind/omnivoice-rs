@@ -1,4 +1,5 @@
 use crate::error::{OmniVoiceError, Result};
+use std::ops::Range;
 
 const PCM16_SCALE: f32 = 32768.0;
 
@@ -212,9 +213,8 @@ fn split_on_silence(
     ranges
         .into_iter()
         .map(|(start_ms, end_ms)| {
-            audio[sample_index_from_ms(start_ms, sample_rate)
-                ..sample_index_from_ms(end_ms, sample_rate)]
-                .to_vec()
+            let range = clamped_sample_range_from_ms(start_ms, end_ms, sample_rate, audio.len());
+            audio[range].to_vec()
         })
         .collect()
 }
@@ -321,14 +321,21 @@ fn remove_silence_edges_i16(
 ) -> Vec<i16> {
     let mut trimmed = audio.to_vec();
     let leading_ms = detect_leading_silence(&trimmed, sample_rate, silence_threshold_db, 10);
-    trimmed = trimmed[sample_index_from_ms(leading_ms.saturating_sub(lead_sil_ms), sample_rate)..]
-        .to_vec();
+    let leading_start = clamped_sample_index_from_ms(
+        leading_ms.saturating_sub(lead_sil_ms),
+        sample_rate,
+        trimmed.len(),
+    );
+    trimmed = trimmed[leading_start..].to_vec();
 
     trimmed.reverse();
     let trailing_ms = detect_leading_silence(&trimmed, sample_rate, silence_threshold_db, 10);
-    trimmed = trimmed
-        [sample_index_from_ms(trailing_ms.saturating_sub(trail_sil_ms), sample_rate)..]
-        .to_vec();
+    let trailing_start = clamped_sample_index_from_ms(
+        trailing_ms.saturating_sub(trail_sil_ms),
+        sample_rate,
+        trimmed.len(),
+    );
+    trimmed = trimmed[trailing_start..].to_vec();
     trimmed.reverse();
     trimmed
 }
@@ -377,6 +384,21 @@ fn sample_count_from_ms(duration_ms: u32, sample_rate: u32) -> usize {
 
 fn sample_index_from_ms(duration_ms: u32, sample_rate: u32) -> usize {
     sample_count_from_ms(duration_ms, sample_rate)
+}
+
+fn clamped_sample_index_from_ms(duration_ms: u32, sample_rate: u32, audio_len: usize) -> usize {
+    sample_index_from_ms(duration_ms, sample_rate).min(audio_len)
+}
+
+fn clamped_sample_range_from_ms(
+    start_ms: u32,
+    end_ms: u32,
+    sample_rate: u32,
+    audio_len: usize,
+) -> Range<usize> {
+    let end = clamped_sample_index_from_ms(end_ms, sample_rate, audio_len);
+    let start = clamped_sample_index_from_ms(start_ms, sample_rate, audio_len).min(end);
+    start..end
 }
 
 fn millis_from_samples(sample_count: usize, sample_rate: u32) -> u32 {
