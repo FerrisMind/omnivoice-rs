@@ -66,26 +66,49 @@ fn tensor_contracts_convert_to_candle() {
 
 #[test]
 fn reproduces_auto_prompt_contract() {
+    if !support::model_fixture_available()
+        || !support::reference_fixture_available("debug_auto_en_short")
+    {
+        return;
+    }
     assert_prompt_matches_reference(ArtifactCase::DebugAutoEnShort);
 }
 
 #[test]
 fn reproduces_clone_prompt_contract() {
+    if !support::model_fixture_available()
+        || !support::reference_fixture_available("clone_user_ref")
+    {
+        return;
+    }
     assert_prompt_matches_reference(ArtifactCase::CloneUserRef);
 }
 
 #[test]
 fn reproduces_design_en_prompt_contract() {
+    if !support::model_fixture_available()
+        || !support::reference_fixture_available("design_en_british")
+    {
+        return;
+    }
     assert_prompt_matches_reference(ArtifactCase::DesignEnBritish);
 }
 
 #[test]
 fn reproduces_design_zh_prompt_contract() {
+    if !support::model_fixture_available()
+        || !support::reference_fixture_available("design_zh_control")
+    {
+        return;
+    }
     assert_prompt_matches_reference(ArtifactCase::DesignZhControl);
 }
 
 #[test]
 fn duration_override_is_applied() {
+    if !support::model_fixture_available() {
+        return;
+    }
     let frontend = Frontend::from_model_root(model_root()).unwrap();
     let request =
         GenerationRequest::new_text_only("Phase three duration override.").with_duration(2.0);
@@ -97,6 +120,11 @@ fn duration_override_is_applied() {
 
 #[test]
 fn denoise_token_only_present_for_clone_prompt() {
+    if !support::model_fixture_available()
+        || !support::reference_fixture_available("clone_user_ref")
+    {
+        return;
+    }
     let frontend = Frontend::from_model_root(model_root()).unwrap();
 
     let auto_request = GenerationRequest::new_text_only("Auto voice should not include denoise.");
@@ -114,6 +142,11 @@ fn denoise_token_only_present_for_clone_prompt() {
 
 #[test]
 fn stage1_prepare_loads_reference_tokens_into_candle() {
+    if !support::model_fixture_available()
+        || !support::reference_fixture_available("debug_auto_en_short")
+    {
+        return;
+    }
     let pipeline = Phase3Pipeline::from_options(RuntimeOptions::new(model_root())).unwrap();
 
     let decode = pipeline
@@ -129,6 +162,11 @@ fn stage1_prepare_loads_reference_tokens_into_candle() {
 
 #[test]
 fn prepare_prompt_builds_candle_backed_batch() {
+    if !support::model_fixture_available()
+        || !support::reference_fixture_available("debug_auto_en_short")
+    {
+        return;
+    }
     let pipeline = Phase3Pipeline::from_options(RuntimeOptions::new(model_root())).unwrap();
 
     let batch = pipeline

@@ -2,14 +2,23 @@
 
 mod support;
 
+use std::path::Path;
+
+#[cfg(feature = "cuda")]
+use std::sync::{Mutex, OnceLock};
+
 use omnivoice_infer::{
     artifacts::ReferenceArtifactBundle,
-    contracts::GeneratedTokens,
     gpu_lock::acquire_gpu_test_lock,
     pipeline::Phase3Pipeline,
     runtime::{DTypeSpec, DeviceSpec, RuntimeOptions},
 };
-use support::{model_root, stage0_cpu_strict_reference_root, stage0_reference_root};
+use support::{model_root, stage0_cpu_strict_reference_root};
+
+#[cfg(feature = "cuda")]
+use omnivoice_infer::contracts::GeneratedTokens;
+#[cfg(feature = "cuda")]
+use support::stage0_reference_root;
 
 fn cpu_reference_root() -> std::path::PathBuf {
     stage0_cpu_strict_reference_root()
@@ -38,6 +47,12 @@ fn cuda_f16_pipeline() -> Phase3Pipeline {
             .with_dtype(DTypeSpec::F16),
     )
     .unwrap()
+}
+
+#[cfg(feature = "cuda")]
+fn stage0_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[test]
@@ -100,7 +115,7 @@ fn phase6_stage0_cpu_stage1_smoke_matches_reference_audio() {
 fn phase6_stage0_cuda_debug_auto_matches_reference() {
     let _guard = acquire_gpu_test_lock().unwrap();
     let pipeline = cuda_f32_pipeline();
-    assert_debug_case_at_root(&pipeline, cpu_reference_root(), "det_debug_auto_en_short");
+    assert_debug_case_at_root(&pipeline, &cpu_reference_root(), "det_debug_auto_en_short");
 }
 
 #[cfg(feature = "cuda")]
@@ -108,7 +123,7 @@ fn phase6_stage0_cuda_debug_auto_matches_reference() {
 fn phase6_stage0_cuda_debug_clone_matches_reference() {
     let _guard = acquire_gpu_test_lock().unwrap();
     let pipeline = cuda_f32_pipeline();
-    assert_debug_case_at_root(&pipeline, cpu_reference_root(), "det_debug_clone_user_ref");
+    assert_debug_case_at_root(&pipeline, &cpu_reference_root(), "det_debug_clone_user_ref");
 }
 
 #[cfg(feature = "cuda")]
@@ -240,7 +255,7 @@ fn phase6_stage0_cuda_auto_main_gpu_contract_matches_reference_shape_and_range()
     let pipeline = cuda_f16_pipeline();
     assert_generated_contract_matches_reference(
         &pipeline,
-        gpu_reference_root(),
+        &gpu_reference_root(),
         "det_auto_en_short",
     );
 }
@@ -254,7 +269,7 @@ fn phase6_stage0_cuda_clone_main_gpu_contract_matches_reference_shape_and_range(
     let pipeline = cuda_f16_pipeline();
     assert_generated_contract_matches_reference(
         &pipeline,
-        gpu_reference_root(),
+        &gpu_reference_root(),
         "det_clone_user_ref",
     );
 }
@@ -268,7 +283,7 @@ fn phase6_stage0_cuda_design_main_gpu_contract_matches_reference_shape_and_range
     let pipeline = cuda_f16_pipeline();
     assert_generated_contract_matches_reference(
         &pipeline,
-        gpu_reference_root(),
+        &gpu_reference_root(),
         "det_design_en_british",
     );
 }
@@ -282,16 +297,16 @@ fn phase6_stage0_cuda_chunked_main_gpu_contract_matches_reference_shape_and_rang
     let pipeline = cuda_f16_pipeline();
     assert_generated_contract_matches_reference(
         &pipeline,
-        gpu_reference_root(),
+        &gpu_reference_root(),
         "det_auto_long_chunked",
     );
 }
 
 fn assert_debug_case(pipeline: &Phase3Pipeline, case_id: &str) {
-    assert_debug_case_at_root(pipeline, cpu_reference_root(), case_id);
+    assert_debug_case_at_root(pipeline, &cpu_reference_root(), case_id);
 }
 
-fn assert_debug_case_at_root(pipeline: &Phase3Pipeline, reference_root: &str, case_id: &str) {
+fn assert_debug_case_at_root(pipeline: &Phase3Pipeline, reference_root: &Path, case_id: &str) {
     let reference_bundle = ReferenceArtifactBundle::from_root(reference_root).unwrap();
     let debug = pipeline
         .debug_stage0_from_reference_case(reference_root, case_id)
@@ -351,7 +366,7 @@ fn assert_metric_exact(debug: &omnivoice_infer::stage0_model::Stage0DebugRun, na
 #[cfg(feature = "cuda")]
 fn assert_generated_contract_matches_reference(
     pipeline: &Phase3Pipeline,
-    reference_root: &str,
+    reference_root: &Path,
     case_id: &str,
 ) {
     let generated = pipeline

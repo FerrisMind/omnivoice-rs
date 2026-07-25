@@ -12,7 +12,7 @@ use tokenizers::Tokenizer;
 
 use crate::{
     error::{OmniVoiceError, Result},
-    model_source::DEFAULT_WHISPER_REPO,
+    model_source::{looks_like_local_path, DEFAULT_WHISPER_REPO},
 };
 
 const DEFAULT_LOCAL_ASR_DIR_NAME: &str = "whisper";
@@ -81,6 +81,7 @@ pub struct WhisperAsr {
     transcribe_token: u32,
     eot_token: u32,
     no_timestamps_token: u32,
+    language_tokens: Vec<u32>,
     mel_filters: Vec<f32>,
 }
 
@@ -111,6 +112,10 @@ impl WhisperAsr {
             )
         };
         let no_timestamps_token = token_id(&tokenizer, whisper::NO_TIMESTAMPS_TOKEN)?;
+        let language_tokens = find_language_token_ids(&tokenizer)
+            .into_iter()
+            .filter(|token_id| (*token_id as usize) < config.vocab_size)
+            .collect();
         let suppress_tokens: Vec<f32> = (0..config.vocab_size as u32)
             .map(|token| {
                 if config.suppress_tokens.contains(&token) || token == no_timestamps_token {
@@ -129,12 +134,28 @@ impl WhisperAsr {
             transcribe_token: token_id(&tokenizer, whisper::TRANSCRIBE_TOKEN)?,
             eot_token: token_id(&tokenizer, whisper::EOT_TOKEN)?,
             no_timestamps_token,
+            language_tokens,
             device,
             mel_filters: load_mel_filters(config.num_mel_bins)?,
         })
     }
 
     pub fn transcribe(&mut self, samples: &[f32], sample_rate: u32) -> Result<String> {
+        if samples.is_empty() {
+            return Err(OmniVoiceError::InvalidRequest(
+                "ASR input audio is empty".to_string(),
+            ));
+        }
+        if let Some(index) = samples.iter().position(|sample| !sample.is_finite()) {
+            return Err(OmniVoiceError::InvalidRequest(format!(
+                "ASR input sample at index {index} is not finite"
+            )));
+        }
+        if sample_rate == 0 {
+            return Err(OmniVoiceError::InvalidRequest(
+                "ASR input sample rate must be greater than zero".to_string(),
+            ));
+        }
         let pcm = if sample_rate == whisper::SAMPLE_RATE as u32 {
             samples.to_vec()
         } else {
@@ -144,11 +165,11 @@ impl WhisperAsr {
         let mel_len = mel.len() / self.config.num_mel_bins;
         let mel = Tensor::from_vec(mel, (1, self.config.num_mel_bins, mel_len), &self.device)?;
         let audio_features = self.model.encoder_forward(&mel, true)?;
-        let mut tokens = vec![
-            self.sot_token,
-            self.transcribe_token,
-            self.no_timestamps_token,
-        ];
+        let mut tokens = vec![self.sot_token];
+        if let Some(language_token) = self.detect_language(&audio_features)? {
+            tokens.push(language_token);
+        }
+        tokens.extend([self.transcribe_token, self.no_timestamps_token]);
 
         let sample_len = self.model.config().max_target_positions / 2;
         for index in 0..sample_len {
@@ -175,6 +196,36 @@ impl WhisperAsr {
             .map(|text| text.trim().to_string())
             .map_err(Into::into)
     }
+
+    fn detect_language(&mut self, audio_features: &Tensor) -> Result<Option<u32>> {
+        if self.language_tokens.is_empty() {
+            return Ok(None);
+        }
+
+        let tokens = Tensor::new(&[self.sot_token], &self.device)?.unsqueeze(0)?;
+        let ys = self.model.decoder_forward(&tokens, audio_features, true)?;
+        let (_, sequence_length, _) = ys.dims3()?;
+        let logits = self
+            .model
+            .final_linear(&ys.i((..1, sequence_length - 1..))?)?
+            .i(0)?
+            .i(0)?;
+
+        let mut best = None;
+        for token_id in &self.language_tokens {
+            let score = logits.i(*token_id as usize)?.to_scalar::<f32>()?;
+            if !score.is_finite() {
+                continue;
+            }
+            if best
+                .as_ref()
+                .is_none_or(|(_, best_score): &(u32, f32)| score > *best_score)
+            {
+                best = Some((*token_id, score));
+            }
+        }
+        Ok(best.map(|(token_id, _)| token_id))
+    }
 }
 
 pub fn default_local_asr_model_path() -> &'static str {
@@ -194,6 +245,12 @@ pub fn default_asr_model_spec(model_root: Option<&Path>) -> String {
 fn resolve_model_files(model_id_or_path: &str) -> Result<(PathBuf, PathBuf, PathBuf, bool)> {
     let local_path = Path::new(model_id_or_path);
     if local_path.exists() {
+        if !local_path.is_dir() {
+            return Err(OmniVoiceError::InvalidData(format!(
+                "local Whisper model path is not a directory: {}",
+                local_path.display()
+            )));
+        }
         if let Some(weights) = find_local_whisper_weights(local_path)? {
             return Ok((
                 local_path.join(DEFAULT_WHISPER_CONFIG_FILE),
@@ -208,6 +265,11 @@ fn resolve_model_files(model_id_or_path: &str) -> Result<(PathBuf, PathBuf, Path
             local_path.join("model.safetensors"),
             false,
         ));
+    }
+    if looks_like_local_path(model_id_or_path) {
+        return Err(OmniVoiceError::MissingArtifact {
+            path: local_path.to_path_buf(),
+        });
     }
     let api = Api::new().map_err(|error| OmniVoiceError::InvalidData(error.to_string()))?;
     let repo = api.repo(Repo::with_revision(
@@ -373,6 +435,27 @@ fn token_id(tokenizer: &Tokenizer, token: &str) -> Result<u32> {
     tokenizer.token_to_id(token).ok_or_else(|| {
         OmniVoiceError::InvalidData(format!("Whisper tokenizer is missing token {token}"))
     })
+}
+
+fn find_language_token_ids(tokenizer: &Tokenizer) -> Vec<u32> {
+    let mut language_tokens = tokenizer
+        .get_vocab(true)
+        .into_iter()
+        .filter_map(|(token, token_id)| {
+            let code = token.strip_prefix("<|")?.strip_suffix("|>")?;
+            if !(code.len() == 2 || code.len() == 3)
+                || !code.bytes().all(|byte| byte.is_ascii_lowercase())
+                || code == "xx"
+                || code == "xxx"
+            {
+                return None;
+            }
+            Some(token_id)
+        })
+        .collect::<Vec<_>>();
+    language_tokens.sort_unstable();
+    language_tokens.dedup();
+    language_tokens
 }
 
 fn mmap_var_builder(
@@ -558,6 +641,14 @@ mod tests {
 
         let error = find_remote_whisper_assets(DEFAULT_HF_ASR_MODEL, &siblings).unwrap_err();
 
-        assert!(error.to_string().contains("whisper-large-v3-turbo-q4_0.gguf"));
+        assert!(error
+            .to_string()
+            .contains("whisper-large-v3-turbo-q4_0.gguf"));
+    }
+
+    #[test]
+    fn missing_windows_whisper_path_is_not_treated_as_remote_repo() {
+        let error = resolve_model_files(r"C:\definitely-missing\whisper").unwrap_err();
+        assert!(error.to_string().contains("definitely-missing"));
     }
 }

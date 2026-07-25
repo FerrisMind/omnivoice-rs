@@ -21,10 +21,24 @@ pub fn build_timesteps(
             "num_step must be > 0".to_string(),
         ));
     }
-    let mut timesteps = Vec::with_capacity(num_step + 1);
+    if !t_start.is_finite() || !t_end.is_finite() || !t_shift.is_finite() || t_shift <= 0.0 {
+        return Err(OmniVoiceError::InvalidRequest(
+            "timestep parameters must be finite and t_shift must be greater than zero".to_string(),
+        ));
+    }
+    let capacity = num_step
+        .checked_add(1)
+        .ok_or_else(|| OmniVoiceError::InvalidRequest("num_step is too large".to_string()))?;
+    let mut timesteps = Vec::with_capacity(capacity);
     for index in 0..=num_step {
         let t = t_start + ((t_end - t_start) * index as f32 / num_step as f32);
-        timesteps.push((t_shift * t) / (1.0 + (t_shift - 1.0) * t));
+        let value = (t_shift * t) / (1.0 + (t_shift - 1.0) * t);
+        if !value.is_finite() {
+            return Err(OmniVoiceError::InvalidRequest(
+                "timestep schedule contains a non-finite value".to_string(),
+            ));
+        }
+        timesteps.push(value);
     }
     Ok(timesteps)
 }
@@ -35,15 +49,35 @@ pub fn build_unmask_schedules(
     timesteps: &[f32],
     num_step: usize,
 ) -> Result<Vec<Vec<usize>>> {
-    if timesteps.len() != num_step + 2 {
+    if num_step == 0 {
+        return Err(OmniVoiceError::InvalidRequest(
+            "num_step must be > 0".to_string(),
+        ));
+    }
+    let expected_len = num_step
+        .checked_add(1)
+        .ok_or_else(|| OmniVoiceError::InvalidRequest("num_step is too large".to_string()))?;
+    if timesteps.len() != expected_len {
         return Err(OmniVoiceError::InvalidRequest(format!(
-            "timesteps length must be num_step + 2, got {} for num_step {num_step}",
+            "timesteps length must be num_step + 1, got {} for num_step {num_step}",
             timesteps.len()
         )));
     }
+    if timesteps.iter().any(|value| !value.is_finite()) {
+        return Err(OmniVoiceError::InvalidRequest(
+            "timesteps must contain only finite values".to_string(),
+        ));
+    }
+    if timesteps.windows(2).any(|window| window[1] < window[0]) {
+        return Err(OmniVoiceError::InvalidRequest(
+            "timesteps must be non-decreasing".to_string(),
+        ));
+    }
     let mut schedules = Vec::with_capacity(target_lens.len());
     for target_len in target_lens {
-        let total_mask = target_len * num_audio_codebook;
+        let total_mask = target_len.checked_mul(num_audio_codebook).ok_or_else(|| {
+            OmniVoiceError::InvalidRequest("target token count is too large".to_string())
+        })?;
         let mut remaining = total_mask;
         let mut schedule = Vec::with_capacity(num_step);
         for step in 0..num_step {
@@ -78,6 +112,36 @@ pub fn pack_cfg_batch(prepared: &[PreparedPrompt], target_lens: &[usize]) -> Res
 
     let batch_size = prepared.len();
     let num_audio_codebook = prepared[0].prompt.input_ids.dims().1;
+    if num_audio_codebook == 0 {
+        return Err(OmniVoiceError::InvalidRequest(
+            "prepared prompts must contain at least one audio codebook".to_string(),
+        ));
+    }
+    for (index, (item, target_len)) in prepared.iter().zip(target_lens).enumerate() {
+        let (input_batch, input_codebooks, input_len) = item.prompt.input_ids.dims();
+        let (mask_batch, mask_len) = item.prompt.audio_mask.dims();
+        if input_batch != 1
+            || input_codebooks != num_audio_codebook
+            || input_len != item.total_length
+            || mask_batch != 1
+            || mask_len != item.total_length
+        {
+            return Err(OmniVoiceError::InvalidData(format!(
+                "prepared prompt {index} has inconsistent tensor dimensions"
+            )));
+        }
+        if item.audio_mask_id != prepared[0].audio_mask_id {
+            return Err(OmniVoiceError::InvalidData(format!(
+                "prepared prompt {index} uses a different audio mask id"
+            )));
+        }
+        if *target_len == 0 || *target_len > item.total_length {
+            return Err(OmniVoiceError::InvalidRequest(format!(
+                "target length at index {index} must be in 1..={}",
+                item.total_length
+            )));
+        }
+    }
     let max_c_len = prepared
         .iter()
         .map(|item| item.total_length)
@@ -136,7 +200,7 @@ pub fn pack_cfg_batch(prepared: &[PreparedPrompt], target_lens: &[usize]) -> Res
         }
     }
 
-    let timesteps = build_timesteps(0.0, 1.0, 33, 0.1)?;
+    let timesteps = build_timesteps(0.0, 1.0, 32, 0.1)?;
     let schedules = build_unmask_schedules(target_lens, num_audio_codebook, &timesteps, 32)?;
 
     Ok(BatchedInputs {
@@ -165,6 +229,17 @@ pub fn predict_tokens_with_scoring(
     if num_audio_codebook == 0 || audio_vocab_size == 0 {
         return Err(OmniVoiceError::InvalidRequest(
             "num_audio_codebook and audio_vocab_size must be > 0".to_string(),
+        ));
+    }
+    if audio_mask_id >= audio_vocab_size {
+        return Err(OmniVoiceError::InvalidRequest(format!(
+            "audio mask token {audio_mask_id} is outside vocab size {audio_vocab_size}"
+        )));
+    }
+    if !guidance_scale.is_finite() || !class_temperature.is_finite() || class_temperature < 0.0 {
+        return Err(OmniVoiceError::InvalidRequest(
+            "guidance_scale and class_temperature must be finite, with class_temperature non-negative"
+                .to_string(),
         ));
     }
     if !c_logits
@@ -203,14 +278,14 @@ pub fn predict_tokens_with_scoring(
                 if index == audio_mask_id {
                     continue;
                 }
-                let maybe_scaled = if class_temperature > 0.0 {
-                    *score / class_temperature
-                } else {
-                    *score
-                };
-                if maybe_scaled > best_score {
+                // Temperature scaling preserves the argmax.  The live tensor
+                // path adds Gumbel noise for non-zero temperatures; this
+                // host-side helper has no RNG parameter, so keep its
+                // deterministic fallback while retaining the unscaled
+                // confidence used for position selection.
+                if *score > best_score {
                     best_index = index;
-                    best_score = maybe_scaled;
+                    best_score = *score;
                 }
             }
             pred_tokens.push(best_index as i64);

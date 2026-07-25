@@ -98,7 +98,7 @@ impl AudioTokenizerModelConfig {
     pub fn from_artifacts(audio_tokenizer: &AudioTokenizerArtifacts) -> Result<Self> {
         let raw: AudioTokenizerConfigFile =
             serde_json::from_str(&fs::read_to_string(audio_tokenizer.config_path())?)?;
-        Ok(Self {
+        let config = Self {
             sample_rate: raw.sample_rate,
             semantic_sample_rate: raw.semantic_sample_rate,
             downsample_factor: raw.downsample_factor,
@@ -130,11 +130,93 @@ impl AudioTokenizerModelConfig {
             semantic_hidden_activation: parse_activation(&raw.semantic_model_config.hidden_act)?,
             semantic_num_conv_pos_embeddings: raw.semantic_model_config.num_conv_pos_embeddings,
             semantic_num_conv_pos_groups: raw.semantic_model_config.num_conv_pos_embedding_groups,
-        })
+        };
+        if config.sample_rate == 0 || config.semantic_sample_rate == 0 {
+            return Err(OmniVoiceError::InvalidData(
+                "audio tokenizer sample rates must be greater than zero".to_string(),
+            ));
+        }
+        if config.downsample_factor == 0 || config.hop_length() == 0 {
+            return Err(OmniVoiceError::InvalidData(
+                "audio tokenizer downsample_factor and hop length must be greater than zero"
+                    .to_string(),
+            ));
+        }
+        if config.codebook_size == 0 || config.codebook_dim == 0 {
+            return Err(OmniVoiceError::InvalidData(
+                "audio tokenizer codebook dimensions must be greater than zero".to_string(),
+            ));
+        }
+        if config.codebook_size < 2 {
+            return Err(OmniVoiceError::InvalidData(
+                "audio tokenizer codebook_size must be at least two".to_string(),
+            ));
+        }
+        if config.target_bandwidths.is_empty()
+            || config
+                .target_bandwidths
+                .iter()
+                .any(|value| !value.is_finite() || *value <= 0.0)
+        {
+            return Err(OmniVoiceError::InvalidData(
+                "audio tokenizer target_bandwidths must contain finite positive values".to_string(),
+            ));
+        }
+        if config.acoustic_downsampling_ratios.is_empty()
+            || config.acoustic_downsampling_ratios.contains(&0)
+            || config.hop_length() == 0
+        {
+            return Err(OmniVoiceError::InvalidData(
+                "audio tokenizer acoustic downsampling ratios must be non-zero and fit usize"
+                    .to_string(),
+            ));
+        }
+        if config.strides.is_empty()
+            || config.strides.len() != config.channel_ratios.len()
+            || config.strides.contains(&0)
+            || config.channel_ratios.contains(&0)
+            || config.block_dilations.is_empty()
+            || config.block_dilations.contains(&0)
+            || config.unit_kernel_size == 0
+            || config.kernel_size == 0
+        {
+            return Err(OmniVoiceError::InvalidData(
+                "audio tokenizer encoder strides, channel ratios, kernels, and dilations are invalid"
+                    .to_string(),
+            ));
+        }
+        if config.semantic_conv_dim.len() != config.semantic_conv_kernel.len()
+            || config.semantic_conv_dim.len() != config.semantic_conv_stride.len()
+            || config.semantic_conv_dim.is_empty()
+            || config.semantic_conv_dim.contains(&0)
+            || config.semantic_conv_kernel.contains(&0)
+            || config.semantic_conv_stride.contains(&0)
+            || config.semantic_hidden_size == 0
+            || config.semantic_intermediate_size == 0
+            || config.acoustic_hidden_size == 0
+            || config.acoustic_encoder_hidden_size == 0
+            || config.semantic_num_heads == 0
+            || !config
+                .semantic_hidden_size
+                .is_multiple_of(config.semantic_num_heads)
+            || config.semantic_num_conv_pos_embeddings == 0
+            || config.semantic_num_conv_pos_groups == 0
+            || !config
+                .semantic_hidden_size
+                .is_multiple_of(config.semantic_num_conv_pos_groups)
+        {
+            return Err(OmniVoiceError::InvalidData(
+                "audio tokenizer semantic model dimensions are inconsistent".to_string(),
+            ));
+        }
+        Ok(config)
     }
 
     pub fn hop_length(&self) -> usize {
-        self.acoustic_downsampling_ratios.iter().product()
+        self.acoustic_downsampling_ratios
+            .iter()
+            .try_fold(1usize, |product, ratio| product.checked_mul(*ratio))
+            .unwrap_or(0)
     }
 
     pub fn num_quantizers(&self) -> usize {
@@ -203,6 +285,16 @@ impl AudioTokenizerRuntimePlan {
     }
 
     pub fn encode_waveform_device(&self, samples: &[f32], sample_rate: u32) -> Result<Tensor> {
+        if samples.is_empty() {
+            return Err(OmniVoiceError::InvalidRequest(
+                "audio tokenizer input waveform is empty".to_string(),
+            ));
+        }
+        if let Some(index) = samples.iter().position(|sample| !sample.is_finite()) {
+            return Err(OmniVoiceError::InvalidRequest(format!(
+                "audio tokenizer input sample at index {index} is not finite"
+            )));
+        }
         if sample_rate != self.config.sample_rate {
             return Err(OmniVoiceError::InvalidRequest(format!(
                 "audio tokenizer expects {} Hz input, got {sample_rate}",
@@ -228,7 +320,27 @@ impl AudioTokenizerRuntimePlan {
         let codes = self
             .model()?
             .encode(&waveform, semantic_waveform.as_ref())?;
-        Ok(codes.i(0)?.to_dtype(DType::I64)?)
+        let codes = codes.i(0)?.to_dtype(DType::I64)?;
+        let (quantizers, steps) = codes.dims2()?;
+        if quantizers != self.config.num_quantizers() || steps == 0 {
+            return Err(OmniVoiceError::InvalidTensorShape {
+                name: "audio_tokenizer.codes".to_string(),
+                expected: format!("({}, T>0)", self.config.num_quantizers()),
+                actual: format!("({quantizers}, {steps})"),
+            });
+        }
+        let values = codes.to_device(&Device::Cpu)?.to_vec2::<i64>()?;
+        if values
+            .iter()
+            .flatten()
+            .any(|value| *value < 0 || *value >= self.config.codebook_size as i64)
+        {
+            return Err(OmniVoiceError::InvalidData(format!(
+                "audio tokenizer produced a code outside [0, {})",
+                self.config.codebook_size
+            )));
+        }
+        Ok(codes)
     }
 
     fn model(&self) -> Result<&AudioTokenizerModel> {

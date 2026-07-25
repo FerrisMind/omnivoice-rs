@@ -1,24 +1,13 @@
 use std::{collections::HashSet, sync::OnceLock};
 
 use regex::Regex;
+use tokenizers::Tokenizer;
+
+use crate::error::Result;
 
 static NEWLINE_REGEX: OnceLock<Regex> = OnceLock::new();
 static SPACE_REGEX: OnceLock<Regex> = OnceLock::new();
-
-const EMOTION_TAGS: &[&str] = &[
-    "[sigh]",
-    "[confirmation-en]",
-    "[question-en]",
-    "[question-ah]",
-    "[question-oh]",
-    "[question-ei]",
-    "[question-yi]",
-    "[surprise-ah]",
-    "[surprise-oh]",
-    "[surprise-wa]",
-    "[surprise-yo]",
-    "[dissatisfaction-hnn]",
-];
+static NONVERBAL_TAG_REGEX: OnceLock<Regex> = OnceLock::new();
 
 pub fn add_punctuation(text: &str) -> String {
     let text = text.trim();
@@ -27,8 +16,8 @@ pub fn add_punctuation(text: &str) -> String {
     }
 
     let end_punctuation = HashSet::from([
-        ';', ':', ',', '.', '!', '?', '…', ')', ']', '}', '"', '\'', '；', '：', '，', '。', '！',
-        '？', '、', '）', '】', '”', '’',
+        ';', ':', ',', '.', '!', '?', '…', ')', ']', '}', '"', '\'', '“', '”', '‘', '’', '；',
+        '：', '，', '。', '！', '？', '、', '）', '】',
     ]);
 
     if end_punctuation.contains(&text.chars().last().unwrap_or_default()) {
@@ -41,16 +30,59 @@ pub fn add_punctuation(text: &str) -> String {
 }
 
 pub fn combine_text(text: &str, ref_text: Option<&str>) -> String {
-    let mut full_text = if let Some(ref_text) = ref_text {
+    let mut full_text = if let Some(ref_text) = ref_text.filter(|value| !value.is_empty()) {
         format!("{} {}", ref_text.trim(), text.trim())
     } else {
         text.trim().to_string()
     };
 
     full_text = newline_regex().replace_all(&full_text, "").into_owned();
+    full_text = full_text.replace('\u{ff08}', "(").replace('\u{ff09}', ")");
     full_text = space_regex().replace_all(&full_text, " ").into_owned();
     full_text = remove_spaces_around_cjk(&full_text);
-    remove_whitespace_before_emotion_tags(&full_text)
+    full_text
+}
+
+pub fn tokenize_with_nonverbal_tags(tokenizer: &Tokenizer, text: &str) -> Result<Vec<u32>> {
+    let mut ids = Vec::new();
+    let mut last_end = 0;
+    let mut found_tag = false;
+
+    for matched in nonverbal_tag_regex().find_iter(text) {
+        found_tag = true;
+        if matched.start() > last_end {
+            ids.extend(
+                tokenizer
+                    .encode(&text[last_end..matched.start()], false)?
+                    .get_ids()
+                    .iter()
+                    .copied(),
+            );
+        }
+        ids.extend(
+            tokenizer
+                .encode(matched.as_str(), false)?
+                .get_ids()
+                .iter()
+                .copied(),
+        );
+        last_end = matched.end();
+    }
+
+    if !found_tag {
+        return Ok(tokenizer.encode(text, false)?.get_ids().to_vec());
+    }
+
+    if last_end < text.len() {
+        ids.extend(
+            tokenizer
+                .encode(&text[last_end..], false)?
+                .get_ids()
+                .iter()
+                .copied(),
+        );
+    }
+    Ok(ids)
 }
 
 pub fn chunk_text_punctuation(
@@ -66,7 +98,7 @@ pub fn chunk_text_punctuation(
         "i.e.", "e.g.", "vs.", "Vs.", "Etc.", "approx.", "fig.", "def.",
     ]);
     let split_punctuation: HashSet<char> = ".,;:!?。，；：！？".chars().collect();
-    let closing_marks: HashSet<char> = "\"'）]》》>」】".chars().collect();
+    let closing_marks: HashSet<char> = "\"'“”‘’）]》>」】".chars().collect();
 
     let mut sentences: Vec<Vec<char>> = Vec::new();
     let mut current = Vec::new();
@@ -155,44 +187,51 @@ fn space_regex() -> &'static Regex {
     SPACE_REGEX.get_or_init(|| Regex::new(r"[ \t]+").expect("valid space regex"))
 }
 
-fn remove_spaces_around_cjk(text: &str) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let mut compact = String::with_capacity(chars.len());
-    for (index, current) in chars.iter().enumerate() {
-        let prev = index.checked_sub(1).and_then(|i| chars.get(i)).copied();
-        let next = chars.get(index + 1).copied();
-        if current.is_whitespace() && (prev.is_some_and(is_cjk) || next.is_some_and(is_cjk)) {
-            continue;
-        }
-        compact.push(*current);
-    }
-    compact
+fn nonverbal_tag_regex() -> &'static Regex {
+    NONVERBAL_TAG_REGEX.get_or_init(|| {
+        Regex::new(
+            r"\[(laughter|sigh|confirmation-en|question-en|question-ah|question-oh|question-ei|question-yi|surprise-ah|surprise-oh|surprise-wa|surprise-yo|dissatisfaction-hnn)\]",
+        )
+        .expect("valid non-verbal tag regex")
+    })
 }
 
-fn remove_whitespace_before_emotion_tags(text: &str) -> String {
+fn remove_spaces_around_cjk(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut compact = String::with_capacity(chars.len());
     let mut index = 0;
     while index < chars.len() {
-        if chars[index].is_whitespace() {
-            let mut next = index;
-            while next < chars.len() && chars[next].is_whitespace() {
-                next += 1;
-            }
-            if starts_with_emotion_tag(&chars[next..]) {
-                index = next;
-                continue;
-            }
+        if !chars[index].is_whitespace() {
+            compact.push(chars[index]);
+            index += 1;
+            continue;
         }
-        compact.push(chars[index]);
-        index += 1;
+
+        let start = index;
+        while index < chars.len() && chars[index].is_whitespace() {
+            index += 1;
+        }
+        let prev = start.checked_sub(1).and_then(|i| chars.get(i)).copied();
+        let next = chars.get(index).copied();
+        if !prev.is_some_and(is_cjk) && !next.is_some_and(is_cjk) {
+            compact.extend(chars[start..index].iter().copied());
+        }
     }
     compact
 }
 
-fn starts_with_emotion_tag(chars: &[char]) -> bool {
-    EMOTION_TAGS.iter().any(|tag| {
-        let tag_chars: Vec<char> = tag.chars().collect();
-        chars.starts_with(&tag_chars)
-    })
+#[cfg(test)]
+mod tests {
+    use super::combine_text;
+
+    #[test]
+    fn combine_text_normalizes_python_parentheses_rules() {
+        assert_eq!(combine_text("（你好）\nworld", None), "(你好)world");
+    }
+
+    #[test]
+    fn combine_text_matches_python_empty_reference_and_cjk_whitespace_rules() {
+        assert_eq!(combine_text("hello", Some("")), "hello");
+        assert_eq!(combine_text("中   文", None), "中文");
+    }
 }

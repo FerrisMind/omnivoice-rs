@@ -38,10 +38,22 @@ impl ReferenceAudioProcessor {
     }
 
     pub fn load_input(&self, input: &ReferenceAudioInput) -> Result<WaveformInput> {
-        match input {
+        let waveform = match input {
             ReferenceAudioInput::FilePath(path) => load_audio_file(path),
             ReferenceAudioInput::Waveform(waveform) => Ok(waveform.clone()),
+        }?;
+        validate_waveform(&waveform)?;
+        if self.target_sample_rate == 0 {
+            return Err(OmniVoiceError::InvalidRequest(
+                "target audio sample rate must be greater than zero".to_string(),
+            ));
         }
+        if self.hop_length == 0 {
+            return Err(OmniVoiceError::InvalidRequest(
+                "audio hop length must be greater than zero".to_string(),
+            ));
+        }
+        Ok(waveform)
     }
 
     pub fn prepare_prompt_audio(
@@ -51,12 +63,17 @@ impl ReferenceAudioProcessor {
         preprocess_prompt: bool,
     ) -> Result<PreparedReferenceAudio> {
         let waveform = self.load_input(input)?;
-        let mut mono = mono_samples(&waveform.samples, waveform.channels);
+        let mut mono = mono_samples(&waveform.samples, waveform.channels)?;
         if waveform.sample_rate != self.target_sample_rate {
             mono = resample_linear(&mono, waveform.sample_rate, self.target_sample_rate);
         }
 
         let ref_rms = root_mean_square(&mono);
+        if ref_rms.is_some_and(|rms| !rms.is_finite()) {
+            return Err(OmniVoiceError::InvalidRequest(
+                "reference audio RMS is not finite".to_string(),
+            ));
+        }
         if let Some(rms) = ref_rms {
             if rms > 0.0 && rms < 0.1 {
                 let scale = 0.1 / rms;
@@ -277,11 +294,13 @@ fn load_audio_from_probed(
         )));
     }
 
-    Ok(WaveformInput {
+    let waveform = WaveformInput {
         samples,
         sample_rate,
         channels,
-    })
+    };
+    validate_waveform(&waveform)?;
+    Ok(waveform)
 }
 
 pub fn load_wave_file(path: impl AsRef<Path>) -> Result<WaveformInput> {
@@ -301,9 +320,21 @@ where
             .samples::<f32>()
             .collect::<std::result::Result<Vec<_>, _>>()?,
         hound::SampleFormat::Int => match spec.bits_per_sample {
+            8 => reader
+                .samples::<i8>()
+                .map(|sample| sample.map(|value| value as f32 / 128.0))
+                .collect::<std::result::Result<Vec<_>, _>>()?,
             16 => reader
                 .samples::<i16>()
                 .map(|sample| sample.map(|value| value as f32 / 32768.0))
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+            24 => reader
+                .samples::<i32>()
+                .map(|sample| sample.map(|value| value as f32 / 8_388_608.0))
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+            32 => reader
+                .samples::<i32>()
+                .map(|sample| sample.map(|value| value as f32 / 2_147_483_648.0))
                 .collect::<std::result::Result<Vec<_>, _>>()?,
             bits => {
                 return Err(OmniVoiceError::Unsupported(format!(
@@ -312,16 +343,29 @@ where
             }
         },
     };
-    Ok(WaveformInput {
+    let waveform = WaveformInput {
         samples,
         sample_rate: spec.sample_rate,
         channels: spec.channels as usize,
-    })
+    };
+    validate_waveform(&waveform)?;
+    Ok(waveform)
 }
 
-pub fn mono_samples(samples: &[f32], channels: usize) -> Vec<f32> {
-    if channels <= 1 {
-        return samples.to_vec();
+pub fn mono_samples(samples: &[f32], channels: usize) -> Result<Vec<f32>> {
+    if channels == 0 {
+        return Err(OmniVoiceError::InvalidRequest(
+            "audio channel count must be greater than zero".to_string(),
+        ));
+    }
+    if channels == 1 {
+        return Ok(samples.to_vec());
+    }
+    if !samples.len().is_multiple_of(channels) {
+        return Err(OmniVoiceError::InvalidRequest(format!(
+            "audio sample count {} is not divisible by channel count {channels}",
+            samples.len()
+        )));
     }
     let mut mono = vec![0.0; samples.len() / channels];
     for (index, sample) in samples.iter().enumerate() {
@@ -330,10 +374,13 @@ pub fn mono_samples(samples: &[f32], channels: usize) -> Vec<f32> {
     for sample in &mut mono {
         *sample /= channels as f32;
     }
-    mono
+    Ok(mono)
 }
 
 pub fn trim_to_hop_multiple(samples: &[f32], hop_length: usize) -> Vec<f32> {
+    if hop_length == 0 {
+        return samples.to_vec();
+    }
     let remainder = samples.len() % hop_length;
     if remainder == 0 {
         samples.to_vec()
@@ -346,26 +393,59 @@ pub fn root_mean_square(samples: &[f32]) -> Option<f32> {
     if samples.is_empty() {
         return None;
     }
-    let energy = samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32;
-    Some(energy.sqrt())
+    let energy = samples
+        .iter()
+        .map(|sample| f64::from(*sample) * f64::from(*sample))
+        .sum::<f64>()
+        / samples.len() as f64;
+    let rms = energy.sqrt();
+    Some(rms as f32)
 }
 
 pub fn resample_linear(samples: &[f32], from_sample_rate: u32, to_sample_rate: u32) -> Vec<f32> {
-    if samples.is_empty() || from_sample_rate == to_sample_rate {
+    if samples.is_empty()
+        || from_sample_rate == 0
+        || to_sample_rate == 0
+        || from_sample_rate == to_sample_rate
+    {
         return samples.to_vec();
     }
-    let output_len =
-        ((samples.len() as f64 * to_sample_rate as f64) / from_sample_rate as f64).round() as usize;
-    let ratio = from_sample_rate as f64 / to_sample_rate as f64;
-    let mut output = Vec::with_capacity(output_len.max(1));
-    for output_index in 0..output_len.max(1) {
-        let position = output_index as f64 * ratio;
-        let left = position.floor() as usize;
-        let right = left.saturating_add(1).min(samples.len().saturating_sub(1));
-        let frac = (position - left as f64) as f32;
-        let left_sample = samples[left.min(samples.len().saturating_sub(1))];
-        let right_sample = samples[right];
-        output.push((left_sample * (1.0 - frac)) + (right_sample * frac));
+    let ratio = to_sample_rate as f64 / from_sample_rate as f64;
+    let output_len = ((samples.len() as f64 * ratio).round() as usize).max(1);
+    let cutoff = ratio.min(1.0);
+    let radius = 16.0_f64;
+    let mut output = Vec::with_capacity(output_len);
+    for output_index in 0..output_len {
+        let center = output_index as f64 / ratio;
+        let first = (center.floor() as isize - radius as isize + 1).max(0) as usize;
+        let last = (center.ceil() as isize + radius as isize)
+            .min(samples.len() as isize - 1)
+            .max(first as isize) as usize;
+        let mut value = 0.0_f64;
+        let mut weight_sum = 0.0_f64;
+        for (offset, sample) in samples[first..=last].iter().enumerate() {
+            let index = first + offset;
+            let distance = center - index as f64;
+            if distance.abs() >= radius {
+                continue;
+            }
+            let scaled = cutoff * distance;
+            let sinc = if scaled.abs() < f64::EPSILON {
+                1.0
+            } else {
+                let pi_scaled = std::f64::consts::PI * scaled;
+                pi_scaled.sin() / pi_scaled
+            };
+            let window = 0.5 * (1.0 + (std::f64::consts::PI * distance / radius).cos());
+            let weight = cutoff * sinc * window;
+            value += *sample as f64 * weight;
+            weight_sum += weight;
+        }
+        output.push(if weight_sum.abs() > f64::EPSILON {
+            (value / weight_sum) as f32
+        } else {
+            samples[center.round().min((samples.len() - 1) as f64) as usize]
+        });
     }
     output
 }
@@ -377,6 +457,9 @@ pub fn trim_long_audio(
     min_duration: f32,
     trim_threshold: f32,
 ) -> Vec<f32> {
+    if sample_rate == 0 {
+        return samples.to_vec();
+    }
     let duration = samples.len() as f32 / sample_rate as f32;
     if duration <= trim_threshold {
         return samples.to_vec();
@@ -535,16 +618,53 @@ fn sample_count_from_ms(duration_ms: u32, sample_rate: u32) -> usize {
 }
 
 fn millis_from_samples(sample_count: usize, sample_rate: u32) -> u32 {
+    if sample_rate == 0 {
+        return 0;
+    }
     (((sample_count as u64 * 1000) + (sample_rate as u64 / 2)) / sample_rate as u64) as u32
+}
+
+fn validate_waveform(waveform: &WaveformInput) -> Result<()> {
+    if waveform.sample_rate == 0 {
+        return Err(OmniVoiceError::InvalidRequest(
+            "audio sample rate must be greater than zero".to_string(),
+        ));
+    }
+    if waveform.channels == 0 {
+        return Err(OmniVoiceError::InvalidRequest(
+            "audio channel count must be greater than zero".to_string(),
+        ));
+    }
+    if !waveform.samples.len().is_multiple_of(waveform.channels) {
+        return Err(OmniVoiceError::InvalidRequest(format!(
+            "audio sample count {} is not divisible by channel count {}",
+            waveform.samples.len(),
+            waveform.channels
+        )));
+    }
+    if let Some(index) = waveform
+        .samples
+        .iter()
+        .position(|sample| !sample.is_finite())
+    {
+        return Err(OmniVoiceError::InvalidRequest(format!(
+            "audio sample at index {index} is not finite"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{load_audio_file, trim_long_audio};
+    use super::{load_audio_file, mono_samples, trim_long_audio};
 
     #[test]
     fn generic_audio_loader_decodes_reference_wav() {
-        let waveform = load_audio_file(crate::paths::ref_audio_path()).unwrap();
+        let path = crate::paths::ref_audio_path();
+        if !path.is_file() {
+            return;
+        }
+        let waveform = load_audio_file(path).unwrap();
         assert!(waveform.sample_rate > 0);
         assert!(waveform.channels >= 1);
         assert!(!waveform.samples.is_empty());
@@ -560,5 +680,16 @@ mod tests {
         let trimmed = trim_long_audio(&samples, sample_rate, 3.0, 1.0, 4.0);
 
         assert_eq!(trimmed.len(), 2700);
+    }
+
+    #[test]
+    fn mono_samples_rejects_invalid_channel_layout() {
+        assert!(mono_samples(&[0.0], 0).is_err());
+        assert!(mono_samples(&[0.0, 1.0, 2.0], 2).is_err());
+    }
+
+    #[test]
+    fn trim_to_hop_multiple_handles_zero_hop_without_panicking() {
+        assert_eq!(super::trim_to_hop_multiple(&[1.0, 2.0], 0), vec![1.0, 2.0]);
     }
 }

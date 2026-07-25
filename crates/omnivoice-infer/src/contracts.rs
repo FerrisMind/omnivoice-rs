@@ -676,11 +676,26 @@ impl DecodedAudio {
         }
     }
 
+    pub fn validate(&self) -> Result<()> {
+        if self.sample_rate == 0 {
+            return Err(OmniVoiceError::InvalidData(
+                "decoded audio sample rate must be greater than zero".to_string(),
+            ));
+        }
+        if let Some(index) = self.samples.iter().position(|sample| !sample.is_finite()) {
+            return Err(OmniVoiceError::InvalidData(format!(
+                "decoded audio sample at index {index} is not finite"
+            )));
+        }
+        Ok(())
+    }
+
     pub fn frame_count(&self) -> usize {
         self.samples.len()
     }
 
     pub fn write_wav(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.validate()?;
         let spec = hound::WavSpec {
             channels: 1,
             sample_rate: self.sample_rate,
@@ -703,9 +718,21 @@ impl DecodedAudio {
                 .samples::<f32>()
                 .collect::<std::result::Result<Vec<_>, _>>()?,
             hound::SampleFormat::Int => match spec.bits_per_sample {
+                8 => reader
+                    .samples::<i8>()
+                    .map(|sample| sample.map(|value| value as f32 / 128.0))
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
                 16 => reader
                     .samples::<i16>()
                     .map(|sample| sample.map(|value| value as f32 / 32768.0))
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
+                24 => reader
+                    .samples::<i32>()
+                    .map(|sample| sample.map(|value| value as f32 / 8_388_608.0))
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
+                32 => reader
+                    .samples::<i32>()
+                    .map(|sample| sample.map(|value| value as f32 / 2_147_483_648.0))
                     .collect::<std::result::Result<Vec<_>, _>>()?,
                 bits => {
                     return Err(OmniVoiceError::Unsupported(format!(
@@ -714,10 +741,32 @@ impl DecodedAudio {
                 }
             },
         };
-        Ok(Self::new(samples, spec.sample_rate))
+        if spec.channels == 0 || !samples.len().is_multiple_of(spec.channels as usize) {
+            return Err(OmniVoiceError::InvalidData(
+                "WAV channel layout is invalid".to_string(),
+            ));
+        }
+        let samples = if spec.channels == 1 {
+            samples
+        } else {
+            let channels = spec.channels as usize;
+            let mut mono = vec![0.0_f32; samples.len() / channels];
+            for (index, sample) in samples.iter().enumerate() {
+                mono[index / channels] += *sample;
+            }
+            for sample in &mut mono {
+                *sample /= channels as f32;
+            }
+            mono
+        };
+        let audio = Self::new(samples, spec.sample_rate);
+        audio.validate()?;
+        Ok(audio)
     }
 
     pub fn parity_metrics(&self, reference: &Self) -> Result<AudioParityMetrics> {
+        self.validate()?;
+        reference.validate()?;
         if self.sample_rate != reference.sample_rate {
             return Err(OmniVoiceError::InvalidData(format!(
                 "sample rate mismatch: actual={}, reference={}",

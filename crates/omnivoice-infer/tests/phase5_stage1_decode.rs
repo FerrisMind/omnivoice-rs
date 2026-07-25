@@ -31,6 +31,9 @@ fn cuda_f16_pipeline() -> Phase3Pipeline {
 
 #[test]
 fn stage1_loader_discovers_expected_quantizer_indices() {
+    if !support::model_fixture_available() {
+        return;
+    }
     let _guard = acquire_gpu_test_lock().unwrap();
     let pipeline = Phase3Pipeline::from_options(RuntimeOptions::new(model_root())).unwrap();
     assert_eq!(
@@ -41,6 +44,11 @@ fn stage1_loader_discovers_expected_quantizer_indices() {
 
 #[test]
 fn debug_stage1_raw_matches_reference_waveform() {
+    if !support::model_fixture_available()
+        || !support::reference_fixture_available("debug_auto_en_short")
+    {
+        return;
+    }
     let _guard = acquire_gpu_test_lock().unwrap();
     let pipeline = Phase3Pipeline::from_options(RuntimeOptions::new(model_root())).unwrap();
     let actual = pipeline
@@ -63,6 +71,11 @@ fn debug_stage1_raw_matches_reference_waveform() {
 
 #[test]
 fn debug_stage1_final_matches_reference_waveform() {
+    if !support::model_fixture_available()
+        || !support::reference_fixture_available("debug_auto_en_short")
+    {
+        return;
+    }
     let _guard = acquire_gpu_test_lock().unwrap();
     let pipeline = Phase3Pipeline::from_options(RuntimeOptions::new(model_root())).unwrap();
     let actual = pipeline
@@ -85,6 +98,11 @@ fn debug_stage1_final_matches_reference_waveform() {
 
 #[test]
 fn clone_stage1_final_matches_reference_waveform() {
+    if !support::model_fixture_available()
+        || !support::reference_fixture_available("clone_user_ref")
+    {
+        return;
+    }
     let _guard = acquire_gpu_test_lock().unwrap();
     let pipeline = Phase3Pipeline::from_options(RuntimeOptions::new(model_root())).unwrap();
     let actual = pipeline
@@ -107,6 +125,11 @@ fn clone_stage1_final_matches_reference_waveform() {
 
 #[test]
 fn design_stage1_final_matches_reference_waveform() {
+    if !support::model_fixture_available()
+        || !support::reference_fixture_available("design_en_british")
+    {
+        return;
+    }
     let _guard = acquire_gpu_test_lock().unwrap();
     let pipeline = Phase3Pipeline::from_options(RuntimeOptions::new(model_root())).unwrap();
     let actual = pipeline
@@ -129,6 +152,11 @@ fn design_stage1_final_matches_reference_waveform() {
 
 #[test]
 fn chunked_stage1_final_matches_reference_waveform() {
+    if !support::model_fixture_available()
+        || !support::reference_fixture_available("auto_long_chunked")
+    {
+        return;
+    }
     let _guard = acquire_gpu_test_lock().unwrap();
     let pipeline = Phase3Pipeline::from_options(RuntimeOptions::new(model_root())).unwrap();
     let actual = pipeline
@@ -151,6 +179,11 @@ fn chunked_stage1_final_matches_reference_waveform() {
 
 #[test]
 fn design_stage1_tensor_decode_matches_generated_tokens_decode() {
+    if !support::model_fixture_available()
+        || !support::reference_fixture_available("design_en_british")
+    {
+        return;
+    }
     let _guard = acquire_gpu_test_lock().unwrap();
     let pipeline = Phase3Pipeline::from_options(RuntimeOptions::new(model_root())).unwrap();
     let bundle = ReferenceArtifactBundle::from_root(reference_root()).unwrap();
@@ -191,6 +224,11 @@ fn design_stage1_tensor_decode_matches_generated_tokens_decode() {
 
 #[test]
 fn chunked_stage1_tensor_decode_matches_generated_tokens_decode() {
+    if !support::model_fixture_available()
+        || !support::reference_fixture_available("auto_long_chunked")
+    {
+        return;
+    }
     let _guard = acquire_gpu_test_lock().unwrap();
     let pipeline = Phase3Pipeline::from_options(RuntimeOptions::new(model_root())).unwrap();
     let bundle = ReferenceArtifactBundle::from_root(reference_root()).unwrap();
@@ -236,6 +274,11 @@ fn chunked_stage1_tensor_decode_matches_generated_tokens_decode() {
 #[cfg(feature = "cuda")]
 #[test]
 fn debug_stage1_cuda_final_matches_reference_waveform() {
+    if !support::model_fixture_available()
+        || !support::reference_fixture_available("debug_auto_en_short")
+    {
+        return;
+    }
     let _guard = acquire_gpu_test_lock().unwrap();
     let pipeline = cuda_f32_pipeline();
     let actual = pipeline
@@ -259,6 +302,11 @@ fn debug_stage1_cuda_final_matches_reference_waveform() {
 #[cfg(feature = "cuda")]
 #[test]
 fn debug_stage1_cuda_requested_f16_does_not_collapse_to_silence() {
+    if !support::model_fixture_available()
+        || !support::reference_fixture_available("debug_auto_en_short")
+    {
+        return;
+    }
     let _guard = acquire_gpu_test_lock().unwrap();
     let pipeline = cuda_f16_pipeline();
     let actual = pipeline
@@ -279,6 +327,11 @@ fn debug_stage1_cuda_requested_f16_does_not_collapse_to_silence() {
 #[cfg(feature = "cuda")]
 #[test]
 fn chunked_stage1_cuda_final_matches_reference_waveform() {
+    if !support::model_fixture_available()
+        || !support::reference_fixture_available("auto_long_chunked")
+    {
+        return;
+    }
     let _guard = acquire_gpu_test_lock().unwrap();
     let pipeline = cuda_f32_pipeline();
     let actual = pipeline

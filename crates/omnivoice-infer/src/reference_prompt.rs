@@ -31,6 +31,9 @@ impl ReferencePromptBuilder {
     }
 
     pub fn trim_to_hop_multiple(&self, waveform: &[f32]) -> Vec<f32> {
+        if self.options.hop_length == 0 {
+            return waveform.to_vec();
+        }
         let remainder = waveform.len() % self.options.hop_length;
         if remainder == 0 {
             waveform.to_vec()
@@ -51,6 +54,11 @@ impl ReferencePromptBuilder {
                 expected: format!("({}, T)", self.options.expected_codebooks),
                 actual: format!("{:?}", tokens.dims()),
             });
+        }
+        if tokens.dims().1 == 0 {
+            return Err(OmniVoiceError::InvalidRequest(
+                "ref_audio_tokens must contain at least one frame".to_string(),
+            ));
         }
         Ok(VoiceClonePrompt {
             ref_audio_tokens: tokens,

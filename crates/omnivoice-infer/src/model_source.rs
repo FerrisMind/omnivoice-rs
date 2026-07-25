@@ -37,12 +37,18 @@ pub fn classify_model_source(model_spec: Option<&str>, default_repo: &str) -> Re
     if candidate.exists() {
         return Ok(ModelSource::LocalPath(candidate));
     }
+    if looks_like_local_path(raw_value) {
+        return Err(OmniVoiceError::MissingArtifact { path: candidate });
+    }
     Ok(ModelSource::HuggingFaceRepo(normalize_repo_id(raw_value)))
 }
 
 pub fn resolve_tts_model_root(model_spec: Option<&str>) -> Result<PathBuf> {
     match classify_tts_model_source(model_spec)? {
-        ModelSource::LocalPath(path) => Ok(path),
+        ModelSource::LocalPath(path) => {
+            ensure_local_runtime_manifest(&path)?;
+            Ok(path)
+        }
         ModelSource::HuggingFaceRepo(repo_id) => download_tts_snapshot(&repo_id),
     }
 }
@@ -80,7 +86,9 @@ pub fn manifest_download_targets(manifest: &RuntimeArtifactManifest) -> Vec<Stri
         let Some(path) = path else {
             continue;
         };
-        let normalized = path.to_string_lossy().replace('\\', "/");
+        let Some(normalized) = normalize_safe_relative_path(path) else {
+            continue;
+        };
         if normalized == RUNTIME_MANIFEST_FILE_NAME {
             continue;
         }
@@ -160,18 +168,60 @@ fn materialize_runtime_manifest(
     manifest: &RuntimeArtifactManifest,
 ) -> Result<PathBuf> {
     let manifest_path = snapshot_root.join(RUNTIME_MANIFEST_FILE_NAME);
-    if manifest_path.exists() {
+    if manifest_path.is_file() {
         return Ok(manifest_path);
     }
 
     let lock_path = snapshot_root.join(".omnivoice.artifacts.lock");
     let mut lock = LockFile::open(&lock_path)?;
     lock.lock()?;
-    if !manifest_path.exists() {
+    let write_result = if !manifest_path.is_file() {
         let _ = manifest;
-        fs::write(&manifest_path, OFFICIAL_OMNIVOICE_MANIFEST_JSON.as_bytes())?;
+        fs::write(&manifest_path, OFFICIAL_OMNIVOICE_MANIFEST_JSON.as_bytes())
+    } else {
+        Ok(())
+    };
+    let unlock_result = lock.unlock();
+    write_result?;
+    unlock_result?;
+    Ok(manifest_path)
+}
+
+pub(crate) fn ensure_local_runtime_manifest(model_root: &Path) -> Result<PathBuf> {
+    let manifest_path = model_root.join(RUNTIME_MANIFEST_FILE_NAME);
+    if manifest_path.is_file() {
+        return Ok(manifest_path);
     }
-    let _ = lock.unlock();
+
+    let required_files = [
+        "config.json",
+        "model.safetensors",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "audio_tokenizer/config.json",
+        "audio_tokenizer/model.safetensors",
+        "audio_tokenizer/preprocessor_config.json",
+    ];
+    if !required_files
+        .iter()
+        .all(|relative| model_root.join(relative).is_file())
+    {
+        return Err(OmniVoiceError::MissingArtifact {
+            path: manifest_path,
+        });
+    }
+
+    let lock_path = model_root.join(".omnivoice.artifacts.lock");
+    let mut lock = LockFile::open(&lock_path)?;
+    lock.lock()?;
+    let write_result = if !manifest_path.is_file() {
+        fs::write(&manifest_path, OFFICIAL_OMNIVOICE_MANIFEST_JSON.as_bytes())
+    } else {
+        Ok(())
+    };
+    let unlock_result = lock.unlock();
+    write_result?;
+    unlock_result?;
     Ok(manifest_path)
 }
 
@@ -186,4 +236,84 @@ fn snapshot_root_from_manifest_path(path: &Path) -> Result<PathBuf> {
 
 fn normalize_repo_id(raw_value: &str) -> String {
     raw_value.replace('\\', "/")
+}
+
+pub(crate) fn looks_like_local_path(raw_value: &str) -> bool {
+    let path = Path::new(raw_value);
+    path.is_absolute()
+        || raw_value.starts_with("./")
+        || raw_value.starts_with("../")
+        || raw_value.starts_with(".\\")
+        || raw_value.starts_with("..\\")
+        || raw_value.contains('\\')
+        || (raw_value.len() >= 2 && raw_value.as_bytes()[1] == b':')
+}
+
+fn normalize_safe_relative_path(path: &Path) -> Option<String> {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if normalized.is_empty()
+        || normalized.starts_with('/')
+        || normalized.contains(':')
+        || normalized
+            .split('/')
+            .any(|component| component == "." || component == "..")
+    {
+        return None;
+    }
+    Some(normalized)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_model_source, ensure_local_runtime_manifest, ModelSource};
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn temporary_root(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("omnivoice-model-source-{name}-{nonce}"))
+    }
+
+    #[test]
+    fn missing_windows_path_is_not_treated_as_huggingface_repo() {
+        let error =
+            classify_model_source(Some(r"C:\definitely-missing\omnivoice"), "fallback/repo")
+                .unwrap_err();
+        assert!(error.to_string().contains("definitely-missing"));
+    }
+
+    #[test]
+    fn local_official_layout_gets_manifest_materialized() {
+        let root = temporary_root("manifest");
+        fs::create_dir_all(root.join("audio_tokenizer")).unwrap();
+        for relative in [
+            "config.json",
+            "model.safetensors",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "audio_tokenizer/config.json",
+            "audio_tokenizer/model.safetensors",
+            "audio_tokenizer/preprocessor_config.json",
+        ] {
+            fs::write(root.join(relative), b"fixture").unwrap();
+        }
+
+        let manifest_path = ensure_local_runtime_manifest(&root).unwrap();
+        assert!(manifest_path.is_file());
+        assert!(fs::read_to_string(manifest_path)
+            .unwrap()
+            .contains("\"version\": 1"));
+        assert!(matches!(
+            classify_model_source(root.to_str(), "fallback/repo").unwrap(),
+            ModelSource::LocalPath(_)
+        ));
+
+        fs::remove_dir_all(root).unwrap();
+    }
 }

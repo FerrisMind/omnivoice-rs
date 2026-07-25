@@ -8,11 +8,11 @@ use omnivoice_infer::{
 };
 
 #[test]
-fn combine_text_keeps_laughter_but_strips_space_before_other_emotion_tags() {
+fn combine_text_keeps_python_whitespace_before_nonverbal_tags() {
     assert_eq!(combine_text("hello [laughter]", None), "hello [laughter]");
     assert_eq!(
         combine_text("hello [surprise-ah]", None),
-        "hello[surprise-ah]"
+        "hello [surprise-ah]"
     );
 }
 

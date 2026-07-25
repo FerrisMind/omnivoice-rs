@@ -312,14 +312,15 @@ impl Stage0Qwen3Backbone {
         let mut captures = BTreeMap::new();
         for (index, layer) in self.layers.iter().enumerate() {
             hidden = layer.forward(&hidden, attention_mask)?;
-            if capture_layers.contains(&index) && index + 1 != self.layers.len() {
+            // HuggingFace exposes `hidden_states[layer_index + 1]` before the
+            // final model norm.  Keep the last decoder layer in that same
+            // form; callers that need the post-norm output already receive it
+            // separately as `final_hidden`.
+            if capture_layers.contains(&index) {
                 captures.insert(index, hidden.clone());
             }
         }
         let final_hidden = apply_hf_compatible_rms_norm(&self.norm, &hidden)?;
-        if capture_layers.contains(&self.layers.len().saturating_sub(1)) {
-            captures.insert(self.layers.len().saturating_sub(1), final_hidden.clone());
-        }
         Ok(Stage0BackboneOutput {
             final_hidden,
             captured_hidden_layers: captures,

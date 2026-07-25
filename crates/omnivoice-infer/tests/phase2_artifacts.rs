@@ -16,6 +16,9 @@ use support::model_root;
 
 #[test]
 fn runtime_manifest_matches_real_model_layout() {
+    if !support::model_fixture_available() {
+        return;
+    }
     let artifacts = RuntimeArtifacts::from_model_root(model_root()).unwrap();
 
     assert_eq!(artifacts.manifest().version, 1);
@@ -38,6 +41,9 @@ fn runtime_manifest_matches_real_model_layout() {
 
 #[test]
 fn frontend_uses_validated_runtime_artifacts() {
+    if !support::model_fixture_available() {
+        return;
+    }
     let artifacts = RuntimeArtifacts::from_model_root(model_root()).unwrap();
     let frontend = Frontend::from_runtime_artifacts(&artifacts).unwrap();
 

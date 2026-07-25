@@ -120,9 +120,7 @@ impl RuntimeArtifacts {
 
         let manifest_path = model_root.join(RUNTIME_MANIFEST_FILE_NAME);
         if !manifest_path.exists() {
-            return Err(OmniVoiceError::MissingArtifact {
-                path: manifest_path,
-            });
+            crate::model_source::ensure_local_runtime_manifest(&model_root)?;
         }
 
         let manifest = RuntimeArtifactManifest::from_model_root(&model_root)?;
@@ -234,7 +232,7 @@ impl TextTokenizerArtifacts {
         let tokenizer_path = resolve_required_path(model_root, &manifest.tokenizer)?;
         let tokenizer_config_path = resolve_required_path(model_root, &manifest.tokenizer_config)?;
         let chat_template_path =
-            resolve_optional_path(model_root, manifest.metadata.chat_template.as_ref());
+            resolve_optional_path(model_root, manifest.metadata.chat_template.as_ref())?;
 
         Ok(Self {
             tokenizer_path,
@@ -276,7 +274,7 @@ impl AudioTokenizerArtifacts {
         let observed_prefixes =
             inspect_safetensor_prefixes(&weights_path, &BTreeSet::new(), "audio_tokenizer")?;
         validate_minimum_prefixes(&observed_prefixes, &required_prefixes, "audio_tokenizer")?;
-        let license_path = resolve_optional_path(model_root, manifest.metadata.license.as_ref());
+        let license_path = resolve_optional_path(model_root, manifest.metadata.license.as_ref())?;
 
         Ok(Self {
             config_path,
@@ -367,6 +365,7 @@ impl ReferenceArtifactBundle {
     }
 
     pub fn case_by_id(&self, case_id: &str) -> Result<ReferenceCaseHandle> {
+        validate_case_id(case_id)?;
         let case_dir = self.root.join(case_id);
         if !case_dir.exists() {
             return Err(OmniVoiceError::MissingArtifact { path: case_dir });
@@ -688,36 +687,37 @@ pub struct ReferenceStage1DebugCapture {
 impl ReferenceCaseHandle {
     pub fn load_prepared_prompts(&self) -> Result<PreparedPromptSequence> {
         let prepared = self.load_prepared_json()?;
-        let tensors = read_safetensors(self.case_dir.join("inputs.safetensors"))?;
-        let contracts = prepared_prompt_contracts(&prepared)?;
+        with_safetensors(self.case_dir.join("inputs.safetensors"), |tensors| {
+            let contracts = prepared_prompt_contracts(&prepared)?;
 
-        let prompts = contracts
-            .iter()
-            .map(|contract| load_prompt_contract(contract, &tensors))
-            .collect::<Result<Vec<_>>>()?;
+            let prompts = contracts
+                .iter()
+                .map(|contract| load_prompt_contract(contract, tensors))
+                .collect::<Result<Vec<_>>>()?;
 
-        if let Some(chunk_plan) = prepared.chunk_plan {
-            if chunk_plan.kind == "chunked" {
-                return Ok(PreparedPromptSequence::Chunked(ChunkedPreparedPrompts {
-                    prompts,
-                    chunk_texts: chunk_plan.chunk_texts,
-                    chunk_target_lens: chunk_plan.chunk_target_lens_actual,
-                }));
+            if let Some(chunk_plan) = prepared.chunk_plan.clone() {
+                if chunk_plan.kind == "chunked" {
+                    return Ok(PreparedPromptSequence::Chunked(ChunkedPreparedPrompts {
+                        prompts,
+                        chunk_texts: chunk_plan.chunk_texts,
+                        chunk_target_lens: chunk_plan.chunk_target_lens_actual,
+                    }));
+                }
+                if chunk_plan.kind != "single" {
+                    return Err(OmniVoiceError::InvalidData(format!(
+                        "unsupported chunk plan kind {}",
+                        chunk_plan.kind
+                    )));
+                }
             }
-            if chunk_plan.kind != "single" {
-                return Err(OmniVoiceError::InvalidData(format!(
-                    "unsupported chunk plan kind {}",
-                    chunk_plan.kind
-                )));
-            }
-        }
 
-        match prompts.as_slice() {
-            [prompt] => Ok(PreparedPromptSequence::Single(prompt.clone())),
-            _ => Err(OmniVoiceError::InvalidData(
-                "single prepared.json must contain exactly one prompt contract".to_string(),
-            )),
-        }
+            match prompts.as_slice() {
+                [prompt] => Ok(PreparedPromptSequence::Single(prompt.clone())),
+                _ => Err(OmniVoiceError::InvalidData(
+                    "single prepared.json must contain exactly one prompt contract".to_string(),
+                )),
+            }
+        })
     }
 
     pub fn load_prepared_prompt(&self) -> Result<PreparedPrompt> {
@@ -877,78 +877,91 @@ impl ReferenceCaseHandle {
     }
 
     pub fn load_debug_inputs(&self) -> Result<DebugInputs> {
-        let tensors = read_safetensors(self.case_dir.join("inputs.safetensors"))?;
-        Ok(DebugInputs {
-            prepared_input_ids: load_i64_tensor3(&tensors, "prepared_input_ids")?,
-            batch_input_ids: load_i64_tensor3(&tensors, "batch_input_ids_before_step_00")?,
-            batch_audio_mask: load_bool_tensor2(&tensors, "batch_audio_mask")?,
-            batch_attention_mask: load_bool_tensor4(&tensors, "batch_attention_mask")?,
-            tokens_init: load_i64_tensor3(&tensors, "tokens_init")?,
+        with_safetensors(self.case_dir.join("inputs.safetensors"), |tensors| {
+            Ok(DebugInputs {
+                prepared_input_ids: load_i64_tensor3(tensors, "prepared_input_ids")?,
+                batch_input_ids: load_i64_tensor3(tensors, "batch_input_ids_before_step_00")?,
+                batch_audio_mask: load_bool_tensor2(tensors, "batch_audio_mask")?,
+                batch_attention_mask: load_bool_tensor4(tensors, "batch_attention_mask")?,
+                tokens_init: load_i64_tensor3(tensors, "tokens_init")?,
+            })
         })
     }
 
     pub fn load_forward_step_zero(&self) -> Result<ForwardStepZero> {
-        let tensors = read_safetensors(self.case_dir.join("forward_step_00.safetensors"))?;
-        let mut hidden_layers = BTreeMap::new();
-        for name in tensors.names() {
-            let Some(index_text) = name.strip_prefix("hidden_layer_") else {
-                continue;
-            };
-            let index = index_text.parse::<usize>().map_err(|error| {
-                OmniVoiceError::InvalidData(format!("invalid hidden layer name {name}: {error}"))
-            })?;
-            hidden_layers.insert(index, load_f32_tensor3(&tensors, name)?);
-        }
-        Ok(ForwardStepZero {
-            inputs_embeds: load_f32_tensor3(&tensors, "inputs_embeds")?,
-            hidden_layers,
-            final_hidden: load_f32_tensor3(&tensors, "final_hidden")?,
-        })
+        with_safetensors(
+            self.case_dir.join("forward_step_00.safetensors"),
+            |tensors| {
+                let mut hidden_layers = BTreeMap::new();
+                for name in tensors.names() {
+                    let Some(index_text) = name.strip_prefix("hidden_layer_") else {
+                        continue;
+                    };
+                    let index = index_text.parse::<usize>().map_err(|error| {
+                        OmniVoiceError::InvalidData(format!(
+                            "invalid hidden layer name {name}: {error}"
+                        ))
+                    })?;
+                    hidden_layers.insert(index, load_f32_tensor3(tensors, name)?);
+                }
+                Ok(ForwardStepZero {
+                    inputs_embeds: load_f32_tensor3(tensors, "inputs_embeds")?,
+                    hidden_layers,
+                    final_hidden: load_f32_tensor3(tensors, "final_hidden")?,
+                })
+            },
+        )
     }
 
     pub fn load_step_capture(&self, step: usize) -> Result<StepCapture> {
-        let tensors = read_safetensors(
+        with_safetensors(
             self.case_dir
                 .join("steps")
                 .join(format!("step_{step:02}.safetensors")),
-        )?;
-        Ok(StepCapture {
-            c_logits: load_f32_tensor4(&tensors, "c_logits")?,
-            u_logits: load_f32_tensor4(&tensors, "u_logits")?,
-            pred_tokens: load_i64_tensor3(&tensors, "pred_tokens")?,
-            confidence_scores: load_f32_tensor3(&tensors, "confidence_scores")?,
-            tokens_after_step: load_i64_tensor3(&tensors, "tokens_after_step")?,
-            batch_input_ids_before_step: load_i64_tensor3(&tensors, "batch_input_ids_before_step")?,
-        })
+            |tensors| {
+                Ok(StepCapture {
+                    c_logits: load_f32_tensor4(tensors, "c_logits")?,
+                    u_logits: load_f32_tensor4(tensors, "u_logits")?,
+                    pred_tokens: load_i64_tensor3(tensors, "pred_tokens")?,
+                    confidence_scores: load_f32_tensor3(tensors, "confidence_scores")?,
+                    tokens_after_step: load_i64_tensor3(tensors, "tokens_after_step")?,
+                    batch_input_ids_before_step: load_i64_tensor3(
+                        tensors,
+                        "batch_input_ids_before_step",
+                    )?,
+                })
+            },
+        )
     }
 
     pub fn load_generated_tokens(&self) -> Result<GeneratedTokens> {
-        let tensors = read_safetensors(self.case_dir.join("final_tokens.safetensors"))?;
-        if tensors.names().contains(&"tokens") {
-            return Ok(GeneratedTokens::Single(load_i64_tensor2(
-                &tensors, "tokens",
-            )?));
-        }
+        with_safetensors(self.case_dir.join("final_tokens.safetensors"), |tensors| {
+            if tensors.names().contains(&"tokens") {
+                return Ok(GeneratedTokens::Single(load_i64_tensor2(
+                    tensors, "tokens",
+                )?));
+            }
 
-        let mut chunk_names = tensors
-            .names()
-            .iter()
-            .filter(|name| name.starts_with("chunk_"))
-            .cloned()
-            .collect::<Vec<_>>();
-        chunk_names.sort();
-        if chunk_names.is_empty() {
-            return Err(OmniVoiceError::InvalidData(
-                "final_tokens.safetensors does not contain `tokens` or `chunk_*` entries"
-                    .to_string(),
-            ));
-        }
+            let mut chunk_names = tensors
+                .names()
+                .iter()
+                .filter(|name| name.starts_with("chunk_"))
+                .cloned()
+                .collect::<Vec<_>>();
+            chunk_names.sort();
+            if chunk_names.is_empty() {
+                return Err(OmniVoiceError::InvalidData(
+                    "final_tokens.safetensors does not contain `tokens` or `chunk_*` entries"
+                        .to_string(),
+                ));
+            }
 
-        let chunks = chunk_names
-            .into_iter()
-            .map(|name| load_i64_tensor2(&tensors, name))
-            .collect::<Result<Vec<_>>>()?;
-        Ok(GeneratedTokens::Chunked(chunks))
+            let chunks = chunk_names
+                .into_iter()
+                .map(|name| load_i64_tensor2(tensors, name))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(GeneratedTokens::Chunked(chunks))
+        })
     }
 
     pub fn load_final_tokens(&self) -> Result<I64Tensor2> {
@@ -969,15 +982,16 @@ impl ReferenceCaseHandle {
     }
 
     pub fn load_stage1_debug_capture(&self) -> Result<ReferenceStage1DebugCapture> {
-        let tensors = read_safetensors(self.case_dir.join("stage1_debug.safetensors"))?;
-        let mut debug_tensors = BTreeMap::new();
-        for name in tensors.names() {
-            debug_tensors.insert(name.to_string(), load_f32_tensor3(&tensors, name)?);
-        }
-        Ok(ReferenceStage1DebugCapture {
-            tensors: debug_tensors,
-            raw_audio: self.load_decoded_raw_audio()?,
-            final_audio: self.load_final_audio()?,
+        with_safetensors(self.case_dir.join("stage1_debug.safetensors"), |tensors| {
+            let mut debug_tensors = BTreeMap::new();
+            for name in tensors.names() {
+                debug_tensors.insert(name.to_string(), load_f32_tensor3(tensors, name)?);
+            }
+            Ok(ReferenceStage1DebugCapture {
+                tensors: debug_tensors,
+                raw_audio: self.load_decoded_raw_audio()?,
+                final_audio: self.load_final_audio()?,
+            })
         })
     }
 
@@ -1103,10 +1117,59 @@ fn validate_runtime_contracts(
             generator_config.audio_mask_id, contracts.audio_mask_id
         )));
     }
+    if contracts.num_audio_codebooks == 0 {
+        return Err(OmniVoiceError::InvalidData(
+            "manifest num_audio_codebooks must be greater than zero".to_string(),
+        ));
+    }
+    if contracts.audio_vocab_size == 0 {
+        return Err(OmniVoiceError::InvalidData(
+            "manifest audio_vocab_size must be greater than zero".to_string(),
+        ));
+    }
+    let audio_vocab_size_i64 = i64::try_from(contracts.audio_vocab_size).map_err(|_| {
+        OmniVoiceError::InvalidData(format!(
+            "manifest audio_vocab_size {} does not fit into i64",
+            contracts.audio_vocab_size
+        ))
+    })?;
+    if contracts.audio_mask_id < 0 || contracts.audio_mask_id >= audio_vocab_size_i64 {
+        return Err(OmniVoiceError::InvalidData(format!(
+            "manifest audio_mask_id {} is outside audio vocabulary size {}",
+            contracts.audio_mask_id, contracts.audio_vocab_size
+        )));
+    }
+    if contracts.sample_rate == 0 {
+        return Err(OmniVoiceError::InvalidData(
+            "manifest sample_rate must be greater than zero".to_string(),
+        ));
+    }
+    if contracts.hop_length == 0 {
+        return Err(OmniVoiceError::InvalidData(
+            "manifest hop_length must be greater than zero".to_string(),
+        ));
+    }
+    if contracts.frame_rate == 0 {
+        return Err(OmniVoiceError::InvalidData(
+            "manifest frame_rate must be greater than zero".to_string(),
+        ));
+    }
+    if contracts.token_id_min < 0 {
+        return Err(OmniVoiceError::InvalidData(format!(
+            "manifest token_id_min {} must be non-negative",
+            contracts.token_id_min
+        )));
+    }
     if contracts.token_id_min > contracts.token_id_max {
         return Err(OmniVoiceError::InvalidData(format!(
             "invalid token range {}..={}",
             contracts.token_id_min, contracts.token_id_max
+        )));
+    }
+    if contracts.token_id_max >= audio_vocab_size_i64 {
+        return Err(OmniVoiceError::InvalidData(format!(
+            "manifest token_id_max {} is outside audio vocabulary size {}",
+            contracts.token_id_max, contracts.audio_vocab_size
         )));
     }
     if contracts
@@ -1170,17 +1233,62 @@ fn validate_runtime_contracts(
 }
 
 fn resolve_required_path(model_root: &Path, relative: &Path) -> Result<PathBuf> {
+    validate_relative_artifact_path(relative)?;
     let path = model_root.join(relative);
-    if !path.exists() {
+    if !path.is_file() {
         return Err(OmniVoiceError::MissingArtifact { path });
     }
     Ok(path)
 }
 
-fn resolve_optional_path(model_root: &Path, relative: Option<&PathBuf>) -> Option<PathBuf> {
-    relative
-        .map(|path| model_root.join(path))
-        .filter(|path| path.exists())
+fn resolve_optional_path(model_root: &Path, relative: Option<&PathBuf>) -> Result<Option<PathBuf>> {
+    let Some(relative) = relative else {
+        return Ok(None);
+    };
+    validate_relative_artifact_path(relative)?;
+    let path = model_root.join(relative);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    Ok(Some(path))
+}
+
+fn validate_relative_artifact_path(path: &Path) -> Result<()> {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if normalized.is_empty()
+        || normalized.starts_with('/')
+        || normalized.contains(':')
+        || normalized
+            .split('/')
+            .any(|component| component == "." || component == "..")
+    {
+        return Err(OmniVoiceError::InvalidData(format!(
+            "artifact path must be relative and stay within the model root: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_case_id(case_id: &str) -> Result<()> {
+    let normalized = case_id.replace('\\', "/");
+    if normalized.is_empty()
+        || normalized.starts_with('/')
+        || normalized.contains(':')
+        || normalized
+            .split('/')
+            .any(|component| component == "." || component == "..")
+    {
+        return Err(OmniVoiceError::InvalidData(format!(
+            "reference case id must be a single relative directory name: {case_id}"
+        )));
+    }
+    if normalized.contains('/') {
+        return Err(OmniVoiceError::InvalidData(format!(
+            "reference case id must be a single relative directory name: {case_id}"
+        )));
+    }
+    Ok(())
 }
 
 fn inspect_safetensor_prefixes(
@@ -1205,6 +1313,13 @@ fn inspect_safetensor_prefixes(
 fn read_safetensor_names(path: impl AsRef<Path>) -> Result<Vec<String>> {
     let path = path.as_ref();
     let mut file = fs::File::open(path)?;
+    let file_len = file.metadata()?.len();
+    if file_len < 8 {
+        return Err(OmniVoiceError::InvalidData(format!(
+            "safetensors file is shorter than its header prefix: {}",
+            path.display()
+        )));
+    }
     let mut header_len_bytes = [0_u8; 8];
     file.read_exact(&mut header_len_bytes)?;
     let header_len = usize::try_from(u64::from_le_bytes(header_len_bytes)).map_err(|_| {
@@ -1213,6 +1328,26 @@ fn read_safetensor_names(path: impl AsRef<Path>) -> Result<Vec<String>> {
             path.display()
         ))
     })?;
+    const MAX_SAFETENSORS_HEADER_BYTES: usize = 64 * 1024 * 1024;
+    if header_len > MAX_SAFETENSORS_HEADER_BYTES {
+        return Err(OmniVoiceError::InvalidData(format!(
+            "safetensors header is too large ({} bytes): {}",
+            header_len,
+            path.display()
+        )));
+    }
+    let header_len_u64 = u64::try_from(header_len).map_err(|_| {
+        OmniVoiceError::InvalidData(format!(
+            "safetensors header length does not fit into u64: {}",
+            path.display()
+        ))
+    })?;
+    if header_len_u64 > file_len - 8 {
+        return Err(OmniVoiceError::InvalidData(format!(
+            "safetensors header extends past end of file: {}",
+            path.display()
+        )));
+    }
 
     let buffer_len = 8usize.checked_add(header_len).ok_or_else(|| {
         OmniVoiceError::InvalidData("safetensors header length overflow".to_string())
@@ -1268,10 +1403,13 @@ fn validate_minimum_prefixes(
     Ok(())
 }
 
-fn read_safetensors(path: impl AsRef<Path>) -> Result<SafeTensors<'static>> {
+fn with_safetensors<T>(
+    path: impl AsRef<Path>,
+    callback: impl FnOnce(&SafeTensors<'_>) -> Result<T>,
+) -> Result<T> {
     let bytes = fs::read(path)?;
-    let leaked = Box::leak(bytes.into_boxed_slice());
-    Ok(SafeTensors::deserialize(leaked)?)
+    let tensors = SafeTensors::deserialize(&bytes)?;
+    callback(&tensors)
 }
 
 fn load_i64_tensor3(tensors: &SafeTensors<'_>, name: &str) -> Result<I64Tensor3> {

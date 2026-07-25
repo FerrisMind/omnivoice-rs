@@ -7,7 +7,9 @@ use omnivoice_infer::{
     contracts::{BatchedInputs, GenerationRequest, PreparedPrompt, VoiceClonePrompt},
     frontend::Frontend,
     postprocess::{cross_fade_chunks, fade_and_pad_audio, peak_normalize_auto_voice},
-    stage0_loop::{build_timesteps, pack_cfg_batch, predict_tokens_with_scoring},
+    stage0_loop::{
+        build_timesteps, build_unmask_schedules, pack_cfg_batch, predict_tokens_with_scoring,
+    },
     stage0_model::Stage0WeightLayout,
     stage1_decoder::Stage1DecoderBundle,
 };
@@ -15,6 +17,9 @@ use support::{model_root, reference_root};
 
 #[test]
 fn loads_debug_case_contract() {
+    if !support::reference_fixture_available("debug_auto_en_short") {
+        return;
+    }
     let bundle = ReferenceArtifactBundle::from_root(reference_root()).unwrap();
     let case = bundle.case(ArtifactCase::DebugAutoEnShort).unwrap();
     let prepared = case.load_prepared_prompt().unwrap();
@@ -34,6 +39,11 @@ fn loads_debug_case_contract() {
 
 #[test]
 fn reproduces_debug_prompt_and_batch_contract() {
+    if !support::model_fixture_available()
+        || !support::reference_fixture_available("debug_auto_en_short")
+    {
+        return;
+    }
     let bundle = ReferenceArtifactBundle::from_root(reference_root()).unwrap();
     let case = bundle.case(ArtifactCase::DebugAutoEnShort).unwrap();
     let reference = case.load_prepared_prompt().unwrap();
@@ -76,6 +86,9 @@ fn reproduces_debug_prompt_and_batch_contract() {
 
 #[test]
 fn validates_debug_artifact_tensor_shapes() {
+    if !support::reference_fixture_available("debug_auto_en_short") {
+        return;
+    }
     let bundle = ReferenceArtifactBundle::from_root(reference_root()).unwrap();
     let case = bundle.case(ArtifactCase::DebugAutoEnShort).unwrap();
     let inputs = case.load_debug_inputs().unwrap();
@@ -93,6 +106,9 @@ fn validates_debug_artifact_tensor_shapes() {
 
 #[test]
 fn stage0_namespace_accepts_only_expected_prefixes() {
+    if !support::model_fixture_available() {
+        return;
+    }
     let layout = Stage0WeightLayout::from_model_root(model_root()).unwrap();
 
     assert!(layout.accepted_prefixes().contains(&"llm".to_string()));
@@ -109,6 +125,9 @@ fn stage0_namespace_accepts_only_expected_prefixes() {
 
 #[test]
 fn stage1_loader_isolated_to_tokenizer_assets() {
+    if !support::model_fixture_available() {
+        return;
+    }
     let bundle = Stage1DecoderBundle::from_model_root(model_root()).unwrap();
 
     assert!(bundle
@@ -140,6 +159,14 @@ fn iterative_loop_never_reintroduces_audio_mask_id() {
 fn timestep_builder_matches_debug_schedule_length() {
     let steps = build_timesteps(0.0, 1.0, 33, 0.1).unwrap();
     assert_eq!(steps.len(), 34);
+}
+
+#[test]
+fn unmask_schedule_uses_python_step_count() {
+    let timesteps = build_timesteps(0.0, 1.0, 4, 0.1).unwrap();
+    let schedules = build_unmask_schedules(&[10], 8, &timesteps, 4).unwrap();
+    assert_eq!(timesteps.len(), 5);
+    assert_eq!(schedules, vec![vec![3, 5, 12, 60]]);
 }
 
 #[test]

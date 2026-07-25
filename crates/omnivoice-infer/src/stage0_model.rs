@@ -2,7 +2,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    },
 };
 
 use candle_core::{DType, Device, IndexOp, Module, Tensor};
@@ -65,6 +68,8 @@ pub struct Stage0DeterministicConfig {
     pub capture_layers: Vec<usize>,
     pub capture_final_hidden: bool,
 }
+
+const MAX_GENERATION_STEPS: usize = 4096;
 
 impl Default for Stage0DeterministicConfig {
     fn default() -> Self {
@@ -210,8 +215,7 @@ impl Stage0WeightLayout {
         let mut accepted_prefixes = BTreeSet::new();
         let mut found_ignored_keys = BTreeSet::new();
         let bytes = fs::read(&path)?;
-        let leaked = Box::leak(bytes.into_boxed_slice());
-        let tensors = SafeTensors::deserialize(leaked)?;
+        let tensors = SafeTensors::deserialize(&bytes)?;
         for key in tensors.names() {
             if ignored_keys.contains(key) {
                 found_ignored_keys.insert(key.to_string());
@@ -266,6 +270,7 @@ pub struct Stage0RuntimePlan {
     runtime_dtype: DType,
     model: OnceLock<std::result::Result<Stage0Model, String>>,
     cpu_seed: Mutex<Option<u64>>,
+    cancellation: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 impl Stage0RuntimePlan {
@@ -294,6 +299,7 @@ impl Stage0RuntimePlan {
             device,
             runtime_dtype,
             cpu_seed: Mutex::new(options.seed()),
+            cancellation: Mutex::new(None),
             options,
             model: OnceLock::new(),
         })
@@ -313,7 +319,15 @@ impl Stage0RuntimePlan {
             )));
         }
 
-        Ok(PreparedInferenceBatch {
+        validate_batched_inputs(
+            batched,
+            cond_lens,
+            target_lens,
+            self.config.num_audio_codebook,
+            self.config.audio_mask_id,
+        )?;
+
+        let prepared = PreparedInferenceBatch {
             input_ids: batched.batch_input_ids.to_candle(&self.device)?,
             audio_mask: batched.batch_audio_mask.to_candle(&self.device)?,
             attention_mask: batched.batch_attention_mask.to_candle(&self.device)?,
@@ -321,7 +335,13 @@ impl Stage0RuntimePlan {
             target_lens: target_lens.to_vec(),
             cond_lens: cond_lens.to_vec(),
             runtime_dtype: self.runtime_dtype,
-        })
+        };
+        validate_prepared_batch(
+            &prepared,
+            self.config.num_audio_codebook,
+            self.config.audio_mask_id,
+        )?;
+        Ok(prepared)
     }
 
     pub fn generate_deterministic(
@@ -342,15 +362,30 @@ impl Stage0RuntimePlan {
     }
 
     pub fn set_seed(&self, seed: u64) -> Result<()> {
+        *self
+            .cpu_seed
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(seed);
         if self.device.is_cpu() {
-            *self
-                .cpu_seed
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner()) = Some(seed);
-        } else {
-            self.device.set_seed(seed)?;
+            return Ok(());
         }
+        self.device.set_seed(seed)?;
         Ok(())
+    }
+
+    pub fn set_cancellation_flag(&self, flag: Option<Arc<AtomicBool>>) {
+        *self
+            .cancellation
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = flag;
+    }
+
+    pub fn cancellation_requested(&self) -> bool {
+        self.cancellation
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
     }
 
     pub fn debug_case(
@@ -430,6 +465,17 @@ impl Stage0RuntimePlan {
         config: &Stage0DeterministicConfig,
         capture_steps: &[usize],
     ) -> Result<Stage0DeviceGenerationOutput> {
+        validate_deterministic_config(config)?;
+        validate_prepared_batch(
+            prepared,
+            self.config.num_audio_codebook,
+            self.config.audio_mask_id,
+        )?;
+        if self.cancellation_requested() {
+            return Err(OmniVoiceError::InvalidRequest(
+                "inference cancelled".to_string(),
+            ));
+        }
         let seed = *self
             .cpu_seed
             .lock()
@@ -461,7 +507,7 @@ impl Stage0RuntimePlan {
         let capture_steps: BTreeSet<usize> = capture_steps.iter().copied().collect();
         let attention_mask =
             model.prepare_attention_mask(&prepared.attention_mask, self.runtime_dtype)?;
-        let timesteps = build_timesteps(0.0, 1.0, config.num_step + 1, config.t_shift)?;
+        let timesteps = build_timesteps(0.0, 1.0, config.num_step, config.t_shift)?;
         let schedules = build_unmask_schedules(
             &prepared.target_lens,
             num_codebooks,
@@ -491,6 +537,11 @@ impl Stage0RuntimePlan {
 
         let mut step_captures = Vec::new();
         for step in 0..config.num_step {
+            if self.cancellation_requested() {
+                return Err(OmniVoiceError::InvalidRequest(
+                    "inference cancelled".to_string(),
+                ));
+            }
             let forward = model.forward(
                 &batch_input_ids,
                 &prepared.audio_mask,
@@ -499,6 +550,13 @@ impl Stage0RuntimePlan {
             )?;
             let batch_logits = forward.logits.to_dtype(DType::F32)?;
             for (batch_index, batch_schedule) in schedules.iter().enumerate().take(batch_size) {
+                let update_count = batch_schedule[step];
+                if update_count == 0 {
+                    // The Python reference skips prediction entirely when this
+                    // step has no tokens to unmask.  Besides saving work, this
+                    // preserves the RNG stream for later stochastic steps.
+                    continue;
+                }
                 let target_len = prepared.target_lens[batch_index];
                 let cond_len = prepared.cond_lens[batch_index];
                 let c_logits = batch_logits.i((
@@ -535,7 +593,7 @@ impl Stage0RuntimePlan {
                     &pred_tokens_tensor,
                     &confidence_scores_tensor,
                     self.config.audio_mask_id,
-                    batch_schedule[step],
+                    update_count,
                     &layer_penalties,
                     config.position_temperature,
                     cpu_rng.as_mut(),
@@ -765,7 +823,18 @@ impl AudioEmbeddingMixer {
                 self.num_audio_codebook
             )));
         };
-        Ok(token_id + offset)
+        let vocab_size = i64::try_from(self.audio_vocab_size).map_err(|_| {
+            OmniVoiceError::InvalidRequest("audio vocabulary size does not fit i64".to_string())
+        })?;
+        if token_id < 0 || token_id >= vocab_size {
+            return Err(OmniVoiceError::InvalidRequest(format!(
+                "audio token {token_id} is outside vocabulary size {}",
+                self.audio_vocab_size
+            )));
+        }
+        token_id.checked_add(offset).ok_or_else(|| {
+            OmniVoiceError::InvalidRequest("shifted audio token id overflowed i64".to_string())
+        })
     }
 }
 
@@ -962,6 +1031,180 @@ fn apply_position_temperature_cpu(
     Tensor::from_vec(values, shape, &device).map_err(Into::into)
 }
 
+fn validate_batched_inputs(
+    batched: &BatchedInputs,
+    cond_lens: &[usize],
+    target_lens: &[usize],
+    expected_codebooks: usize,
+    audio_mask_id: i64,
+) -> Result<()> {
+    let (input_batch, input_codebooks, input_len) = batched.batch_input_ids.dims();
+    let (mask_batch, mask_len) = batched.batch_audio_mask.dims();
+    let (attention_batch, attention_heads, query_len, key_len) =
+        batched.batch_attention_mask.dims();
+    let (token_batch, token_codebooks, token_len) = batched.tokens_init.dims();
+    let batch_size = cond_lens.len();
+
+    if batch_size == 0 {
+        return Err(OmniVoiceError::InvalidRequest(
+            "prepared batch must contain at least one item".to_string(),
+        ));
+    }
+    if input_batch != batch_size.saturating_mul(2)
+        || input_codebooks != expected_codebooks
+        || mask_batch != input_batch
+        || mask_len != input_len
+        || attention_batch != input_batch
+        || attention_heads != 1
+        || query_len != input_len
+        || key_len != input_len
+        || token_batch != batch_size
+        || token_codebooks != expected_codebooks
+        || token_len == 0
+    {
+        return Err(OmniVoiceError::InvalidTensorShape {
+            name: "stage0_batched_inputs".to_string(),
+            expected: format!(
+                "input_ids=(2B,{expected_codebooks},S), masks=(2B,S), attention=(2B,1,S,S), tokens=(B,{expected_codebooks},T)"
+            ),
+            actual: format!(
+                "input_ids=({input_batch},{input_codebooks},{input_len}), masks=({mask_batch},{mask_len}), attention=({attention_batch},{attention_heads},{query_len},{key_len}), tokens=({token_batch},{token_codebooks},{token_len})"
+            ),
+        });
+    }
+
+    for (index, (&cond_len, &target_len)) in cond_lens.iter().zip(target_lens).enumerate() {
+        if cond_len == 0 || cond_len > input_len {
+            return Err(OmniVoiceError::InvalidRequest(format!(
+                "conditional length at index {index} must be in 1..={input_len}"
+            )));
+        }
+        if target_len == 0 || target_len > cond_len || target_len > token_len {
+            return Err(OmniVoiceError::InvalidRequest(format!(
+                "target length at index {index} must be in 1..={cond_len} and fit tokens_init"
+            )));
+        }
+    }
+    if batched
+        .tokens_init
+        .data
+        .iter()
+        .any(|token| *token != audio_mask_id)
+    {
+        return Err(OmniVoiceError::InvalidData(
+            "tokens_init must be filled with the audio mask token".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_prepared_batch(
+    prepared: &PreparedInferenceBatch,
+    expected_codebooks: usize,
+    audio_mask_id: i64,
+) -> Result<()> {
+    let (input_batch, input_codebooks, input_len) = prepared.input_ids.dims3()?;
+    let (mask_batch, mask_len) = prepared.audio_mask.dims2()?;
+    let (attention_batch, attention_heads, query_len, key_len) = prepared.attention_mask.dims4()?;
+    let (token_batch, token_codebooks, token_len) = prepared.tokens_init.dims3()?;
+    let batch_size = prepared.target_lens.len();
+
+    if batch_size == 0 || prepared.cond_lens.len() != batch_size {
+        return Err(OmniVoiceError::InvalidRequest(
+            "prepared batch lengths are inconsistent".to_string(),
+        ));
+    }
+    if input_batch != batch_size.saturating_mul(2)
+        || input_codebooks != expected_codebooks
+        || mask_batch != input_batch
+        || mask_len != input_len
+        || attention_batch != input_batch
+        || attention_heads != 1
+        || query_len != input_len
+        || key_len != input_len
+        || token_batch != batch_size
+        || token_codebooks != expected_codebooks
+        || token_len == 0
+    {
+        return Err(OmniVoiceError::InvalidTensorShape {
+            name: "prepared_stage0_batch".to_string(),
+            expected: format!(
+                "input_ids=(2B,{expected_codebooks},S), masks=(2B,S), attention=(2B,1,S,S), tokens=(B,{expected_codebooks},T)"
+            ),
+            actual: format!(
+                "input_ids=({input_batch},{input_codebooks},{input_len}), masks=({mask_batch},{mask_len}), attention=({attention_batch},{attention_heads},{query_len},{key_len}), tokens=({token_batch},{token_codebooks},{token_len})"
+            ),
+        });
+    }
+
+    for (index, (&cond_len, &target_len)) in prepared
+        .cond_lens
+        .iter()
+        .zip(&prepared.target_lens)
+        .enumerate()
+    {
+        if cond_len == 0 || cond_len > input_len {
+            return Err(OmniVoiceError::InvalidRequest(format!(
+                "conditional length at index {index} must be in 1..={input_len}"
+            )));
+        }
+        if target_len == 0 || target_len > cond_len || target_len > token_len {
+            return Err(OmniVoiceError::InvalidRequest(format!(
+                "target length at index {index} must be in 1..={cond_len} and fit tokens_init"
+            )));
+        }
+    }
+    if prepared
+        .tokens_init
+        .to_device(&Device::Cpu)?
+        .to_dtype(DType::I64)?
+        .flatten_all()?
+        .to_vec1::<i64>()?
+        .iter()
+        .any(|token| *token != audio_mask_id)
+    {
+        return Err(OmniVoiceError::InvalidData(
+            "tokens_init must be filled with the audio mask token".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_deterministic_config(config: &Stage0DeterministicConfig) -> Result<()> {
+    if config.num_step == 0 || config.num_step > MAX_GENERATION_STEPS {
+        return Err(OmniVoiceError::InvalidRequest(format!(
+            "num_step must be in the range 1..={MAX_GENERATION_STEPS}"
+        )));
+    }
+    if !config.guidance_scale.is_finite() {
+        return Err(OmniVoiceError::InvalidRequest(
+            "guidance_scale must be finite".to_string(),
+        ));
+    }
+    if !config.t_shift.is_finite() || config.t_shift <= 0.0 {
+        return Err(OmniVoiceError::InvalidRequest(
+            "t_shift must be finite and greater than zero".to_string(),
+        ));
+    }
+    if !config.layer_penalty_factor.is_finite() {
+        return Err(OmniVoiceError::InvalidRequest(
+            "layer_penalty_factor must be finite".to_string(),
+        ));
+    }
+    if !config.position_temperature.is_finite() || config.position_temperature < 0.0 {
+        return Err(OmniVoiceError::InvalidRequest(
+            "position_temperature must be finite and non-negative".to_string(),
+        ));
+    }
+    if !config.class_temperature.is_finite() || config.class_temperature < 0.0 {
+        return Err(OmniVoiceError::InvalidRequest(
+            "class_temperature must be finite and non-negative".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn apply_step_updates_device(
     current_tokens: &Tensor,
     predicted_tokens: &Tensor,

@@ -177,6 +177,27 @@ impl Stage1DecoderBundle {
             audio_tokenizer.weights_path(),
             contracts.num_audio_codebooks,
         )?;
+        let expected_audio_vocab_size =
+            model_config.codebook_size.checked_add(1).ok_or_else(|| {
+                OmniVoiceError::InvalidData(
+                    "stage1 codebook size overflows audio vocabulary".to_string(),
+                )
+            })?;
+        if expected_audio_vocab_size != contracts.audio_vocab_size {
+            return Err(OmniVoiceError::InvalidData(format!(
+                "stage1 codebook size {} does not match manifest audio_vocab_size {}",
+                model_config.codebook_size, contracts.audio_vocab_size
+            )));
+        }
+        if contracts.token_id_min < 0
+            || contracts.token_id_max < contracts.token_id_min
+            || contracts.token_id_max >= model_config.codebook_size as i64
+        {
+            return Err(OmniVoiceError::InvalidData(format!(
+                "manifest token range {}..={} is outside stage1 codebook size {}",
+                contracts.token_id_min, contracts.token_id_max, model_config.codebook_size
+            )));
+        }
 
         Ok(Self {
             model_root,
@@ -215,6 +236,11 @@ impl Stage1DecoderBundle {
                 expected: format!("({}, T)", self.expected_codebooks),
                 actual: format!("({}, {})", layers, positions),
             });
+        }
+        if positions == 0 {
+            return Err(OmniVoiceError::InvalidRequest(
+                "generated tokens must contain at least one frame".to_string(),
+            ));
         }
         if tokens
             .data
@@ -274,6 +300,7 @@ impl Stage1RuntimePlan {
         ref_rms: Option<f32>,
     ) -> Result<PreparedStage1Decode> {
         self.bundle.validate_generated_tokens(tokens)?;
+        validate_ref_rms(ref_rms)?;
         let tensor = tokens.to_candle(&self.device)?.unsqueeze(0)?;
 
         Ok(PreparedStage1Decode {
@@ -290,8 +317,9 @@ impl Stage1RuntimePlan {
     pub fn decode_raw(
         &self,
         tokens: &GeneratedTokens,
-        _ref_rms: Option<f32>,
+        ref_rms: Option<f32>,
     ) -> Result<DecodedAudio> {
+        validate_ref_rms(ref_rms)?;
         let samples = match tokens {
             GeneratedTokens::Single(tokens) => self.decode_chunk(tokens)?,
             GeneratedTokens::Chunked(chunks) => {
@@ -302,7 +330,9 @@ impl Stage1RuntimePlan {
                 cross_fade_chunks(&decoded, self.bundle.output_sample_rate(), 0.3)?
             }
         };
-        Ok(DecodedAudio::new(samples, self.bundle.output_sample_rate()))
+        let audio = DecodedAudio::new(samples, self.bundle.output_sample_rate());
+        audio.validate()?;
+        Ok(audio)
     }
 
     pub fn decode_final(
@@ -311,6 +341,7 @@ impl Stage1RuntimePlan {
         ref_rms: Option<f32>,
         postprocess_output: bool,
     ) -> Result<DecodedAudio> {
+        validate_ref_rms(ref_rms)?;
         let mut audio = self.decode_raw(tokens, ref_rms)?;
         if postprocess_output {
             let trimmed = remove_silence(&audio.samples, audio.sample_rate, 500, 100, 100);
@@ -325,6 +356,7 @@ impl Stage1RuntimePlan {
             peak_normalize_auto_voice(&audio.samples)?
         };
         audio.samples = fade_and_pad_audio(&audio.samples, audio.sample_rate, 0.1, 0.1);
+        audio.validate()?;
         Ok(audio)
     }
 
@@ -334,6 +366,7 @@ impl Stage1RuntimePlan {
         ref_rms: Option<f32>,
         postprocess_output: bool,
     ) -> Result<Stage1DebugCapture> {
+        validate_ref_rms(ref_rms)?;
         let mut tensors = BTreeMap::new();
         let raw_audio = match tokens {
             GeneratedTokens::Single(tokens) => {
@@ -356,6 +389,7 @@ impl Stage1RuntimePlan {
                 )
             }
         };
+        raw_audio.validate()?;
 
         tensors.insert(
             "raw_waveform".to_string(),
@@ -377,6 +411,7 @@ impl Stage1RuntimePlan {
         };
         final_audio.samples =
             fade_and_pad_audio(&final_audio.samples, final_audio.sample_rate, 0.1, 0.1);
+        final_audio.validate()?;
         tensors.insert(
             "final_waveform".to_string(),
             audio_to_tensor3(&final_audio.samples)?,
@@ -407,6 +442,7 @@ impl Stage1RuntimePlan {
         ref_rms: Option<f32>,
         postprocess_output: bool,
     ) -> Result<DecodedAudio> {
+        validate_ref_rms(ref_rms)?;
         let mut audio = self.decode_raw_tensor(tokens)?;
         if postprocess_output {
             let trimmed = remove_silence(&audio.samples, audio.sample_rate, 500, 100, 100);
@@ -421,6 +457,7 @@ impl Stage1RuntimePlan {
             peak_normalize_auto_voice(&audio.samples)?
         };
         audio.samples = fade_and_pad_audio(&audio.samples, audio.sample_rate, 0.1, 0.1);
+        audio.validate()?;
         Ok(audio)
     }
 
@@ -430,6 +467,7 @@ impl Stage1RuntimePlan {
         ref_rms: Option<f32>,
         postprocess_output: bool,
     ) -> Result<DecodedAudio> {
+        validate_ref_rms(ref_rms)?;
         let mut audio = self.decode_raw_tensor_chunks(chunks)?;
         if postprocess_output {
             let trimmed = remove_silence(&audio.samples, audio.sample_rate, 500, 100, 100);
@@ -444,6 +482,7 @@ impl Stage1RuntimePlan {
             peak_normalize_auto_voice(&audio.samples)?
         };
         audio.samples = fade_and_pad_audio(&audio.samples, audio.sample_rate, 0.1, 0.1);
+        audio.validate()?;
         Ok(audio)
     }
 
@@ -546,6 +585,17 @@ fn audio_to_tensor3(samples: &[f32]) -> Result<F32Tensor3> {
     F32Tensor3::new((1, 1, samples.len()), samples.to_vec())
 }
 
+fn validate_ref_rms(ref_rms: Option<f32>) -> Result<()> {
+    if let Some(value) = ref_rms {
+        if !value.is_finite() || value < 0.0 {
+            return Err(OmniVoiceError::InvalidRequest(
+                "reference RMS must be finite and non-negative".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn ensure_stage1_tensor(tokens: &Tensor, device: &Device) -> Result<Tensor> {
     let dims = tokens.dims();
     match dims {
@@ -581,15 +631,15 @@ fn waveform_to_samples(tensor: &Tensor) -> Result<Vec<f32>> {
             })
         }
     }
-    let mut samples = decoded
+    let samples = decoded
         .flatten_all()?
         .to_dtype(DType::F32)?
         .to_vec1::<f32>()
         .map_err(OmniVoiceError::from)?;
-    for sample in &mut samples {
-        if !sample.is_finite() {
-            *sample = 0.0;
-        }
+    if let Some(index) = samples.iter().position(|sample| !sample.is_finite()) {
+        return Err(OmniVoiceError::InvalidData(format!(
+            "stage1 decoder produced a non-finite sample at index {index}"
+        )));
     }
     Ok(samples)
 }
@@ -851,6 +901,13 @@ fn read_safetensor_header(
 ) -> Result<std::collections::BTreeMap<String, SafetensorHeaderEntry>> {
     let path = path.as_ref();
     let mut file = fs::File::open(path)?;
+    let file_len = file.metadata()?.len();
+    if file_len < 8 {
+        return Err(OmniVoiceError::InvalidData(format!(
+            "safetensors file is shorter than its header prefix: {}",
+            path.display()
+        )));
+    }
     let mut header_len_bytes = [0_u8; 8];
     file.read_exact(&mut header_len_bytes)?;
     let header_len = usize::try_from(u64::from_le_bytes(header_len_bytes)).map_err(|_| {
@@ -859,6 +916,23 @@ fn read_safetensor_header(
             path.display()
         ))
     })?;
+    const MAX_SAFETENSORS_HEADER_BYTES: usize = 64 * 1024 * 1024;
+    if header_len > MAX_SAFETENSORS_HEADER_BYTES {
+        return Err(OmniVoiceError::InvalidData(format!(
+            "safetensors header is too large ({} bytes): {}",
+            header_len,
+            path.display()
+        )));
+    }
+    let header_fits = u64::try_from(header_len)
+        .map(|length| length <= file_len.saturating_sub(8))
+        .unwrap_or(false);
+    if !header_fits {
+        return Err(OmniVoiceError::InvalidData(format!(
+            "safetensors header extends past end of file: {}",
+            path.display()
+        )));
+    }
     let mut header_buffer = vec![0_u8; header_len];
     file.seek(SeekFrom::Start(8))?;
     file.read_exact(&mut header_buffer)?;

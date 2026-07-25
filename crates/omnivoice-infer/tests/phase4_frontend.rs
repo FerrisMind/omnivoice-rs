@@ -19,6 +19,7 @@ fn language_resolution_matches_omnivoice_lang_map() {
     assert_eq!(resolve_language(Some("Chinese")).as_deref(), Some("zh"));
     assert_eq!(resolve_language(Some("Cantonese")).as_deref(), Some("yue"));
     assert_eq!(resolve_language(Some("en")).as_deref(), Some("en"));
+    assert_eq!(resolve_language(Some("EN")).as_deref(), Some("en"));
     assert_eq!(resolve_language(Some("None")), None);
     assert_eq!(resolve_language(Some("not-a-language")), None);
 }
@@ -102,6 +103,11 @@ fn duration_estimator_matches_reference_values() {
 
 #[test]
 fn artifact_loader_supports_single_and_chunked_prepared_json() {
+    if !support::reference_fixture_available("debug_auto_en_short")
+        || !support::reference_fixture_available("auto_long_chunked")
+    {
+        return;
+    }
     let bundle = ReferenceArtifactBundle::from_root(reference_root()).unwrap();
 
     match bundle
@@ -151,6 +157,11 @@ fn artifact_loader_supports_single_and_chunked_prepared_json() {
 
 #[test]
 fn frontend_chunk_plan_matches_reference_auto_long_case() {
+    if !support::model_fixture_available()
+        || !support::reference_fixture_available("auto_long_chunked")
+    {
+        return;
+    }
     let bundle = ReferenceArtifactBundle::from_root(reference_root()).unwrap();
     let case = bundle.case_by_id("auto_long_chunked").unwrap();
     let definition = case.load_case_definition().unwrap();
@@ -174,6 +185,9 @@ fn frontend_chunk_plan_matches_reference_auto_long_case() {
 
 #[test]
 fn phase10_duration_override_recomputes_effective_speed() {
+    if !support::model_fixture_available() {
+        return;
+    }
     let frontend = Frontend::from_model_root(model_root()).unwrap();
     let text = "Hello, world.";
     let estimated_unit_speed = frontend.estimate_target_tokens(text, None, None, 1.0);
@@ -219,6 +233,9 @@ fn phase10_duration_override_recomputes_effective_speed() {
 
 #[test]
 fn reference_audio_preprocessing_matches_python_prompt_contract() {
+    if !ref_audio_path().is_file() {
+        return;
+    }
     let processor = ReferenceAudioProcessor::new(24_000, 960);
     let prepared = processor
         .prepare_prompt_audio(
@@ -237,6 +254,11 @@ fn reference_audio_preprocessing_matches_python_prompt_contract() {
 
 #[test]
 fn prepare_prompt_matches_deterministic_reference_batch() {
+    if !support::model_fixture_available()
+        || !support::deterministic_fixture_available("det_auto_en_short")
+    {
+        return;
+    }
     let bundle = ReferenceArtifactBundle::from_root(deterministic_reference_root()).unwrap();
     let case = bundle.case_by_id("det_auto_en_short").unwrap();
     let request = case.build_generation_request().unwrap();

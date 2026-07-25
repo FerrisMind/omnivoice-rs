@@ -7,8 +7,8 @@ use tokenizers::Tokenizer;
 use crate::{
     artifacts::RuntimeArtifacts,
     contracts::{
-        GenerationRequest, GenerationTask, I64Tensor3, PreparedPrompt, PromptTensorBundle,
-        VoiceClonePrompt,
+        GenerationConfig, GenerationRequest, GenerationTask, I64Tensor3, PreparedPrompt,
+        PromptTensorBundle, VoiceClonePrompt,
     },
     error::{OmniVoiceError, Result},
     BoolTensor2,
@@ -21,7 +21,9 @@ mod voice_design;
 
 pub use duration::RuleDurationEstimator;
 pub use language::resolve_language;
-pub use text::{add_punctuation, chunk_text_punctuation, combine_text};
+pub use text::{
+    add_punctuation, chunk_text_punctuation, combine_text, tokenize_with_nonverbal_tags,
+};
 pub use voice_design::{contains_cjk, resolve_instruct};
 
 #[derive(Debug, Clone)]
@@ -32,6 +34,9 @@ pub struct Frontend {
     frame_rate: usize,
     duration_estimator: RuleDurationEstimator,
 }
+
+const MAX_TARGET_TOKENS: usize = 1_000_000;
+const MAX_GENERATION_STEPS: usize = 4096;
 
 #[derive(Debug, Clone)]
 pub(crate) struct DeviceVoiceClonePrompt {
@@ -144,17 +149,24 @@ impl Frontend {
     }
 
     pub fn build_task(&self, request: &GenerationRequest) -> Result<GenerationTask> {
+        validate_generation_config(&request.generation_config)?;
         let batch_size = request.texts.len();
+        if batch_size == 0 {
+            return Err(OmniVoiceError::InvalidRequest(
+                "generation request must contain at least one text".to_string(),
+            ));
+        }
         let languages = normalize_option_list(&request.languages, batch_size, "languages")?
             .into_iter()
             .map(|item| resolve_language(item.as_deref()))
             .collect();
-        let request_ref_texts = normalize_option_list(&request.ref_texts, batch_size, "ref_texts")?;
+        normalize_option_list(&request.ref_texts, batch_size, "ref_texts")?;
         let instructs_raw = normalize_option_list(&request.instructs, batch_size, "instructs")?;
         let voice_clone_prompts =
             normalize_option_voice_prompts(&request.voice_clone_prompts, batch_size)?;
         let requested_speeds = normalize_option_f32_list(&request.speeds, batch_size)?;
         let durations = normalize_option_f32_list(&request.durations, batch_size)?;
+        validate_generation_scalars(&requested_speeds, &durations, self.frame_rate)?;
 
         let mut instructs = Vec::with_capacity(batch_size);
         for (index, item) in instructs_raw.into_iter().enumerate() {
@@ -177,7 +189,7 @@ impl Frontend {
                         prompt.ref_rms,
                     )
                 } else {
-                    (request_ref_texts[index].clone(), None, None)
+                    (None, None, None)
                 };
 
             let requested_speed = requested_speeds[index].unwrap_or(1.0);
@@ -196,7 +208,7 @@ impl Frontend {
 
             let (target_length, effective_speed) = if let Some(duration_seconds) = durations[index]
             {
-                let target_tokens = (duration_seconds * self.frame_rate as f32).max(1.0) as usize;
+                let target_tokens = checked_duration_tokens(duration_seconds, self.frame_rate)?;
                 let speed = if target_tokens > 0 {
                     estimated_target_length as f32 / target_tokens as f32
                 } else {
@@ -232,7 +244,13 @@ impl Frontend {
         request: &GenerationRequest,
         voice_clone_prompts: &[Option<DeviceVoiceClonePrompt>],
     ) -> Result<DeviceGenerationTask> {
+        validate_generation_config(&request.generation_config)?;
         let batch_size = request.texts.len();
+        if batch_size == 0 {
+            return Err(OmniVoiceError::InvalidRequest(
+                "generation request must contain at least one text".to_string(),
+            ));
+        }
         if voice_clone_prompts.len() != batch_size {
             return Err(OmniVoiceError::InvalidRequest(format!(
                 "device voice_clone_prompts should contain {batch_size} items, got {}",
@@ -243,10 +261,11 @@ impl Frontend {
             .into_iter()
             .map(|item| resolve_language(item.as_deref()))
             .collect();
-        let request_ref_texts = normalize_option_list(&request.ref_texts, batch_size, "ref_texts")?;
+        normalize_option_list(&request.ref_texts, batch_size, "ref_texts")?;
         let instructs_raw = normalize_option_list(&request.instructs, batch_size, "instructs")?;
         let requested_speeds = normalize_option_f32_list(&request.speeds, batch_size)?;
         let durations = normalize_option_f32_list(&request.durations, batch_size)?;
+        validate_generation_scalars(&requested_speeds, &durations, self.frame_rate)?;
 
         let mut instructs = Vec::with_capacity(batch_size);
         for (index, item) in instructs_raw.into_iter().enumerate() {
@@ -269,7 +288,7 @@ impl Frontend {
                         prompt.ref_rms,
                     )
                 } else {
-                    (request_ref_texts[index].clone(), None, None)
+                    (None, None, None)
                 };
 
             let requested_speed = requested_speeds[index].unwrap_or(1.0);
@@ -290,7 +309,7 @@ impl Frontend {
 
             let (target_length, effective_speed) = if let Some(duration_seconds) = durations[index]
             {
-                let target_tokens = (duration_seconds * self.frame_rate as f32).max(1.0) as usize;
+                let target_tokens = checked_duration_tokens(duration_seconds, self.frame_rate)?;
                 let speed = if target_tokens > 0 {
                     estimated_target_length as f32 / target_tokens as f32
                 } else {
@@ -332,6 +351,11 @@ impl Frontend {
         let target_length = *task.target_lens.get(index).ok_or_else(|| {
             OmniVoiceError::InvalidRequest(format!("missing target length at {index}"))
         })?;
+        if target_length == 0 {
+            return Err(OmniVoiceError::InvalidRequest(format!(
+                "target length at {index} must be greater than zero"
+            )));
+        }
         let mode = task.mode_for(index);
 
         let mut style_text = String::new();
@@ -348,8 +372,7 @@ impl Frontend {
 
         let full_text = combine_text(text, ref_text.as_deref());
         let text_prompt = format!("<|text_start|>{full_text}<|text_end|>");
-        let text_encoding = self.tokenizer.encode(text_prompt, false)?;
-        let text_token_ids = text_encoding.get_ids().to_vec();
+        let text_token_ids = tokenize_with_nonverbal_tags(&self.tokenizer, &text_prompt)?;
 
         let style_len = style_token_ids.len();
         let text_len = text_token_ids.len();
@@ -357,8 +380,22 @@ impl Frontend {
             .as_ref()
             .map(|tokens| tokens.dims().1)
             .unwrap_or(0);
-        let total_length = style_len + text_len + ref_audio_length + target_length;
-        let target_start_idx = style_len + text_len + ref_audio_length;
+        if let Some(reference_tokens) = &ref_audio_tokens {
+            let (rows, _) = reference_tokens.dims();
+            if rows != self.num_audio_codebook {
+                return Err(OmniVoiceError::InvalidRequest(format!(
+                    "reference audio tokens at index {index} expected {} codebooks, got {rows}",
+                    self.num_audio_codebook
+                )));
+            }
+        }
+        let target_start_idx = style_len
+            .checked_add(text_len)
+            .and_then(|length| length.checked_add(ref_audio_length))
+            .ok_or_else(|| OmniVoiceError::InvalidRequest("prompt length overflow".to_string()))?;
+        let total_length = target_start_idx
+            .checked_add(target_length)
+            .ok_or_else(|| OmniVoiceError::InvalidRequest("prompt length overflow".to_string()))?;
 
         let mut input_ids = I64Tensor3::full(
             (1, self.num_audio_codebook, total_length),
@@ -384,7 +421,7 @@ impl Frontend {
         }
 
         let mut audio_mask = BoolTensor2::zeros((1, total_length));
-        let audio_start_idx = total_length - target_length - ref_audio_length;
+        let audio_start_idx = target_start_idx;
         for position in audio_start_idx..total_length {
             audio_mask.set(0, position, true);
         }
@@ -422,6 +459,11 @@ impl Frontend {
         let target_length = *task.target_lens.get(index).ok_or_else(|| {
             OmniVoiceError::InvalidRequest(format!("missing target length at {index}"))
         })?;
+        if target_length == 0 {
+            return Err(OmniVoiceError::InvalidRequest(format!(
+                "target length at {index} must be greater than zero"
+            )));
+        }
 
         let mut style_text = String::new();
         if task.generation_config.denoise && ref_audio_tokens.is_some() {
@@ -437,8 +479,7 @@ impl Frontend {
 
         let full_text = combine_text(text, ref_text.as_deref());
         let text_prompt = format!("<|text_start|>{full_text}<|text_end|>");
-        let text_encoding = self.tokenizer.encode(text_prompt, false)?;
-        let text_token_ids = text_encoding.get_ids().to_vec();
+        let text_token_ids = tokenize_with_nonverbal_tags(&self.tokenizer, &text_prompt)?;
 
         let style_len = style_token_ids.len();
         let text_len = text_token_ids.len();
@@ -446,9 +487,24 @@ impl Frontend {
             .as_ref()
             .map(|tokens| tokens.dims2())
             .transpose()?
-            .map(|(_, steps)| steps)
+            .map(|(rows, steps)| {
+                if rows != self.num_audio_codebook {
+                    return Err(OmniVoiceError::InvalidRequest(format!(
+                        "reference audio tokens at index {index} expected {} codebooks, got {rows}",
+                        self.num_audio_codebook
+                    )));
+                }
+                Ok(steps)
+            })
+            .transpose()?
             .unwrap_or(0);
-        let total_length = style_len + text_len + ref_audio_length + target_length;
+        let target_start_idx = style_len
+            .checked_add(text_len)
+            .and_then(|length| length.checked_add(ref_audio_length))
+            .ok_or_else(|| OmniVoiceError::InvalidRequest("prompt length overflow".to_string()))?;
+        let total_length = target_start_idx
+            .checked_add(target_length)
+            .ok_or_else(|| OmniVoiceError::InvalidRequest("prompt length overflow".to_string()))?;
 
         let mut input_ids_data = vec![self.audio_mask_id; self.num_audio_codebook * total_length];
         for codebook in 0..self.num_audio_codebook {
@@ -466,11 +522,15 @@ impl Frontend {
             device,
         )?;
         if let Some(reference_tokens) = ref_audio_tokens {
-            input_ids.slice_set(&reference_tokens.unsqueeze(0)?, 2, style_len + text_len)?;
+            input_ids.slice_set(
+                &reference_tokens.unsqueeze(0)?,
+                2,
+                target_start_idx - ref_audio_length,
+            )?;
         }
 
         let mut audio_mask_data = vec![0u8; total_length];
-        let audio_start_idx = total_length - target_length - ref_audio_length;
+        let audio_start_idx = target_start_idx;
         for mask_value in &mut audio_mask_data[audio_start_idx..] {
             *mask_value = 1;
         }
@@ -522,7 +582,10 @@ impl Frontend {
         } else {
             estimated
         };
-        adjusted.max(1.0) as usize
+        if !adjusted.is_finite() {
+            return MAX_TARGET_TOKENS;
+        }
+        adjusted.clamp(1.0, MAX_TARGET_TOKENS as f32) as usize
     }
 
     pub fn count_text_tokens(&self, text: &str) -> Result<usize> {
@@ -563,6 +626,95 @@ fn normalize_option_f32_list(
     }
 }
 
+fn validate_generation_scalars(
+    speeds: &[Option<f32>],
+    durations: &[Option<f32>],
+    frame_rate: usize,
+) -> Result<()> {
+    for (index, value) in speeds
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| value.as_ref().map(|value| (index, value)))
+    {
+        if !value.is_finite() || *value <= 0.0 {
+            return Err(OmniVoiceError::InvalidRequest(format!(
+                "speed at index {index} must be finite and greater than zero"
+            )));
+        }
+    }
+    for (index, value) in durations
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| value.as_ref().map(|value| (index, value)))
+    {
+        if !value.is_finite() || *value <= 0.0 {
+            return Err(OmniVoiceError::InvalidRequest(format!(
+                "duration at index {index} must be finite and greater than zero"
+            )));
+        }
+        let _ = checked_duration_tokens(*value, frame_rate).map_err(|_| {
+            OmniVoiceError::InvalidRequest(format!(
+                "duration at index {index} is too large for the runtime"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_generation_config(config: &GenerationConfig) -> Result<()> {
+    if config.num_step == 0 || config.num_step > MAX_GENERATION_STEPS {
+        return Err(OmniVoiceError::InvalidRequest(format!(
+            "num_step must be in the range 1..={MAX_GENERATION_STEPS}"
+        )));
+    }
+    if !config.guidance_scale.is_finite() {
+        return Err(OmniVoiceError::InvalidRequest(
+            "guidance_scale must be finite".to_string(),
+        ));
+    }
+    if !config.t_shift.is_finite() || config.t_shift <= 0.0 {
+        return Err(OmniVoiceError::InvalidRequest(
+            "t_shift must be finite and greater than zero".to_string(),
+        ));
+    }
+    if !config.layer_penalty_factor.is_finite() {
+        return Err(OmniVoiceError::InvalidRequest(
+            "layer_penalty_factor must be finite".to_string(),
+        ));
+    }
+    if !config.position_temperature.is_finite() || config.position_temperature < 0.0 {
+        return Err(OmniVoiceError::InvalidRequest(
+            "position_temperature must be finite and non-negative".to_string(),
+        ));
+    }
+    if !config.class_temperature.is_finite() || config.class_temperature < 0.0 {
+        return Err(OmniVoiceError::InvalidRequest(
+            "class_temperature must be finite and non-negative".to_string(),
+        ));
+    }
+    if !config.audio_chunk_duration.is_finite() || config.audio_chunk_duration <= 0.0 {
+        return Err(OmniVoiceError::InvalidRequest(
+            "audio_chunk_duration must be finite and greater than zero".to_string(),
+        ));
+    }
+    if !config.audio_chunk_threshold.is_finite() || config.audio_chunk_threshold <= 0.0 {
+        return Err(OmniVoiceError::InvalidRequest(
+            "audio_chunk_threshold must be finite and greater than zero".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn checked_duration_tokens(duration_seconds: f32, frame_rate: usize) -> Result<usize> {
+    let tokens = duration_seconds * frame_rate as f32;
+    if !tokens.is_finite() || tokens > MAX_TARGET_TOKENS as f32 {
+        return Err(OmniVoiceError::InvalidRequest(format!(
+            "duration must produce at most {MAX_TARGET_TOKENS} audio tokens"
+        )));
+    }
+    Ok(tokens.max(1.0) as usize)
+}
+
 fn normalize_option_voice_prompts(
     values: &[Option<VoiceClonePrompt>],
     batch_size: usize,
@@ -576,5 +728,39 @@ fn normalize_option_voice_prompts(
             "voice_clone_prompts should contain either 1 or {batch_size} items, got {}",
             values.len()
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{checked_duration_tokens, validate_generation_config, validate_generation_scalars};
+    use crate::contracts::GenerationConfig;
+
+    #[test]
+    fn generation_scalars_reject_non_finite_and_unbounded_values() {
+        assert!(validate_generation_scalars(&[Some(0.0)], &[], 25).is_err());
+        assert!(validate_generation_scalars(&[Some(f32::INFINITY)], &[], 25).is_err());
+        assert!(validate_generation_scalars(&[], &[Some(-1.0)], 25).is_err());
+        assert!(validate_generation_scalars(&[], &[Some(f32::NAN)], 25).is_err());
+        assert!(validate_generation_scalars(&[], &[Some(50_000.0)], 25).is_err());
+    }
+
+    #[test]
+    fn duration_tokens_are_clamped_to_at_least_one_frame() {
+        assert_eq!(checked_duration_tokens(f32::MIN_POSITIVE, 25).unwrap(), 1);
+    }
+
+    #[test]
+    fn generation_config_rejects_non_finite_sampling_controls() {
+        let config = GenerationConfig {
+            class_temperature: f32::NAN,
+            ..GenerationConfig::default()
+        };
+        assert!(validate_generation_config(&config).is_err());
+        let config = GenerationConfig {
+            audio_chunk_duration: 0.0,
+            ..GenerationConfig::default()
+        };
+        assert!(validate_generation_config(&config).is_err());
     }
 }

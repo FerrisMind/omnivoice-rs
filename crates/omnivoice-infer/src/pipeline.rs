@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{atomic::AtomicBool, Arc, Mutex};
 
 use candle_core::{DType, Device, Tensor};
 
@@ -101,7 +101,7 @@ impl Phase3Pipeline {
             self.runtime_artifacts.contracts().hop_length,
         );
         let waveform = processor.load_input(ref_audio)?;
-        let samples = crate::audio_input::mono_samples(&waveform.samples, waveform.channels);
+        let samples = crate::audio_input::mono_samples(&waveform.samples, waveform.channels)?;
         self.load_asr_model(model_name)?;
         let mut guard = self.asr.lock().unwrap_or_else(|poison| poison.into_inner());
         let (_, asr) = guard.as_mut().ok_or_else(|| {
@@ -115,7 +115,7 @@ impl Phase3Pipeline {
         waveform: &WaveformInput,
         model_name: Option<&str>,
     ) -> Result<String> {
-        let samples = crate::audio_input::mono_samples(&waveform.samples, waveform.channels);
+        let samples = crate::audio_input::mono_samples(&waveform.samples, waveform.channels)?;
         self.load_asr_model(model_name)?;
         let mut guard = self.asr.lock().unwrap_or_else(|poison| poison.into_inner());
         let (_, asr) = guard.as_mut().ok_or_else(|| {
@@ -158,12 +158,15 @@ impl Phase3Pipeline {
             self.runtime_artifacts.contracts().sample_rate,
         )?;
 
-        ReferencePromptBuilder::new(ReferencePromptOptions {
+        let prompt = ReferencePromptBuilder::new(ReferencePromptOptions {
             sample_rate: self.runtime_artifacts.contracts().sample_rate,
             hop_length: self.runtime_artifacts.contracts().hop_length,
             expected_codebooks: self.runtime_artifacts.contracts().num_audio_codebooks,
         })
-        .prompt_from_tokens(tokens, resolved_ref_text, prepared.ref_rms)
+        .prompt_from_tokens(tokens, resolved_ref_text, prepared.ref_rms)?;
+        self.validate_ref_audio_tokens(&prompt.ref_audio_tokens, "created voice clone prompt")?;
+        self.validate_ref_rms(prompt.ref_rms, "created voice clone prompt")?;
+        Ok(prompt)
     }
 
     pub fn prepare_prompt(&self, request: &GenerationRequest) -> Result<PreparedInferenceBatch> {
@@ -182,9 +185,12 @@ impl Phase3Pipeline {
     }
 
     pub fn generate_tokens(&self, request: &GenerationRequest) -> Result<Vec<GeneratedTokens>> {
+        self.ensure_not_cancelled()?;
         let request = self.materialize_request(request)?;
         let task = self.frontend.build_task(&request)?;
-        self.generate_tokens_from_task(&task)
+        let tokens = self.generate_tokens_from_task(&task)?;
+        self.ensure_not_cancelled()?;
+        Ok(tokens)
     }
 
     pub fn generate(&self, request: &GenerationRequest) -> Result<Vec<DecodedAudio>> {
@@ -199,6 +205,7 @@ impl Phase3Pipeline {
         &self,
         request: &GenerationRequest,
     ) -> Result<Vec<GeneratedAudioResult>> {
+        self.ensure_not_cancelled()?;
         let materialized = self.materialize_device_request(request)?;
         let task = self.frontend.build_task_with_device_prompts(
             &materialized.request,
@@ -207,11 +214,36 @@ impl Phase3Pipeline {
         let usage = self.estimate_generation_usage(&materialized.request, &task)?;
         let audio = self.generate_audio_from_device_task(&task)?;
 
+        if audio.len() != usage.len() {
+            return Err(OmniVoiceError::InvalidData(format!(
+                "pipeline produced {} audio results for {} usage entries",
+                audio.len(),
+                usage.len()
+            )));
+        }
+
         Ok(audio
             .into_iter()
             .zip(usage)
             .map(|(audio, usage)| GeneratedAudioResult { audio, usage })
             .collect())
+    }
+
+    pub fn set_cancellation_flag(&self, flag: Option<Arc<AtomicBool>>) {
+        self.stage0.set_cancellation_flag(flag);
+    }
+
+    pub fn cancellation_requested(&self) -> bool {
+        self.stage0.cancellation_requested()
+    }
+
+    fn ensure_not_cancelled(&self) -> Result<()> {
+        if self.cancellation_requested() {
+            return Err(OmniVoiceError::InvalidRequest(
+                "inference cancelled".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn generate_stage0_from_reference_case(
@@ -262,8 +294,7 @@ impl Phase3Pipeline {
             .iter()
             .copied()
             .map(|step| case.load_step_capture(step).map(|capture| (step, capture)))
-            .collect::<Result<Vec<_>>>()
-            .unwrap();
+            .collect::<Result<Vec<_>>>()?;
         let reference_final_tokens = match case.load_generated_tokens()? {
             GeneratedTokens::Single(tokens) => tokens,
             GeneratedTokens::Chunked(chunks) => chunks.last().cloned().ok_or_else(|| {
@@ -393,6 +424,17 @@ impl Phase3Pipeline {
         self.validate_ref_audio_token_values(tokens.data.iter().copied(), context)
     }
 
+    fn validate_ref_rms(&self, ref_rms: Option<f32>, context: &str) -> Result<()> {
+        if let Some(value) = ref_rms {
+            if !value.is_finite() || value < 0.0 {
+                return Err(OmniVoiceError::InvalidData(format!(
+                    "{context}: ref_rms must be finite and non-negative"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn validate_device_ref_audio_tokens(&self, tokens: &Tensor, context: &str) -> Result<()> {
         let (rows, cols) = tokens.dims2()?;
         self.validate_ref_audio_token_shape(rows, cols, context)?;
@@ -400,7 +442,7 @@ impl Phase3Pipeline {
             .to_device(&Device::Cpu)?
             .flatten_all()?
             .to_vec1::<i64>()?;
-        self.validate_ref_audio_token_values(flat.into_iter(), context)
+        self.validate_ref_audio_token_values(flat, context)
     }
 
     fn validate_ref_audio_token_shape(
@@ -415,6 +457,11 @@ impl Phase3Pipeline {
                 "{context}: ref_audio_tokens expected {expected_codebooks} codebooks, got shape ({rows}, {cols})"
             )));
         }
+        if cols == 0 {
+            return Err(OmniVoiceError::InvalidData(format!(
+                "{context}: ref_audio_tokens must contain at least one frame"
+            )));
+        }
         Ok(())
     }
 
@@ -422,15 +469,16 @@ impl Phase3Pipeline {
     where
         I: IntoIterator<Item = i64>,
     {
-        let audio_mask_id = self.stage0.config().audio_mask_id;
+        let contracts = self.runtime_artifacts.contracts();
+        let token_min = contracts.token_id_min;
+        let token_max = contracts.token_id_max;
         if let Some((flat_index, token)) = tokens
             .into_iter()
             .enumerate()
-            .find(|(_, token)| *token < 0 || *token >= audio_mask_id)
+            .find(|(_, token)| *token < token_min || *token > token_max)
         {
             return Err(OmniVoiceError::InvalidData(format!(
-                "{context}: ref_audio_tokens[{flat_index}]={token} is outside valid range 0..={}",
-                audio_mask_id.saturating_sub(1)
+                "{context}: ref_audio_tokens[{flat_index}]={token} is outside valid range {token_min}..={token_max}"
             )));
         }
         Ok(())
@@ -446,6 +494,7 @@ impl Phase3Pipeline {
 
         for index in 0..batch_size {
             if let Some(prompt) = request.voice_clone_prompts[index].as_ref() {
+                self.validate_ref_rms(prompt.ref_rms, &format!("request item {index}"))?;
                 self.validate_ref_audio_tokens(
                     &prompt.ref_audio_tokens,
                     &format!("request item {index}"),
@@ -459,6 +508,7 @@ impl Phase3Pipeline {
                     request.generation_config.preprocess_prompt,
                     request.asr_model.as_deref(),
                 )?;
+                self.validate_ref_rms(prompt.ref_rms, &format!("request item {index}"))?;
                 request.voice_clone_prompts[index] = Some(prompt);
                 request.ref_texts[index] = None;
             }
@@ -480,7 +530,9 @@ impl Phase3Pipeline {
 
         let mut device_voice_clone_prompts = Vec::with_capacity(batch_size);
         for index in 0..batch_size {
+            self.ensure_not_cancelled()?;
             if let Some(prompt) = request.voice_clone_prompts[index].clone() {
+                self.validate_ref_rms(prompt.ref_rms, &format!("request item {index}"))?;
                 self.validate_ref_audio_tokens(
                     &prompt.ref_audio_tokens,
                     &format!("request item {index}"),
@@ -493,14 +545,14 @@ impl Phase3Pipeline {
                 continue;
             }
             if let Some(ref_audio) = request.ref_audios[index].clone() {
-                device_voice_clone_prompts.push(Some(
-                    self.create_device_voice_clone_prompt_from_audio(
-                        &ref_audio,
-                        request.ref_texts[index].as_deref(),
-                        request.generation_config.preprocess_prompt,
-                        request.asr_model.as_deref(),
-                    )?,
-                ));
+                let prompt = self.create_device_voice_clone_prompt_from_audio(
+                    &ref_audio,
+                    request.ref_texts[index].as_deref(),
+                    request.generation_config.preprocess_prompt,
+                    request.asr_model.as_deref(),
+                )?;
+                self.validate_ref_rms(prompt.ref_rms, &format!("request item {index}"))?;
+                device_voice_clone_prompts.push(Some(prompt));
                 continue;
             }
             device_voice_clone_prompts.push(None);
@@ -523,6 +575,7 @@ impl Phase3Pipeline {
             self.runtime_artifacts.contracts().sample_rate,
             self.runtime_artifacts.contracts().hop_length,
         );
+        self.ensure_not_cancelled()?;
         let prepared = processor.prepare_prompt_audio(ref_audio, ref_text, preprocess_prompt)?;
         let resolved_ref_text = match prepared.ref_text {
             Some(ref_text) => ref_text,
@@ -534,6 +587,7 @@ impl Phase3Pipeline {
                     ),
                     asr_model,
                 )?;
+                self.ensure_not_cancelled()?;
                 if preprocess_prompt {
                     add_punctuation(&resolved_ref_text)
                 } else {
@@ -545,6 +599,7 @@ impl Phase3Pipeline {
             &prepared.waveform,
             self.runtime_artifacts.contracts().sample_rate,
         )?;
+        self.ensure_not_cancelled()?;
 
         Ok(DeviceVoiceClonePrompt {
             ref_audio_tokens,
@@ -592,34 +647,42 @@ impl Phase3Pipeline {
         let mut results = vec![None; task.batch_size()];
         let (short_idx, long_idx) = task.get_indices(self.frontend.frame_rate());
         if !short_idx.is_empty() {
+            self.ensure_not_cancelled()?;
             let short_task = task.slice_task(&short_idx);
             let short_results = self.generate_iterative_task_device(&short_task)?;
             for (slot, generated) in short_idx.into_iter().zip(short_results) {
+                self.ensure_not_cancelled()?;
                 // Materialize device results immediately so later Metal batch runs do not retain
                 // live token tensors from earlier sub-batches.
                 let generated = GeneratedTokens::Single(tensor_to_i64_tensor2(&generated)?);
-                results[slot] = Some(self.stage1.decode_final(
+                let audio = self.stage1.decode_final(
                     &generated,
                     task.ref_rms[slot],
                     task.generation_config.postprocess_output,
-                )?);
+                )?;
+                self.ensure_not_cancelled()?;
+                results[slot] = Some(audio);
             }
         }
         if !long_idx.is_empty() {
+            self.ensure_not_cancelled()?;
             let long_task = task.slice_task(&long_idx);
             let long_results = self.generate_chunked_task_device(&long_task)?;
             for (slot, generated) in long_idx.into_iter().zip(long_results) {
+                self.ensure_not_cancelled()?;
                 let generated = GeneratedTokens::Chunked(
                     generated
                         .iter()
                         .map(tensor_to_i64_tensor2)
                         .collect::<Result<Vec<_>>>()?,
                 );
-                results[slot] = Some(self.stage1.decode_final(
+                let audio = self.stage1.decode_final(
                     &generated,
                     task.ref_rms[slot],
                     task.generation_config.postprocess_output,
-                )?);
+                )?;
+                self.ensure_not_cancelled()?;
+                results[slot] = Some(audio);
             }
         }
         results
@@ -668,8 +731,10 @@ impl Phase3Pipeline {
     }
 
     fn generate_iterative_task_device(&self, task: &DeviceGenerationTask) -> Result<Vec<Tensor>> {
+        self.ensure_not_cancelled()?;
         let mut prepared = Vec::with_capacity(task.batch_size());
         for index in 0..task.batch_size() {
+            self.ensure_not_cancelled()?;
             let prompt = self
                 .frontend
                 .prepare_prompt_device(task, index, self.stage0.device())?;
@@ -710,8 +775,7 @@ impl Phase3Pipeline {
                     task.generation_config.audio_chunk_duration,
                 ))
             })
-            .collect::<Result<Vec<_>>>()
-            .unwrap();
+            .collect::<Result<Vec<_>>>()?;
         let has_ref = task
             .ref_audio_tokens
             .iter()
@@ -885,6 +949,7 @@ impl Phase3Pipeline {
         &self,
         task: &DeviceGenerationTask,
     ) -> Result<Vec<Vec<Tensor>>> {
+        self.ensure_not_cancelled()?;
         let all_chunks = (0..task.batch_size())
             .map(|index| {
                 Ok(self.frontend.chunk_text(
@@ -893,8 +958,7 @@ impl Phase3Pipeline {
                     task.generation_config.audio_chunk_duration,
                 ))
             })
-            .collect::<Result<Vec<_>>>()
-            .unwrap();
+            .collect::<Result<Vec<_>>>()?;
         let has_ref = task
             .ref_audio_tokens
             .iter()
@@ -913,6 +977,7 @@ impl Phase3Pipeline {
 
         if has_ref.iter().all(|value| *value) {
             for chunk_index in 0..max_chunks {
+                self.ensure_not_cancelled()?;
                 let indices = (0..task.batch_size())
                     .filter(|item_index| chunk_index < all_chunks[*item_index].len())
                     .collect::<Vec<_>>();
@@ -965,6 +1030,7 @@ impl Phase3Pipeline {
                 }
             }
             for chunk_index in 1..max_chunks {
+                self.ensure_not_cancelled()?;
                 let indices = (0..task.batch_size())
                     .filter(|item_index| chunk_index < all_chunks[*item_index].len())
                     .collect::<Vec<_>>();
@@ -1021,6 +1087,7 @@ impl Phase3Pipeline {
         ref_audio_tokens: Vec<Option<Tensor>>,
         ref_texts: Vec<Option<String>>,
     ) -> Result<Vec<Tensor>> {
+        self.ensure_not_cancelled()?;
         for (local_index, maybe_tokens) in ref_audio_tokens.iter().enumerate() {
             if let Some(tokens) = maybe_tokens {
                 self.validate_device_ref_audio_tokens(
@@ -1047,8 +1114,7 @@ impl Phase3Pipeline {
                     task.speed[*item_index],
                 ))
             })
-            .collect::<Result<Vec<_>>>()
-            .unwrap();
+            .collect::<Result<Vec<_>>>()?;
         let sub_task = DeviceGenerationTask {
             texts,
             target_lens,
@@ -1125,27 +1191,13 @@ impl Phase3Pipeline {
         let mut usage = Vec::with_capacity(task.batch_size());
         for index in 0..task.batch_size() {
             let mut input_tokens = self.frontend.count_text_tokens(&request.texts[index])?;
-            if let Some(language) = request
-                .languages
-                .get(index)
-                .and_then(|value| value.as_deref())
-            {
+            if let Some(language) = task.langs.get(index).and_then(|value| value.as_deref()) {
                 input_tokens += self.frontend.count_text_tokens(language)?;
             }
             if let Some(instruct) = task.instructs.get(index).and_then(|value| value.as_deref()) {
                 input_tokens += self.frontend.count_text_tokens(instruct)?;
             }
-            if let Some(prompt) = request
-                .voice_clone_prompts
-                .get(index)
-                .and_then(|value| value.as_ref())
-            {
-                input_tokens += self.frontend.count_text_tokens(&prompt.ref_text)?;
-            } else if let Some(ref_text) = request
-                .ref_texts
-                .get(index)
-                .and_then(|value| value.as_deref())
-            {
+            if let Some(ref_text) = task.ref_texts.get(index).and_then(|value| value.as_deref()) {
                 input_tokens += self.frontend.count_text_tokens(ref_text)?;
             }
 
@@ -1174,6 +1226,11 @@ fn pack_cfg_batch_device(
             target_lens.len()
         )));
     }
+    if num_audio_codebook == 0 {
+        return Err(crate::error::OmniVoiceError::InvalidRequest(
+            "prepared prompts must contain at least one audio codebook".to_string(),
+        ));
+    }
 
     let max_c_len = prepared
         .iter()
@@ -1191,7 +1248,27 @@ fn pack_cfg_batch_device(
     let mut uncond_attention_masks = Vec::with_capacity(prepared.len());
     let mut cond_lens = Vec::with_capacity(prepared.len());
 
-    for (prompt, target_len) in prepared.iter().zip(target_lens.iter().copied()) {
+    for (index, (prompt, target_len)) in
+        prepared.iter().zip(target_lens.iter().copied()).enumerate()
+    {
+        let (batch, codebooks, current_len) = prompt.input_ids.dims3()?;
+        let (mask_batch, mask_len) = prompt.audio_mask.dims2()?;
+        if batch != 1
+            || codebooks != num_audio_codebook
+            || current_len != prompt.total_length
+            || mask_batch != 1
+            || mask_len != prompt.total_length
+        {
+            return Err(crate::error::OmniVoiceError::InvalidData(format!(
+                "prepared prompt {index} has inconsistent tensor dimensions"
+            )));
+        }
+        if target_len == 0 || target_len > prompt.total_length {
+            return Err(crate::error::OmniVoiceError::InvalidRequest(format!(
+                "target length at index {index} must be in 1..={}",
+                prompt.total_length
+            )));
+        }
         cond_lens.push(prompt.total_length);
         cond_inputs.push(pad_input_ids_tensor(
             &prompt.input_ids,
@@ -1396,6 +1473,27 @@ mod tests {
             .join("python_reference_stage7_cuda_f32_dense")
     }
 
+    fn model_fixture_available() -> bool {
+        let root = model_root();
+        root.join("omnivoice.artifacts.json").is_file()
+            || (root.join("config.json").is_file()
+                && root.join("model.safetensors").is_file()
+                && root.join("tokenizer.json").is_file()
+                && root.join("tokenizer_config.json").is_file()
+                && root.join("audio_tokenizer/config.json").is_file()
+                && root.join("audio_tokenizer/model.safetensors").is_file()
+                && root
+                    .join("audio_tokenizer/preprocessor_config.json")
+                    .is_file())
+    }
+
+    fn deterministic_fixture_available(case_id: &str) -> bool {
+        deterministic_reference_root()
+            .join(case_id)
+            .join("case.json")
+            .is_file()
+    }
+
     fn cpu_frontend_and_stage0() -> (Frontend, Stage0RuntimePlan) {
         cpu_frontend_and_stage0_with_seed(Some(1234))
     }
@@ -1460,6 +1558,9 @@ mod tests {
 
     #[test]
     fn cpu_stage0_seed_from_options_makes_stochastic_generation_repeatable() {
+        if !model_fixture_available() || !deterministic_fixture_available("det_auto_en_short") {
+            return;
+        }
         let request = auto_request_for_seed_test();
         let config = stochastic_stage0_config();
         let (stage0, prepared) = prepare_cpu_stage0_batch(&request, Some(42));
@@ -1475,6 +1576,9 @@ mod tests {
 
     #[test]
     fn cpu_stage0_set_seed_makes_stochastic_generation_repeatable() {
+        if !model_fixture_available() || !deterministic_fixture_available("det_auto_en_short") {
+            return;
+        }
         let request = auto_request_for_seed_test();
         let config = stochastic_stage0_config();
         let (stage0, prepared) = prepare_cpu_stage0_batch(&request, None);
@@ -1491,6 +1595,9 @@ mod tests {
 
     #[test]
     fn cpu_stage0_set_seed_accepts_changing_seed_without_error() {
+        if !model_fixture_available() {
+            return;
+        }
         let options = RuntimeOptions::new(model_root())
             .with_device(DeviceSpec::Cpu)
             .with_dtype(DTypeSpec::F32);
@@ -1646,6 +1753,9 @@ mod tests {
 
     #[test]
     fn device_batch_preparation_matches_canonical_for_design_prompt() {
+        if !model_fixture_available() || !deterministic_fixture_available("det_design_en_british") {
+            return;
+        }
         let bundle = ReferenceArtifactBundle::from_root(deterministic_reference_root()).unwrap();
         let request = bundle
             .case_by_id("det_design_en_british")
@@ -1657,6 +1767,9 @@ mod tests {
 
     #[test]
     fn device_batch_preparation_matches_canonical_for_mixed_short_and_long_batch() {
+        if !model_fixture_available() || !deterministic_fixture_available("det_auto_en_short") {
+            return;
+        }
         let bundle = ReferenceArtifactBundle::from_root(deterministic_reference_root()).unwrap();
         let auto_case = bundle.case_by_id("det_auto_en_short").unwrap();
         let auto_request = auto_case.build_generation_request().unwrap();
@@ -1685,6 +1798,9 @@ mod tests {
 
     #[test]
     fn device_batch_preparation_matches_canonical_for_clone_prompt() {
+        if !model_fixture_available() {
+            return;
+        }
         let (frontend, stage0) = cpu_frontend_and_stage0();
         let num_codebooks = stage0.config().num_audio_codebook;
         let ref_len = 8usize;

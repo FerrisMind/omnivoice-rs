@@ -47,6 +47,31 @@ pub fn ref_audio_path() -> PathBuf {
     repo_root().join("ref.wav")
 }
 
+pub fn model_fixture_available() -> bool {
+    let root = model_root();
+    root.join("omnivoice.artifacts.json").is_file()
+        || (root.join("config.json").is_file()
+            && root.join("model.safetensors").is_file()
+            && root.join("tokenizer.json").is_file()
+            && root.join("tokenizer_config.json").is_file()
+            && root.join("audio_tokenizer/config.json").is_file()
+            && root.join("audio_tokenizer/model.safetensors").is_file()
+            && root
+                .join("audio_tokenizer/preprocessor_config.json")
+                .is_file())
+}
+
+pub fn reference_fixture_available(case_id: &str) -> bool {
+    reference_root().join(case_id).join("case.json").is_file()
+}
+
+pub fn deterministic_fixture_available(case_id: &str) -> bool {
+    deterministic_reference_root()
+        .join(case_id)
+        .join("case.json")
+        .is_file()
+}
+
 pub fn live_oracle_clone_prompt() -> (I64Tensor2, String) {
     let value: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(
