@@ -7,12 +7,16 @@ use omnivoice_infer::{
 };
 
 fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf()
+    std::env::var_os("OMNIVOICE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .to_path_buf()
+        })
 }
 
 fn model_root() -> PathBuf {
@@ -109,7 +113,7 @@ fn phase10_cli_stage0_debug_metal_smoke() {
             "--reference-root",
             &repo_root()
                 .join("artifacts")
-                .join("python_reference_stage0_deterministic_cpu_strict")
+                .join("python_reference_stage0_cuda_debug")
                 .display()
                 .to_string(),
             "--case",

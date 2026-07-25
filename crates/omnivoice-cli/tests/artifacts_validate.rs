@@ -36,10 +36,10 @@ fn stage0_reference_root() -> PathBuf {
 }
 
 #[cfg(feature = "cuda")]
-fn stage0_cpu_strict_reference_root() -> PathBuf {
+fn stage0_cuda_debug_reference_root() -> PathBuf {
     repo_root()
         .join("artifacts")
-        .join("python_reference_stage0_deterministic_cpu_strict")
+        .join("python_reference_stage0_cuda_debug")
 }
 
 #[cfg(feature = "cuda")]
@@ -255,7 +255,11 @@ fn stage1_decode_final_smoke_test() {
     assert!(stdout.contains("command=stage1-decode"));
     assert!(stdout.contains("mode=final"));
     assert!(stdout.contains("sample_rate=24000"));
-    assert!(stdout.contains("frame_count=77040"));
+    // Frame count tracks the current reference fixture (v2 product final is 86880).
+    assert!(
+        stdout.contains("frame_count=86880"),
+        "unexpected frame_count in stdout:\n{stdout}"
+    );
     assert!(stdout.contains("max_abs="));
     assert!(stdout.contains("mae="));
     assert!(stdout.contains("rmse="));
@@ -315,7 +319,7 @@ fn stage0_debug_smoke_test() {
             "--model-dir",
             &model_root().display().to_string(),
             "--reference-root",
-            &stage0_cpu_strict_reference_root().display().to_string(),
+            &stage0_cuda_debug_reference_root().display().to_string(),
             "--case",
             "det_debug_auto_en_short",
             "--device",

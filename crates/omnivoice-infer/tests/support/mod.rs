@@ -43,6 +43,26 @@ pub fn stage0_cpu_strict_reference_root() -> PathBuf {
         .join("python_reference_stage0_deterministic_cpu_strict")
 }
 
+/// CPU mirror of ``python_reference_stage0_cuda_debug`` (debug det cases).
+pub fn stage0_cpu_debug_reference_root() -> PathBuf {
+    repo_root()
+        .join("artifacts")
+        .join("python_reference_stage0_cpu_debug")
+}
+
+pub fn stage0_cuda_debug_reference_root() -> PathBuf {
+    repo_root()
+        .join("artifacts")
+        .join("python_reference_stage0_cuda_debug")
+}
+
+/// CPU mirror of the dense stage7 CUDA baseline.
+pub fn stage0_cpu_dense_reference_root() -> PathBuf {
+    repo_root()
+        .join("artifacts")
+        .join("python_reference_stage7_cpu_f32_dense")
+}
+
 pub fn ref_audio_path() -> PathBuf {
     repo_root().join("ref.wav")
 }

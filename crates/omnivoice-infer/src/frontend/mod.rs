@@ -420,8 +420,11 @@ impl Frontend {
             }
         }
 
+        // Audio positions cover reference audio (when present) and the target
+        // region. Marking only the target left clone prompts with ref tokens
+        // embedded as text, which diverged subsequent long-form chunks.
         let mut audio_mask = BoolTensor2::zeros((1, total_length));
-        let audio_start_idx = target_start_idx;
+        let audio_start_idx = style_len + text_len;
         for position in audio_start_idx..total_length {
             audio_mask.set(0, position, true);
         }
@@ -529,8 +532,9 @@ impl Frontend {
             )?;
         }
 
+        // Include ref-audio steps in the audio mask (style/text stay false).
         let mut audio_mask_data = vec![0u8; total_length];
-        let audio_start_idx = target_start_idx;
+        let audio_start_idx = style_len + text_len;
         for mask_value in &mut audio_mask_data[audio_start_idx..] {
             *mask_value = 1;
         }

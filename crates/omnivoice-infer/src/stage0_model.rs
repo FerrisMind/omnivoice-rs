@@ -482,16 +482,26 @@ impl Stage0RuntimePlan {
             .unwrap_or_else(|poison| poison.into_inner());
         if let Some(seed) = seed {
             if !self.device.is_cpu() {
+                // Still seed the device for any remaining on-device rand uses
+                // (e.g. class_temperature > 0 token sampling).
                 self.device.set_seed(seed)?;
             }
         }
-        let mut cpu_rng = self.device.is_cpu().then(|| {
-            if let Some(seed) = seed {
-                StdRng::seed_from_u64(seed)
-            } else {
-                let mut rng = rand::rng();
-                StdRng::from_rng(&mut rng)
-            }
+        // Position unmask sampling uses a host StdRng on ALL devices.
+        //
+        // This is NOT "run generation on CPU": the Qwen backbone + logits stay
+        // on CUDA. Only the tiny Gumbel draw over confidence scores
+        // (≤ codebooks * target_len floats per step) is sampled on the host.
+        //
+        // Candle CUDA `Tensor::rand` / `rand_like` Gumbel can drive the unmask
+        // schedule into collapsed token sequences for some seeds/shapes
+        // (listening 05: near-DC rumble; cross-decode proves stage1 is fine —
+        // cuda tokens decode badly on both CPU and CUDA decoders).
+        let mut host_rng = Some(if let Some(seed) = seed {
+            StdRng::seed_from_u64(seed)
+        } else {
+            let mut rng = rand::rng();
+            StdRng::from_rng(&mut rng)
         });
         let batch_size = prepared.target_lens.len();
         let debug_enabled = !capture_steps.is_empty();
@@ -584,7 +594,7 @@ impl Stage0RuntimePlan {
                         config.guidance_scale,
                         config.class_temperature,
                         self.config.audio_mask_id as usize,
-                        cpu_rng.as_mut(),
+                        host_rng.as_mut(),
                     )?;
                 let current_tokens_view =
                     tokens.i((batch_index..batch_index + 1, .., 0..target_len))?;
@@ -596,7 +606,7 @@ impl Stage0RuntimePlan {
                     update_count,
                     &layer_penalties,
                     config.position_temperature,
-                    cpu_rng.as_mut(),
+                    host_rng.as_mut(),
                 )?;
                 tokens = tokens.slice_assign(
                     &[
@@ -978,32 +988,31 @@ fn gumbel_argmax(logits: &Tensor, temperature: f32) -> Result<Tensor> {
     if temperature <= 0.0 {
         return logits.argmax(candle_core::D::Minus1).map_err(Into::into);
     }
-    let logits = logits.to_dtype(DType::F32)?;
-    let uniform = logits.rand_like(0f64, 1f64)?;
-    let gumbel_noise = (&uniform + 1e-10)?
-        .log()?
-        .neg()?
-        .broadcast_add(&Tensor::new(1e-10f32, uniform.device())?)?
-        .log()?
-        .neg()?;
-    ((&logits / temperature as f64)? + gumbel_noise)?
+    let scores = apply_gumbel_noise(logits, temperature)?;
+    scores
         .argmax(candle_core::D::Minus1)
         .map_err(Into::into)
 }
 
-fn apply_position_temperature(logits: &Tensor, temperature: f32) -> Result<Tensor> {
-    if temperature <= 0.0 {
-        return Ok(logits.clone());
-    }
-    let logits = logits.to_dtype(DType::F32)?;
-    let uniform = logits.rand_like(0f64, 1f64)?;
-    let gumbel_noise = (&uniform + 1e-10)?
-        .log()?
-        .neg()?
-        .broadcast_add(&Tensor::new(1e-10f32, uniform.device())?)?
-        .log()?
-        .neg()?;
-    ((&logits / temperature as f64)? + gumbel_noise).map_err(Into::into)
+/// Device-side Gumbel noise matching PyTorch OmniVoice `_gumbel_sample`.
+///
+/// Important: sample U(0,1) in **F32** (not F64). Mixing F64 `rand_like` with
+/// F32 logits/eps previously collapsed CUDA unmask schedules into pathological
+/// token sequences (listening demo scenario 05: near-DC rumble on CUDA).
+fn apply_gumbel_noise(logits: &Tensor, temperature: f32) -> Result<Tensor> {
+    let logits = logits.to_dtype(DType::F32)?.contiguous()?;
+    let device = logits.device();
+    let shape = logits.shape();
+    // torch.rand_like(logits) → same dtype/device as logits.
+    let uniform = Tensor::rand(0f32, 1f32, shape, device)?.to_dtype(DType::F32)?;
+    let eps = 1e-10f32;
+    let uniform = uniform
+        .maximum(&Tensor::new(eps, device)?.broadcast_as(shape.dims())?)?
+        .minimum(&Tensor::new(1.0f32 - eps, device)?.broadcast_as(shape.dims())?)?;
+    // gumbel = -log(-log(u))
+    let gumbel_noise = uniform.log()?.neg()?.log()?.neg()?;
+    let scaled = (&logits / f64::from(temperature))?;
+    (scaled + gumbel_noise).map_err(Into::into)
 }
 
 fn apply_position_temperature_cpu(
@@ -1220,10 +1229,12 @@ fn apply_step_updates_device(
     }
     let selection_scores = confidence_scores
         .broadcast_sub(&layer_penalties.broadcast_as(confidence_scores.shape().dims())?)?;
-    let selection_scores = if selection_scores.device().is_cpu() && position_temperature > 0.0 {
+    // Always use host StdRng for position Gumbel (see run_loop_device comment).
+    // Scores are small; backbone forward remains on the model device.
+    let selection_scores = if position_temperature > 0.0 {
         apply_position_temperature_cpu(&selection_scores, position_temperature, cpu_rng)?
     } else {
-        apply_position_temperature(&selection_scores, position_temperature)?
+        selection_scores
     };
     let available_mask = current_tokens.eq(mask_id)?;
     let neg_inf = Tensor::full(
