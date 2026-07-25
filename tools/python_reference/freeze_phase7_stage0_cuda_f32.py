@@ -108,6 +108,7 @@ def main() -> None:
             "--capture-layers",
             CAPTURE_LAYERS,
             "--capture-stage1-debug",
+            "--gpu-only",
         ]
     )
 

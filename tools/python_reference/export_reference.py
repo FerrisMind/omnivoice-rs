@@ -395,12 +395,39 @@ def patch_instrumented_generate_iterative(
             }
 
             inputs_embeds = self._prepare_embed_inputs(batch_input_ids, batch_audio_mask)
-            llm_outputs = self.llm(
-                inputs_embeds=inputs_embeds,
-                attention_mask=batch_attention_mask,
-                return_dict=True,
-                output_hidden_states=True,
-            )
+            captured_last_layer: dict[str, torch.Tensor] = {}
+            last_layer_index: int | None = None
+            last_layer_hook = None
+            llm_backbone = getattr(self.llm, "model", None)
+            if llm_backbone is None:
+                llm_backbone = self.llm
+            llm_layers = getattr(llm_backbone, "layers", None)
+            if llm_layers is not None and len(llm_layers) > 0:
+                last_layer_index = len(llm_layers) - 1
+                if last_layer_index in {
+                    int(layer) for layer in capture_layers if layer != "final"
+                }:
+
+                    def capture_last_layer(_module, _inputs, output):
+                        if isinstance(output, tuple):
+                            output = output[0]
+                        captured_last_layer["hidden"] = (
+                            output.detach().cpu().contiguous()
+                        )
+
+                    last_layer_hook = llm_layers[last_layer_index].register_forward_hook(
+                        capture_last_layer
+                    )
+            try:
+                llm_outputs = self.llm(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=batch_attention_mask,
+                    return_dict=True,
+                    output_hidden_states=True,
+                )
+            finally:
+                if last_layer_hook is not None:
+                    last_layer_hook.remove()
             hidden_states = llm_outputs.hidden_states
             if hidden_states is None:
                 raise RuntimeError("expected hidden states for debug capture")
@@ -413,9 +440,19 @@ def patch_instrumented_generate_iterative(
                     forward_bundle["final_hidden"] = llm_outputs[0].detach().cpu().contiguous()
                     continue
                 layer_index = int(layer)
-                forward_bundle[f"hidden_layer_{layer_index:02d}"] = (
-                    hidden_states[layer_index + 1].detach().cpu().contiguous()
-                )
+                if layer_index == last_layer_index:
+                    try:
+                        forward_bundle[f"hidden_layer_{layer_index:02d}"] = captured_last_layer[
+                            "hidden"
+                        ]
+                    except KeyError as exc:
+                        raise RuntimeError(
+                            "last decoder layer capture was not produced"
+                        ) from exc
+                else:
+                    forward_bundle[f"hidden_layer_{layer_index:02d}"] = (
+                        hidden_states[layer_index + 1].detach().cpu().contiguous()
+                    )
             self._phase0_debug_forward = forward_bundle
 
         for step in range(gen_config.num_step):
@@ -545,11 +582,38 @@ def decode_raw_audio(model: OmniVoice, tokens: torch.Tensor | list[torch.Tensor]
     tokenizer_device = model.audio_tokenizer.device
     if isinstance(tokens, list):
         chunk_audios = [
-            model.audio_tokenizer.decode(chunk.to(tokenizer_device).unsqueeze(0)).audio_values[0].cpu()
+            model.audio_tokenizer
+            .decode(chunk.to(tokenizer_device).unsqueeze(0))
+            .audio_values[0]
+            .detach()
+            .cpu()
+            .numpy()
             for chunk in tokens
         ]
-        return omnivoice_module.cross_fade_chunks(chunk_audios, model.sampling_rate)
-    return model.audio_tokenizer.decode(tokens.to(tokenizer_device).unsqueeze(0)).audio_values[0].cpu()
+        return normalize_audio_tensor(
+            omnivoice_module.cross_fade_chunks(chunk_audios, model.sampling_rate)
+        )
+    return normalize_audio_tensor(
+        model.audio_tokenizer.decode(tokens.to(tokenizer_device).unsqueeze(0)).audio_values[0]
+    )
+
+
+def normalize_audio_tensor(audio: torch.Tensor | np.ndarray) -> torch.Tensor:
+    """Normalize upstream audio return values to a mono ``(1, frames)`` tensor.
+
+    Recent upstream releases return post-processed audio as a NumPy array,
+    while older releases returned a torch tensor. The reference artifact
+    contract is independent of that implementation detail.
+    """
+    if isinstance(audio, np.ndarray):
+        audio = torch.from_numpy(audio.copy())
+    elif not isinstance(audio, torch.Tensor):
+        audio = torch.as_tensor(audio)
+    if audio.dim() == 1:
+        audio = audio.unsqueeze(0)
+    if audio.dim() != 2 or audio.size(0) != 1:
+        raise RuntimeError(f"expected mono 2D audio, got {tuple(audio.shape)}")
+    return audio.detach().cpu().contiguous()
 
 
 def ensure_tensor3(tensor: torch.Tensor) -> torch.Tensor:
@@ -602,15 +666,17 @@ def capture_stage1_debug(
 ) -> dict[str, torch.Tensor]:
     if isinstance(generated_tokens, list):
         tensors: dict[str, torch.Tensor] = {}
-        raw_chunks: list[torch.Tensor] = []
+        raw_chunks: list[np.ndarray] = []
         for index, chunk_tokens in enumerate(generated_tokens):
             chunk_tensors, chunk_raw = capture_stage1_debug_single(model, chunk_tokens)
             for name, tensor in chunk_tensors.items():
                 tensors[f"chunk_{index:02d}_{name}"] = tensor
             tensors[f"chunk_{index:02d}_raw_waveform"] = chunk_raw
-            raw_chunks.append(chunk_raw.squeeze(0))
+            raw_chunks.append(chunk_raw.squeeze(0).numpy())
         tensors["raw_waveform"] = ensure_tensor3(
-            omnivoice_module.cross_fade_chunks(raw_chunks, model.sampling_rate)
+            normalize_audio_tensor(
+                omnivoice_module.cross_fade_chunks(raw_chunks, model.sampling_rate)
+            )
         )
     else:
         tensors, raw_waveform = capture_stage1_debug_single(model, generated_tokens)
@@ -860,7 +926,9 @@ def run_case_once(
             generated_tokens = model._generate_chunked(task, gen_config)[0]
 
         raw_audio = decode_raw_audio(model, generated_tokens)
-        final_audio = model._decode_and_post_process(generated_tokens, task.ref_rms[0], gen_config)
+        final_audio = normalize_audio_tensor(
+            model._decode_and_post_process(generated_tokens, task.ref_rms[0], gen_config)
+        )
         stage1_debug = (
             capture_stage1_debug(model, generated_tokens, final_audio)
             if capture_stage1_debug_artifacts
@@ -983,6 +1051,7 @@ def run_determinism_check(
     dtype: str,
     seed: int,
     case: dict[str, Any],
+    allow_cpu_fallback: bool = True,
 ) -> dict[str, Any]:
     first = run_case_once(model_dir, device, dtype, seed, case)
     second = run_case_once(model_dir, device, dtype, seed, case)
@@ -993,7 +1062,11 @@ def run_determinism_check(
         "hashes": [first["token_hash"], second["token_hash"]],
         "matched": first["token_hash"] == second["token_hash"],
     }
-    if not report["matched"] and str(report["device"]).startswith("cuda"):
+    if (
+        allow_cpu_fallback
+        and not report["matched"]
+        and str(report["device"]).startswith("cuda")
+    ):
         cpu_case = json.loads(json.dumps(case))
         cpu_case.setdefault("debug", {})
         cpu_case["debug"]["device"] = "cpu"
@@ -1086,6 +1159,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--capture-steps", default=None)
     parser.add_argument("--capture-layers", default=None)
     parser.add_argument("--capture-stage1-debug", action="store_true")
+    parser.add_argument(
+        "--gpu-only",
+        action="store_true",
+        help="reject CPU devices and disable the CPU determinism fallback",
+    )
     return parser.parse_args()
 
 
@@ -1113,6 +1191,23 @@ def main() -> None:
         capture_layers=parse_capture_layers(args.capture_layers),
     )
 
+    if args.gpu_only:
+        if not str(args.device).lower().startswith("cuda"):
+            raise ValueError("--gpu-only requires --device cuda[:N]")
+        if not torch.cuda.is_available():
+            raise RuntimeError("--gpu-only requires a CUDA-capable PyTorch runtime")
+        cpu_cases = [
+            case["id"]
+            for case in cases
+            if not str(case.get("debug", {}).get("device", args.device))
+            .lower()
+            .startswith("cuda")
+        ]
+        if cpu_cases:
+            raise ValueError(
+                "--gpu-only selected non-CUDA cases: " + ", ".join(cpu_cases)
+            )
+
     runtime_info = gather_runtime_info(model_dir, args.device, args.dtype, args.seed)
     environment = verify_environment(model_dir)
     smoke = smoke_test(model_dir, args.device, args.dtype, args.seed)
@@ -1124,7 +1219,14 @@ def main() -> None:
             shutil.rmtree(case_dir)
         case_dir.mkdir(parents=True, exist_ok=True)
         determinism = (
-            run_determinism_check(model_dir, args.device, args.dtype, args.seed, case)
+            run_determinism_check(
+                model_dir,
+                args.device,
+                args.dtype,
+                args.seed,
+                case,
+                allow_cpu_fallback=not args.gpu_only,
+            )
             if should_run_determinism(case["id"])
             else {"skipped": True}
         )

@@ -14,23 +14,36 @@ This repository verifies:
 
 ## Artifact Roots
 
+The current reproducible fixture bundle is the GPU-only v2 root. Point
+`OMNIVOICE_ROOT` at `artifacts/v2` before running the CUDA suites:
+
+```powershell
+$env:OMNIVOICE_ROOT = (Resolve-Path artifacts/v2).Path
+```
+
 Important artifact directories in this repository:
 
-- `artifacts/python_reference/`
-- `artifacts/python_reference_cpu_strict/`
-- `artifacts/python_reference_stage0_deterministic/`
-- `artifacts/python_reference_stage7_cuda_f32_dense/`
+- `artifacts/v2/artifacts/python_reference/`
+- `artifacts/v2/artifacts/python_reference_stage0_deterministic/`
+- `artifacts/v2/artifacts/python_reference_stage0_cuda_debug/`
+- `artifacts/v2/artifacts/python_reference_stage7_cuda_f32_dense/`
+- `artifacts/v2/artifacts/python_reference_v2_index.json`
+- `artifacts/python_reference/` (legacy)
+- `artifacts/python_reference_cpu_strict/` (legacy CPU)
 - `artifacts/live_oracles/`
 - `artifacts/manual_cuda_modes/`
 
 ## Key Manifest Files
 
-- [`artifacts/python_reference/manifest.json`](../artifacts/python_reference/manifest.json)
-  Main upstream-style reference artifact set, including main CUDA cases.
-- [`artifacts/python_reference_cpu_strict/manifest.json`](../artifacts/python_reference_cpu_strict/manifest.json)
-  CPU strict/debug verification artifacts.
-- [`artifacts/python_reference_stage7_cuda_f32_dense/manifest.json`](../artifacts/python_reference_stage7_cuda_f32_dense/manifest.json)
+- [`artifacts/v2/artifacts/python_reference_v2_index.json`](../artifacts/v2/artifacts/python_reference_v2_index.json)
+  Top-level GPU-only v2 index for all current baselines.
+- [`artifacts/v2/artifacts/python_reference/manifest.json`](../artifacts/v2/artifacts/python_reference/manifest.json)
+  Product f16 CUDA reference cases.
+- [`artifacts/v2/artifacts/python_reference_stage0_cuda_debug/manifest.json`](../artifacts/v2/artifacts/python_reference_stage0_cuda_debug/manifest.json)
+  Stage0 debug f32 CUDA cases.
+- [`artifacts/v2/artifacts/python_reference_stage7_cuda_f32_dense/manifest.json`](../artifacts/v2/artifacts/python_reference_stage7_cuda_f32_dense/manifest.json)
   Dense CUDA stage0 parity artifacts.
+- Legacy roots under `artifacts/python_reference*` remain for older workflows.
 
 ## Verified Modes
 

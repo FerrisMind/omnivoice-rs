@@ -1,5 +1,62 @@
 # Python Golden Reference
 
+## GPU-only v2 bundle
+
+The current fixture set is generated from the checked-out upstream Python
+implementation and the local model with CUDA inference only. The v2 root is
+repository-shaped so the Rust tests can use it directly:
+
+```powershell
+uv run --project 'C:/Users/PC/Documents/Default Project/omnivoice_refs/OmniVoice' `
+  python tools/python_reference/freeze_v2_gpu.py
+$env:OMNIVOICE_ROOT = (Resolve-Path artifacts/v2).Path
+```
+
+The command writes and validates:
+
+- `artifacts/v2/artifacts/python_reference`
+- `artifacts/v2/artifacts/python_reference_stage0_deterministic`
+- `artifacts/v2/artifacts/python_reference_stage0_cuda_debug`
+- `artifacts/v2/artifacts/python_reference_stage7_cuda_f32_dense`
+- `artifacts/v2/artifacts/python_reference_v2_index.json`
+
+`--gpu-only` rejects CPU case devices and disables the exporter's CPU
+determinism fallback. Tensor validation may deserialize files to host memory,
+but no model inference is performed on CPU.
+
+### Freeze full CPU baselines (same case set as GPU)
+
+```powershell
+uv run --project 'C:/Users/PC/Documents/Default Project/omnivoice_refs/OmniVoice' `
+  python tools/python_reference/freeze_v2_cpu.py
+```
+
+Writes (mirrors GPU baselines, CPU float32):
+
+| CPU directory | Mirrors GPU |
+|---|---|
+| `python_reference_cpu_strict` | `python_reference` |
+| `python_reference_stage0_deterministic_cpu_strict` | `python_reference_stage0_deterministic` |
+| `python_reference_stage0_cpu_debug` | `python_reference_stage0_cuda_debug` |
+| `python_reference_stage7_cpu_f32_dense` | `python_reference_stage7_cuda_f32_dense` |
+| `python_reference_v2_cpu_index.json` | `python_reference_v2_index.json` |
+
+Dense export on CPU is slow and large; omit only with `--skip-dense` if needed.
+
+### Pack release assets (no model weights)
+
+```powershell
+python tools/python_reference/pack_v2_release.py --set both
+# -> artifacts/dist/ci-fixtures-v2-gpu.zip (+ .sha256)
+# -> artifacts/dist/ci-fixtures-v2-cpu.zip (+ .sha256)
+
+# optional single combined archive:
+python tools/python_reference/pack_v2_release.py --set combined
+```
+
+Extract a zip, place or symlink the OmniVoice model at `<root>/model`, then set
+`OMNIVOICE_ROOT` to the extracted root.
+
 This directory contains the Phase 0 harness that freezes the canonical Python reference for the future OmniVoice Rust port.
 
 - source of truth: `h:/omnivoice/refs/OmniVoice`
