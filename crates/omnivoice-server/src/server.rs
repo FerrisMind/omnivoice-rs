@@ -6,6 +6,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use std::sync::{atomic::AtomicBool, Arc};
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::{
@@ -86,22 +87,28 @@ async fn audio_speech(
         .runtime()
         .ok_or_else(|| ServerError::service_unavailable("runtime is not ready"))?;
     let request_timeout = state.config.request_timeout;
-    let permit = state
-        .limiter
-        .clone()
-        .acquire_owned()
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let cancellation_for_worker = Arc::clone(&cancellation);
+    let limiter = Arc::clone(&state.limiter);
+    let handle = async move {
+        let permit = limiter
+            .acquire_owned()
+            .await
+            .map_err(|_| ServerError::internal("request limiter is closed"))?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            runtime.synthesize_with_seed(generation_request, seed_override, cancellation_for_worker)
+        })
         .await
-        .map_err(|_| ServerError::internal("request limiter is closed"))?;
-    let handle = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        if let Some(seed) = seed_override {
-            runtime.set_seed(seed)?;
-        }
-        runtime.synthesize(generation_request)
-    });
+        .map_err(ServerError::from)?
+        .map_err(ServerError::from)
+    };
     let result = match tokio::time::timeout(request_timeout, handle).await {
-        Ok(result) => result??,
-        Err(_) => return Err(ServerError::request_timeout("request timed out")),
+        Ok(result) => result?,
+        Err(_) => {
+            cancellation.store(true, std::sync::atomic::Ordering::Release);
+            return Err(ServerError::request_timeout("request timed out"));
+        }
     };
 
     build_audio_response(

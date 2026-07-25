@@ -1,5 +1,8 @@
 use std::{
-    sync::{Arc, RwLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, RwLock,
+    },
     time::Duration,
 };
 
@@ -19,16 +22,35 @@ pub trait SpeechRuntime: Send + Sync {
     fn set_seed(&self, _seed: u64) -> omnivoice_infer::Result<()> {
         Ok(())
     }
+
+    fn synthesize_with_seed(
+        &self,
+        request: GenerationRequest,
+        seed: Option<u64>,
+        cancellation: Arc<AtomicBool>,
+    ) -> omnivoice_infer::Result<GeneratedAudioResult> {
+        if cancellation.load(Ordering::Acquire) {
+            return Err(omnivoice_infer::OmniVoiceError::InvalidRequest(
+                "inference cancelled".to_string(),
+            ));
+        }
+        if let Some(seed) = seed {
+            self.set_seed(seed)?;
+        }
+        self.synthesize(request)
+    }
 }
 
 pub struct PipelineSpeechRuntime {
     pipeline: Phase3Pipeline,
+    inference_lock: Mutex<()>,
 }
 
 impl PipelineSpeechRuntime {
     pub fn from_options(options: RuntimeOptions) -> Result<Self, ServerError> {
         Ok(Self {
             pipeline: Phase3Pipeline::from_options(options)?,
+            inference_lock: Mutex::new(()),
         })
     }
 }
@@ -38,6 +60,10 @@ impl SpeechRuntime for PipelineSpeechRuntime {
         &self,
         request: GenerationRequest,
     ) -> omnivoice_infer::Result<GeneratedAudioResult> {
+        let _guard = self
+            .inference_lock
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let mut results = self.pipeline.generate_with_usage(&request)?;
         results.pop().ok_or_else(|| {
             omnivoice_infer::OmniVoiceError::InvalidData(
@@ -47,7 +73,46 @@ impl SpeechRuntime for PipelineSpeechRuntime {
     }
 
     fn set_seed(&self, seed: u64) -> omnivoice_infer::Result<()> {
+        let _guard = self
+            .inference_lock
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         self.pipeline.stage0().set_seed(seed)
+    }
+
+    fn synthesize_with_seed(
+        &self,
+        request: GenerationRequest,
+        seed: Option<u64>,
+        cancellation: Arc<AtomicBool>,
+    ) -> omnivoice_infer::Result<GeneratedAudioResult> {
+        let _guard = self
+            .inference_lock
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+
+        if cancellation.load(Ordering::Acquire) {
+            return Err(omnivoice_infer::OmniVoiceError::InvalidRequest(
+                "inference cancelled".to_string(),
+            ));
+        }
+        self.pipeline
+            .set_cancellation_flag(Some(Arc::clone(&cancellation)));
+
+        let result = (|| {
+            if let Some(seed) = seed {
+                self.pipeline.stage0().set_seed(seed)?;
+            }
+            let mut results = self.pipeline.generate_with_usage(&request)?;
+            results.pop().ok_or_else(|| {
+                omnivoice_infer::OmniVoiceError::InvalidData(
+                    "pipeline did not return an audio result".to_string(),
+                )
+            })
+        })();
+
+        self.pipeline.set_cancellation_flag(None);
+        result
     }
 }
 
@@ -121,19 +186,34 @@ impl AppState {
     where
         R: SpeechRuntime + 'static,
     {
-        *self.runtime.write().unwrap() = Some(Arc::new(runtime));
-        *self.status.write().unwrap() = RuntimeStatus::Ready;
+        *self
+            .runtime
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(Arc::new(runtime));
+        *self
+            .status
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) = RuntimeStatus::Ready;
     }
 
     pub fn mark_failed(&self) {
-        *self.status.write().unwrap() = RuntimeStatus::Failed;
+        *self
+            .status
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) = RuntimeStatus::Failed;
     }
 
     pub fn runtime(&self) -> Option<Arc<dyn SpeechRuntime>> {
-        self.runtime.read().unwrap().clone()
+        self.runtime
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
     }
 
     pub fn status(&self) -> RuntimeStatus {
-        *self.status.read().unwrap()
+        *self
+            .status
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
     }
 }

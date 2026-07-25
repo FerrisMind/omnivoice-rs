@@ -11,7 +11,7 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use futures_util::stream;
+use futures_util::{stream, StreamExt};
 use omnivoice_infer::{
     audio_input::load_audio_bytes,
     contracts::{DecodedAudio, GenerationConfig, GenerationRequest, ReferenceAudioInput},
@@ -97,12 +97,15 @@ fn parse_speech_request(
     let response_format = parse_response_format(&request.response_format)?;
     let stream_format = parse_stream_format(request.stream_format.as_deref())?;
     let speed = request.speed.unwrap_or(1.0);
-    if speed <= 0.0 {
-        return Err(ServerError::validation("speed must be greater than zero"));
+    if !speed.is_finite() || speed <= 0.0 {
+        return Err(ServerError::validation(
+            "speed must be finite and greater than zero",
+        ));
     }
 
     let mut generation_config = GenerationConfig::default();
     set_generation_config_overrides(&request.extra, &mut generation_config)?;
+    validate_generation_config(&generation_config)?;
 
     let mut generation_request = GenerationRequest::new_text_only(request.input);
     generation_request.generation_config = generation_config;
@@ -112,9 +115,9 @@ fn parse_speech_request(
         generation_request.languages = vec![Some(language)];
     }
     if let Some(duration) = parse_optional_f32(&request.extra, "duration")? {
-        if duration <= 0.0 {
+        if !duration.is_finite() || duration <= 0.0 {
             return Err(ServerError::validation(
-                "duration must be greater than zero",
+                "duration must be finite and greater than zero",
             ));
         }
         generation_request.durations = vec![Some(duration)];
@@ -323,6 +326,49 @@ fn set_generation_config_overrides(
     Ok(())
 }
 
+fn validate_generation_config(config: &GenerationConfig) -> Result<(), ServerError> {
+    const MAX_GENERATION_STEPS: usize = 4096;
+    if config.num_step == 0 || config.num_step > MAX_GENERATION_STEPS {
+        return Err(ServerError::validation(format!(
+            "num_step must be in the range 1..={MAX_GENERATION_STEPS}"
+        )));
+    }
+    if !config.guidance_scale.is_finite() {
+        return Err(ServerError::validation("guidance_scale must be finite"));
+    }
+    if !config.t_shift.is_finite() || config.t_shift <= 0.0 {
+        return Err(ServerError::validation(
+            "t_shift must be finite and greater than zero",
+        ));
+    }
+    if !config.layer_penalty_factor.is_finite() {
+        return Err(ServerError::validation(
+            "layer_penalty_factor must be finite",
+        ));
+    }
+    if !config.position_temperature.is_finite() || config.position_temperature < 0.0 {
+        return Err(ServerError::validation(
+            "position_temperature must be finite and non-negative",
+        ));
+    }
+    if !config.class_temperature.is_finite() || config.class_temperature < 0.0 {
+        return Err(ServerError::validation(
+            "class_temperature must be finite and non-negative",
+        ));
+    }
+    if !config.audio_chunk_duration.is_finite() || config.audio_chunk_duration <= 0.0 {
+        return Err(ServerError::validation(
+            "audio_chunk_duration must be finite and greater than zero",
+        ));
+    }
+    if !config.audio_chunk_threshold.is_finite() || config.audio_chunk_threshold <= 0.0 {
+        return Err(ServerError::validation(
+            "audio_chunk_threshold must be finite and greater than zero",
+        ));
+    }
+    Ok(())
+}
+
 fn parse_data_uri_audio(value: &Value) -> Result<ReferenceAudioInput, ServerError> {
     let input = value
         .as_str()
@@ -333,13 +379,17 @@ fn parse_data_uri_audio(value: &Value) -> Result<ReferenceAudioInput, ServerErro
     let Some((meta, encoded)) = payload.split_once(',') else {
         return Err(ServerError::validation("ref_audio data URI is malformed"));
     };
-    if !meta.ends_with(";base64") {
+    let Some((mime, encoding)) = meta.rsplit_once(';') else {
+        return Err(ServerError::validation(
+            "ref_audio data URI must be base64-encoded",
+        ));
+    };
+    if !encoding.eq_ignore_ascii_case("base64") {
         return Err(ServerError::validation(
             "ref_audio data URI must be base64-encoded",
         ));
     }
 
-    let mime = meta.trim_end_matches(";base64");
     let bytes = BASE64.decode(encoded).map_err(|error| {
         ServerError::validation(format!("invalid ref_audio base64 payload: {error}"))
     })?;
@@ -371,6 +421,7 @@ fn encode_audio(
     response_format: SpeechResponseFormat,
     mp3_bitrate_kbps: u32,
 ) -> Result<(&'static str, Vec<u8>), ServerError> {
+    audio.validate().map_err(ServerError::from_infer)?;
     match response_format {
         SpeechResponseFormat::Wav => Ok(("audio/wav", encode_wav(audio)?)),
         SpeechResponseFormat::Pcm => Ok(("audio/pcm", encode_pcm(audio))),
@@ -441,34 +492,43 @@ fn binary_stream_response(content_type: &'static str, payload: Vec<u8>) -> Respo
 }
 
 fn sse_stream_response(payload: Vec<u8>, result: GeneratedAudioResult) -> Response<Body> {
-    let mut events = payload
-        .chunks(4096)
-        .map(|chunk| {
-            Ok::<Event, Infallible>(
-                Event::default().data(
-                    json!({
-                        "type": "speech.audio.delta",
-                        "audio": BASE64.encode(chunk),
-                    })
-                    .to_string(),
-                ),
-            )
-        })
-        .collect::<Vec<_>>();
-    events.push(Ok(Event::default().data(
-        json!({
-            "type": "speech.audio.done",
-            "usage": {
-                "input_tokens": result.usage.input_tokens,
-                "output_tokens": result.usage.output_tokens,
-                "total_tokens": result.usage.total_tokens,
-            }
-        })
-        .to_string(),
-    )));
-    events.push(Ok(Event::default().data("[DONE]")));
+    // Generation and encoding are complete before this endpoint is called; this is
+    // post-generation chunking, but events are still produced lazily without a
+    // second in-memory Vec of all SSE messages.
+    let audio_events = stream::unfold((payload, 0usize), |(payload, offset)| async move {
+        if offset >= payload.len() {
+            return None;
+        }
+        let end = offset.saturating_add(4096).min(payload.len());
+        let event = Ok::<Event, Infallible>(
+            Event::default().data(
+                json!({
+                    "type": "speech.audio.delta",
+                    "audio": BASE64.encode(&payload[offset..end]),
+                })
+                .to_string(),
+            ),
+        );
+        Some((event, (payload, end)))
+    });
+    let terminal_events = stream::iter([
+        Ok::<Event, Infallible>(
+            Event::default().data(
+                json!({
+                    "type": "speech.audio.done",
+                    "usage": {
+                        "input_tokens": result.usage.input_tokens,
+                        "output_tokens": result.usage.output_tokens,
+                        "total_tokens": result.usage.total_tokens,
+                    }
+                })
+                .to_string(),
+            ),
+        ),
+        Ok::<Event, Infallible>(Event::default().data("[DONE]")),
+    ]);
 
-    Sse::new(stream::iter(events))
+    Sse::new(audio_events.chain(terminal_events))
         .keep_alive(KeepAlive::default())
         .into_response()
 }
@@ -495,10 +555,14 @@ fn parse_optional_f32(
     values
         .get(key)
         .map(|value| {
-            value
+            let number = value
                 .as_f64()
-                .map(|number| number as f32)
-                .ok_or_else(|| ServerError::validation(format!("{key} must be a number")))
+                .ok_or_else(|| ServerError::validation(format!("{key} must be a number")))?
+                as f32;
+            if !number.is_finite() {
+                return Err(ServerError::validation(format!("{key} must be finite")));
+            }
+            Ok(number)
         })
         .transpose()
 }
@@ -510,10 +574,12 @@ fn parse_optional_usize(
     values
         .get(key)
         .map(|value| {
-            value
+            let number = value
                 .as_u64()
-                .map(|number| number as usize)
-                .ok_or_else(|| ServerError::validation(format!("{key} must be an integer")))
+                .ok_or_else(|| ServerError::validation(format!("{key} must be an integer")))?;
+            usize::try_from(number).map_err(|_| {
+                ServerError::validation(format!("{key} is too large for this platform"))
+            })
         })
         .transpose()
 }
@@ -574,13 +640,23 @@ fn parse_multipart_extra_value(name: &str, raw: &str) -> Result<Value, ServerErr
 }
 
 fn parse_multipart_f32(name: &str, raw: &str) -> Result<f32, ServerError> {
-    raw.parse::<f32>()
-        .map_err(|_| ServerError::validation(format!("{name} must be a number")))
+    let value = raw
+        .parse::<f32>()
+        .map_err(|_| ServerError::validation(format!("{name} must be a number")))?;
+    if !value.is_finite() {
+        return Err(ServerError::validation(format!("{name} must be finite")));
+    }
+    Ok(value)
 }
 
 fn parse_multipart_f64(name: &str, raw: &str) -> Result<f64, ServerError> {
-    raw.parse::<f64>()
-        .map_err(|_| ServerError::validation(format!("{name} must be a number")))
+    let value = raw
+        .parse::<f64>()
+        .map_err(|_| ServerError::validation(format!("{name} must be a number")))?;
+    if !value.is_finite() {
+        return Err(ServerError::validation(format!("{name} must be finite")));
+    }
+    Ok(value)
 }
 
 fn parse_multipart_u64(name: &str, raw: &str) -> Result<u64, ServerError> {
