@@ -1,0 +1,27 @@
+{
+  "scenario_id": "01_auto_en_short",
+  "device": "cuda",
+  "seed": 1234,
+  "sample_rate": 24000,
+  "num_samples": 86640,
+  "duration_sec": 3.61,
+  "peak_abs": 0.5,
+  "call": {
+    "text": "OmniVoice creates clear speech from text with minimal setup.",
+    "language": "English",
+    "normalize_text": false,
+    "num_step": 32,
+    "guidance_scale": 2.0,
+    "t_shift": 0.1,
+    "denoise": true,
+    "position_temperature": 5.0,
+    "class_temperature": 0.0,
+    "layer_penalty_factor": 5.0,
+    "preprocess_prompt": true,
+    "postprocess_output": true
+  },
+  "used_ref_audio": false,
+  "used_cached_prompt": false,
+  "ok": true,
+  "wav": "cuda/01_auto_en_short.wav"
+}

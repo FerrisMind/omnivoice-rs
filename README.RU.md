@@ -21,6 +21,7 @@
 
 - [Что это?](#-что-это)
 - [Демо](#-демо)
+- [Прослушка](#-прослушка)
 - [Ключевые возможности](#-ключевые-возможности)
 - [Установка и настройка](#️-установка-и-настройка)
 - [Как начать использовать](#-как-начать-использовать)
@@ -63,6 +64,27 @@ cargo run -p omnivoice-cli --features cuda -- infer `
   --text "Hello from a local model bundle." `
   --output artifacts\demo-local.wav
 ```
+
+## 🎧 Прослушка
+
+Готовые WAV для сравнения **эталонного Python OmniVoice** и этого **Rust**-порта на одних и тех же промптах и seed.
+
+| | Путь |
+|--|------|
+| Сводная таблица A/B | [`artifacts/LISTENING_COMPARE.md`](artifacts/LISTENING_COMPARE.md) |
+| Python-эталон | [`artifacts/listening_demo/`](artifacts/listening_demo/) |
+| Rust-порт | [`artifacts/listening_demo_rust/`](artifacts/listening_demo_rust/) |
+
+Быстрые пары CUDA:
+
+| Сценарий | Python | Rust |
+|----------|--------|------|
+| Auto EN | [wav](artifacts/listening_demo/cuda/01_auto_en_short.wav) | [wav](artifacts/listening_demo_rust/cuda_0/01_auto_en_short.wav) |
+| Design British ♀ | [wav](artifacts/listening_demo/cuda/04_design_en_british_female.wav) | [wav](artifacts/listening_demo_rust/cuda_0/04_design_en_british_female.wav) |
+| Clone + ref text | [wav](artifacts/listening_demo/cuda/07_clone_with_ref_text.wav) | [wav](artifacts/listening_demo_rust/cuda_0/07_clone_with_ref_text.wav) |
+| Chinese + laughter | [wav](artifacts/listening_demo/cuda/06_design_zh_nonverbal.wav) | [wav](artifacts/listening_demo_rust/cuda_0/06_design_zh_nonverbal.wav) |
+
+Полная таблица из 15 сценариев — в [LISTENING_COMPARE.md](artifacts/LISTENING_COMPARE.md).
 
 ## 🚀 Ключевые возможности
 

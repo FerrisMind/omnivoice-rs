@@ -1,0 +1,27 @@
+{
+  "scenario_id": "03_auto_lang_agnostic",
+  "device": "cuda",
+  "seed": 1234,
+  "sample_rate": 24000,
+  "num_samples": 96480,
+  "duration_sec": 4.02,
+  "peak_abs": 0.5,
+  "call": {
+    "text": "This sample leaves language unspecified so the model chooses freely.",
+    "language": null,
+    "normalize_text": false,
+    "num_step": 32,
+    "guidance_scale": 2.0,
+    "t_shift": 0.1,
+    "denoise": true,
+    "position_temperature": 5.0,
+    "class_temperature": 0.0,
+    "layer_penalty_factor": 5.0,
+    "preprocess_prompt": true,
+    "postprocess_output": true
+  },
+  "used_ref_audio": false,
+  "used_cached_prompt": false,
+  "ok": true,
+  "wav": "cuda/03_auto_lang_agnostic.wav"
+}

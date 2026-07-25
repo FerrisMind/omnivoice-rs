@@ -21,6 +21,7 @@
 
 - [What is this?](#-what-is-this)
 - [Demo](#-demo)
+- [Listening samples](#-listening-samples)
 - [Key Features](#-key-features)
 - [Installation & Setup](#️-installation--setup)
 - [How to Start Using](#-how-to-start-using)
@@ -75,6 +76,27 @@ cargo run -p omnivoice-server --features cuda -- `
   --device cuda:0 `
   --dtype f32
 ```
+
+## 🎧 Listening samples
+
+Pre-generated WAVs let you A/B the **upstream Python OmniVoice** reference against this **Rust** port on the same prompts and seed.
+
+| | Path |
+|--|------|
+| Side-by-side index | [`artifacts/LISTENING_COMPARE.md`](artifacts/LISTENING_COMPARE.md) |
+| Python reference | [`artifacts/listening_demo/`](artifacts/listening_demo/) |
+| Rust port | [`artifacts/listening_demo_rust/`](artifacts/listening_demo_rust/) |
+
+Quick CUDA pairs (open both links and listen):
+
+| Scenario | Python | Rust |
+|----------|--------|------|
+| Auto EN | [wav](artifacts/listening_demo/cuda/01_auto_en_short.wav) | [wav](artifacts/listening_demo_rust/cuda_0/01_auto_en_short.wav) |
+| Design British ♀ | [wav](artifacts/listening_demo/cuda/04_design_en_british_female.wav) | [wav](artifacts/listening_demo_rust/cuda_0/04_design_en_british_female.wav) |
+| Clone + ref text | [wav](artifacts/listening_demo/cuda/07_clone_with_ref_text.wav) | [wav](artifacts/listening_demo_rust/cuda_0/07_clone_with_ref_text.wav) |
+| Chinese + laughter | [wav](artifacts/listening_demo/cuda/06_design_zh_nonverbal.wav) | [wav](artifacts/listening_demo_rust/cuda_0/06_design_zh_nonverbal.wav) |
+
+Full 15-scenario CUDA table and CPU folders are in the comparison index.
 
 ## 🚀 Key Features
 

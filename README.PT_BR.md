@@ -21,6 +21,7 @@
 
 - [O que é isso?](#-o-que-é-isso)
 - [Demo](#-demo)
+- [Amostras de áudio](#-amostras-de-áudio)
 - [Principais Recursos](#-principais-recursos)
 - [Instalação e Configuração](#️-instalação-e-configuração)
 - [Como Começar a Usar](#-como-começar-a-usar)
@@ -55,6 +56,27 @@ cargo run -p omnivoice-cli --features cuda -- infer `
   --dtype f32 `
   --seed 1234
 ```
+
+## 🎧 Amostras de áudio
+
+WAVs pré-gerados para comparar a referência **Python OmniVoice** com este port **Rust**, nos mesmos prompts e seed.
+
+| | Caminho |
+|--|---------|
+| Índice A/B | [`artifacts/LISTENING_COMPARE.md`](artifacts/LISTENING_COMPARE.md) |
+| Referência Python | [`artifacts/listening_demo/`](artifacts/listening_demo/) |
+| Port Rust | [`artifacts/listening_demo_rust/`](artifacts/listening_demo_rust/) |
+
+Pares rápidos em CUDA:
+
+| Cenário | Python | Rust |
+|---------|--------|------|
+| Auto EN | [wav](artifacts/listening_demo/cuda/01_auto_en_short.wav) | [wav](artifacts/listening_demo_rust/cuda_0/01_auto_en_short.wav) |
+| Design British ♀ | [wav](artifacts/listening_demo/cuda/04_design_en_british_female.wav) | [wav](artifacts/listening_demo_rust/cuda_0/04_design_en_british_female.wav) |
+| Clone + ref text | [wav](artifacts/listening_demo/cuda/07_clone_with_ref_text.wav) | [wav](artifacts/listening_demo_rust/cuda_0/07_clone_with_ref_text.wav) |
+| Chinese + laughter | [wav](artifacts/listening_demo/cuda/06_design_zh_nonverbal.wav) | [wav](artifacts/listening_demo_rust/cuda_0/06_design_zh_nonverbal.wav) |
+
+A tabela completa (15 cenários) está em [LISTENING_COMPARE.md](artifacts/LISTENING_COMPARE.md).
 
 ## 🚀 Principais Recursos
 

@@ -5,7 +5,15 @@
 **/*.rs.bk
 
 # Local heavy artifacts and reference corpora
-/artifacts/
+# Keep published listening demos tracked so README comparison links work.
+/artifacts/*
+!/artifacts/LISTENING_COMPARE.md
+!/artifacts/listening_demo/
+!/artifacts/listening_demo/**
+!/artifacts/listening_demo_rust/
+!/artifacts/listening_demo_rust/**
+/artifacts/listening_demo_rust/diag/
+**/*.before_fix
 /model/
 /refs/
 
@@ -39,6 +47,11 @@ Desktop.ini
 *.flac
 *.ogg
 *.jsonl
+
+# Allow published listening-demo WAVs (and keep other generated audio ignored)
+!artifacts/listening_demo/**/*.wav
+!artifacts/listening_demo_rust/**/*.wav
+artifacts/listening_demo_rust/diag/**
 
 # Keep these root files versioned if explicitly added later
 !Cargo.toml

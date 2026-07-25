@@ -1,0 +1,28 @@
+{
+  "scenario_id": "12_control_fixed_duration",
+  "device": "cpu",
+  "seed": 1234,
+  "sample_rate": 24000,
+  "num_samples": 97920,
+  "duration_sec": 4.08,
+  "peak_abs": 0.5,
+  "call": {
+    "text": "Please stretch or compress this line to about four and a half seconds.",
+    "language": "English",
+    "normalize_text": false,
+    "duration": 4.5,
+    "num_step": 32,
+    "guidance_scale": 2.0,
+    "t_shift": 0.1,
+    "denoise": true,
+    "position_temperature": 5.0,
+    "class_temperature": 0.0,
+    "layer_penalty_factor": 5.0,
+    "preprocess_prompt": true,
+    "postprocess_output": true
+  },
+  "used_ref_audio": false,
+  "used_cached_prompt": false,
+  "ok": true,
+  "wav": "cpu/12_control_fixed_duration.wav"
+}
