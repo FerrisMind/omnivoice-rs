@@ -1,5 +1,9 @@
-use std::{fs, path::PathBuf, process::Command};
+use std::process::Command;
 
+#[cfg(not(feature = "cuda"))]
+use std::{fs, path::PathBuf};
+
+#[cfg(not(feature = "cuda"))]
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -9,6 +13,7 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+#[cfg(not(feature = "cuda"))]
 fn model_root() -> PathBuf {
     repo_root().join("model")
 }
@@ -60,6 +65,9 @@ fn infer_subcommand_help_exits_successfully() {
 #[cfg(not(feature = "cuda"))]
 #[test]
 fn official_infer_aliases_reach_runtime_validation_without_parse_errors() {
+    if !model_root().is_dir() || !repo_root().join("ref.wav").is_file() {
+        return;
+    }
     let binary = env!("CARGO_BIN_EXE_omnivoice-infer");
     let output_path = repo_root()
         .join("artifacts")

@@ -51,6 +51,9 @@ fn deterministic_reference_root() -> PathBuf {
 
 #[test]
 fn artifacts_validate_smoke_test() {
+    if !model_root().is_dir() || !reference_root().is_dir() {
+        return;
+    }
     let binary = env!("CARGO_BIN_EXE_omnivoice-cli");
     let output = Command::new(binary)
         .args([

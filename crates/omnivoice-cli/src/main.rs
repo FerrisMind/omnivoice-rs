@@ -1291,9 +1291,9 @@ fn run_infer_batch(
             "--nj-per-gpu must be > 0".to_string(),
         ));
     }
-    if batch_duration <= 0.0 && batch_size == 0 {
+    if !batch_duration.is_finite() || (batch_duration <= 0.0 && batch_size == 0) {
         return Err(OmniVoiceError::InvalidRequest(
-            "--batch-duration must be > 0 when --batch-size is 0".to_string(),
+            "--batch-duration must be finite and > 0 when --batch-size is 0".to_string(),
         ));
     }
 
@@ -1306,14 +1306,25 @@ fn run_infer_batch(
             test_list.display()
         )));
     }
+    let sample_count = samples.len();
 
     let frontend = Frontend::from_model_root(&model_dir)?;
     let processor = ReferenceAudioProcessor::new(24_000, 960);
-    let jobs = if batch_size > 0 {
-        cluster_samples_by_batch_size(&samples, &frontend, &processor, batch_size)?
-    } else {
-        cluster_samples_by_duration(&samples, &frontend, &processor, batch_duration)?
-    };
+    let (clone_samples, other_samples): (Vec<_>, Vec<_>) = samples
+        .into_iter()
+        .partition(|sample| sample.ref_audio.is_some());
+    let mut jobs = Vec::new();
+    for subset in [clone_samples, other_samples] {
+        if subset.is_empty() {
+            continue;
+        }
+        let subset_jobs = if batch_size > 0 {
+            cluster_samples_by_batch_size(&subset, &frontend, &processor, batch_size)?
+        } else {
+            cluster_samples_by_duration(&subset, &frontend, &processor, batch_duration)?
+        };
+        jobs.extend(subset_jobs);
+    }
     let worker_devices = resolve_batch_devices(device, nj_per_gpu)?;
     let queue = Arc::new(Mutex::new(VecDeque::from(jobs.clone())));
     let model_dir = Arc::new(model_dir);
@@ -1383,7 +1394,7 @@ fn run_infer_batch(
             .join(",")
     );
     println!("batch_count={}", jobs.len());
-    println!("sample_count={}", samples.len());
+    println!("sample_count={sample_count}");
     println!("written_files={}", totals.samples_written);
 
     Ok(())
@@ -1445,7 +1456,14 @@ fn run_batch_worker(
             denoise,
         );
         let audios = pipeline.generate(&request)?;
-        for (sample, audio) in job.samples.iter().zip(audios.into_iter()) {
+        if audios.len() != job.samples.len() {
+            return Err(OmniVoiceError::InvalidData(format!(
+                "batch worker generated {} outputs for {} samples",
+                audios.len(),
+                job.samples.len()
+            )));
+        }
+        for (sample, audio) in job.samples.iter().zip(audios) {
             let output_path = res_dir.join(format!("{}.wav", sample.id));
             audio.write_wav(output_path)?;
             stats.samples_written += 1;
@@ -1531,6 +1549,7 @@ fn read_test_list(
         let Some(id) = value.get("id").and_then(|value| value.as_str()) else {
             continue;
         };
+        validate_batch_id(id)?;
         let Some(text) = value.get("text").and_then(|value| value.as_str()) else {
             return Err(OmniVoiceError::InvalidData(format!(
                 "test list line {} is missing required field `text`",
@@ -1551,6 +1570,24 @@ fn read_test_list(
                     .and_then(|value| value.as_str())
                     .map(str::to_string)
             });
+        let duration = parse_optional_test_f32(&value, "duration", line_no + 1)?;
+        if let Some(duration) = duration {
+            if !duration.is_finite() || duration <= 0.0 {
+                return Err(OmniVoiceError::InvalidData(format!(
+                    "test list line {} has invalid duration",
+                    line_no + 1
+                )));
+            }
+        }
+        let speed = parse_optional_test_f32(&value, "speed", line_no + 1)?;
+        if let Some(speed) = speed {
+            if !speed.is_finite() || speed <= 0.0 {
+                return Err(OmniVoiceError::InvalidData(format!(
+                    "test list line {} has invalid speed",
+                    line_no + 1
+                )));
+            }
+        }
         samples.push(BatchSample {
             id: id.to_string(),
             text: text.to_string(),
@@ -1567,14 +1604,8 @@ fn read_test_list(
                 .and_then(|value| value.as_str())
                 .map(str::to_string),
             language,
-            duration: value
-                .get("duration")
-                .and_then(|value| value.as_f64())
-                .map(|value| value as f32),
-            speed: value
-                .get("speed")
-                .and_then(|value| value.as_f64())
-                .map(|value| value as f32),
+            duration,
+            speed,
         });
     }
     Ok(samples)
@@ -1679,18 +1710,21 @@ fn estimate_sample_total_duration(
     let ref_duration = if let Some(ref_audio) = &sample.ref_audio {
         let input = ReferenceAudioInput::from_path(ref_audio.display().to_string());
         let waveform = processor.load_input(&input)?;
-        waveform.samples.len() as f32 / waveform.sample_rate as f32
+        if waveform.channels == 0 || waveform.samples.len() % waveform.channels != 0 {
+            return Err(OmniVoiceError::InvalidRequest(format!(
+                "reference audio {} has invalid channel/sample layout",
+                ref_audio.display()
+            )));
+        }
+        waveform.samples.len() as f32 / waveform.channels as f32 / waveform.sample_rate as f32
     } else {
         0.0
     };
     let estimated_generation_seconds = if let Some(duration) = sample.duration {
         duration
-    } else {
-        let num_ref_audio_tokens = if ref_duration > 0.0 {
-            Some((ref_duration * frontend.frame_rate() as f32).max(1.0) as usize)
-        } else {
-            None
-        };
+    } else if ref_duration > 0.0 {
+        let num_ref_audio_tokens =
+            Some((ref_duration * frontend.frame_rate() as f32).max(1.0) as usize);
         frontend.estimate_target_tokens(
             &sample.text,
             sample.ref_text.as_deref(),
@@ -1698,8 +1732,53 @@ fn estimate_sample_total_duration(
             sample.speed.unwrap_or(1.0),
         ) as f32
             / frontend.frame_rate() as f32
+    } else {
+        frontend.estimate_target_tokens(&sample.text, None, None, sample.speed.unwrap_or(1.0))
+            as f32
+            / frontend.frame_rate() as f32
     };
     Ok(ref_duration + estimated_generation_seconds)
+}
+
+fn validate_batch_id(id: &str) -> Result<(), OmniVoiceError> {
+    if id.is_empty()
+        || id.contains(':')
+        || id.contains('/')
+        || id.contains('\\')
+        || id == "."
+        || id == ".."
+        || id.chars().any(|character| character == '\0')
+    {
+        return Err(OmniVoiceError::InvalidData(format!(
+            "batch id `{id}` must be a single relative file name"
+        )));
+    }
+    Ok(())
+}
+
+fn parse_optional_test_f32(
+    value: &serde_json::Value,
+    key: &str,
+    line_no: usize,
+) -> Result<Option<f32>, OmniVoiceError> {
+    let Some(raw) = value.get(key) else {
+        return Ok(None);
+    };
+    if raw.is_null() {
+        return Ok(None);
+    }
+    let number = raw.as_f64().ok_or_else(|| {
+        OmniVoiceError::InvalidData(format!(
+            "test list line {line_no} field `{key}` must be a number"
+        ))
+    })?;
+    let number = number as f32;
+    if !number.is_finite() {
+        return Err(OmniVoiceError::InvalidData(format!(
+            "test list line {line_no} field `{key}` must be finite"
+        )));
+    }
+    Ok(Some(number))
 }
 
 fn resolve_batch_devices(
@@ -2222,7 +2301,10 @@ fn usage() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_entrypoint_command, requested_help, CliCommand, InvocationMode};
+    use super::{
+        parse_entrypoint_command, parse_optional_test_f32, requested_help, validate_batch_id,
+        CliCommand, InvocationMode,
+    };
     use omnivoice_infer::{
         artifacts::RuntimeArtifactManifest, model_source::manifest_download_targets, DeviceSpec,
     };
@@ -2506,5 +2588,26 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn batch_ids_cannot_escape_result_directory() {
+        assert!(validate_batch_id("sample_01").is_ok());
+        for id in [
+            "",
+            "../escape",
+            r"..\escape",
+            r"C:\escape",
+            "/absolute",
+            "a/b",
+        ] {
+            assert!(validate_batch_id(id).is_err(), "accepted unsafe id {id:?}");
+        }
+    }
+
+    #[test]
+    fn batch_numeric_overrides_reject_wrong_json_types() {
+        let value = serde_json::json!({"speed": "fast"});
+        assert!(parse_optional_test_f32(&value, "speed", 1).is_err());
     }
 }
