@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use candle_core::{DType, Module, Tensor};
+use candle_core::{DType, IndexOp, Module, Tensor};
 use candle_nn::{Activation, Embedding, VarBuilder};
 use candle_transformers::models::with_tracing::{linear_b, Linear, RmsNorm};
 
@@ -169,7 +169,12 @@ impl Stage0Qwen3Attention {
         })
     }
 
-    fn forward(&self, xs: &Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
+    fn forward(
+        &self,
+        xs: &Tensor,
+        attention_mask: Option<&Tensor>,
+        flash_seqlens: Option<&[usize]>,
+    ) -> Result<Tensor> {
         let (batch, seq_len, _) = xs.dims3()?;
         let q = self.q_proj.forward(xs)?;
         let k = self.k_proj.forward(xs)?;
@@ -201,25 +206,51 @@ impl Stage0Qwen3Attention {
         ))?;
 
         let (q, k) = self.rotary_emb.apply(&q, &k, 0)?;
-        let k = candle_transformers::utils::repeat_kv(k, self.num_heads / self.num_kv_heads)?
-            .contiguous()?;
-        let v = candle_transformers::utils::repeat_kv(v, self.num_heads / self.num_kv_heads)?
-            .contiguous()?;
-        let scale = 1.0 / (self.head_dim as f64).sqrt();
-        let mut scores = q
-            .contiguous()?
-            .matmul(&k.transpose(2, 3)?.contiguous()?)?
-            .affine(scale, 0.0)?;
-        if let Some(mask) = attention_mask {
-            scores = scores.broadcast_add(mask)?;
-        }
-        let probs = candle_nn::ops::softmax_last_dim(&scores)?;
-        let context = probs.contiguous()?.matmul(&v.contiguous()?)?;
+        let scale_f32 = 1.0f32 / (self.head_dim as f32).sqrt();
+        let context =
+            self.attention_context(q, k, v, attention_mask, flash_seqlens, scale_f32)?;
         Ok(context
             .transpose(1, 2)?
             .contiguous()?
             .reshape((batch, seq_len, self.hidden_size))?
             .apply(&self.o_proj)?)
+    }
+
+    fn attention_context(
+        &self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        attention_mask: Option<&Tensor>,
+        flash_seqlens: Option<&[usize]>,
+        scale_f32: f32,
+    ) -> Result<Tensor> {
+        #[cfg(feature = "cuda")]
+        {
+            // Flash-Attention v2 (GQA) for half-precision CUDA. Apply per-row on
+            // the unpadded prefix so CFG padding never enters the softmax.
+            if matches!(q.dtype(), DType::F16 | DType::BF16) && q.device().is_cuda() {
+                if let Some(seqlens) = flash_seqlens {
+                    if let Some(ctx) =
+                        try_flash_attention_per_row(&q, &k, &v, seqlens, scale_f32)?
+                    {
+                        return Ok(ctx);
+                    }
+                }
+            }
+        }
+        let _ = (scale_f32, flash_seqlens);
+        let repeats = self.num_heads / self.num_kv_heads;
+        let k = candle_transformers::utils::repeat_kv(k, repeats)?;
+        let v = candle_transformers::utils::repeat_kv(v, repeats)?;
+        let scale = 1.0 / (self.head_dim as f64).sqrt();
+        let k_t = k.transpose(2, 3)?.contiguous()?;
+        let mut scores = q.matmul(&k_t)?.affine(scale, 0.0)?;
+        if let Some(mask) = attention_mask {
+            scores = scores.broadcast_add(mask)?;
+        }
+        let probs = candle_nn::ops::softmax_last_dim(&scores)?;
+        Ok(probs.matmul(&v)?)
     }
 }
 
@@ -253,10 +284,17 @@ impl Stage0Qwen3DecoderLayer {
         })
     }
 
-    fn forward(&self, xs: &Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
+    fn forward(
+        &self,
+        xs: &Tensor,
+        attention_mask: Option<&Tensor>,
+        flash_seqlens: Option<&[usize]>,
+    ) -> Result<Tensor> {
         let residual = xs;
         let hidden = apply_hf_compatible_rms_norm(&self.input_layernorm, xs)?;
-        let hidden = self.self_attn.forward(&hidden, attention_mask)?;
+        let hidden = self
+            .self_attn
+            .forward(&hidden, attention_mask, flash_seqlens)?;
         let hidden = (hidden + residual)?;
         let residual = &hidden;
         let post_attention = apply_hf_compatible_rms_norm(&self.post_attention_layernorm, &hidden)?;
@@ -308,10 +346,20 @@ impl Stage0Qwen3Backbone {
         attention_mask: Option<&Tensor>,
         capture_layers: &BTreeSet<usize>,
     ) -> Result<Stage0BackboneOutput> {
+        self.forward_embeds_with_flash(input_embeds, attention_mask, capture_layers, None)
+    }
+
+    pub fn forward_embeds_with_flash(
+        &self,
+        input_embeds: &Tensor,
+        attention_mask: Option<&Tensor>,
+        capture_layers: &BTreeSet<usize>,
+        flash_seqlens: Option<&[usize]>,
+    ) -> Result<Stage0BackboneOutput> {
         let mut hidden = input_embeds.clone();
         let mut captures = BTreeMap::new();
         for (index, layer) in self.layers.iter().enumerate() {
-            hidden = layer.forward(&hidden, attention_mask)?;
+            hidden = layer.forward(&hidden, attention_mask, flash_seqlens)?;
             // HuggingFace exposes `hidden_states[layer_index + 1]` before the
             // final model norm.  Keep the last decoder layer in that same
             // form; callers that need the post-norm output already receive it
@@ -334,4 +382,89 @@ fn apply_hf_compatible_rms_norm(norm: &RmsNorm, xs: &Tensor) -> Result<Tensor> {
     } else {
         Ok(norm.forward(xs)?)
     }
+}
+
+/// Flash-Attention for half-precision CUDA.
+///
+/// Prefer one batched `flash_attn` when there is no pad. With CFG padding, run
+/// one flash call per row on the active prefix only (no host-side varlen pack).
+#[cfg(feature = "cuda")]
+fn try_flash_attention_per_row(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    seqlens: &[usize],
+    scale: f32,
+) -> Result<Option<Tensor>> {
+    let (batch, n_heads, seq_len, _head_dim) = q.dims4()?;
+    let (_b2, n_kv_heads, _s2, _d2) = k.dims4()?;
+    if seqlens.len() != batch {
+        return Ok(None);
+    }
+    if seqlens.iter().any(|&len| len == 0 || len > seq_len) {
+        return Ok(None);
+    }
+
+    // On RTX 3060, candle-flash-attn is only a win for very long sequences.
+    // OmniVoice long-form chunks are ~375 tokens; below ~700 the dense+cuDNN
+    // path is faster. Keep flash for true long contexts only.
+    const FLASH_MIN_SEQ: usize = 700;
+    let max_active = seqlens.iter().copied().max().unwrap_or(0);
+    if max_active < FLASH_MIN_SEQ {
+        return Ok(None);
+    }
+
+    // No padding → single SDPA-style batched flash (best case).
+    if seqlens.iter().all(|&len| len == seq_len) {
+        let q_f = q.transpose(1, 2)?.contiguous()?;
+        let k_f = k.transpose(1, 2)?.contiguous()?;
+        let v_f = v.transpose(1, 2)?.contiguous()?;
+        let ctx = candle_flash_attn::flash_attn(&q_f, &k_f, &v_f, scale, false)?;
+        return Ok(Some(ctx.transpose(1, 2)?.contiguous()?));
+    }
+
+    // CFG padding: flash each active prefix; pad slots = V (diagonal attn).
+    let repeats = n_heads / n_kv_heads;
+    let mut row_outs = Vec::with_capacity(batch);
+    for (batch_index, &active) in seqlens.iter().enumerate() {
+        let q_row = q
+            .i((batch_index..batch_index + 1, .., 0..active, ..))?
+            .transpose(1, 2)?
+            .contiguous()?;
+        let k_row = k
+            .i((batch_index..batch_index + 1, .., 0..active, ..))?
+            .transpose(1, 2)?
+            .contiguous()?;
+        let v_row = v
+            .i((batch_index..batch_index + 1, .., 0..active, ..))?
+            .transpose(1, 2)?
+            .contiguous()?;
+        let ctx = candle_flash_attn::flash_attn(&q_row, &k_row, &v_row, scale, false)?
+            .transpose(1, 2)?;
+        let ctx = if active < seq_len {
+            let v_pad = v.i((batch_index..batch_index + 1, .., active..seq_len, ..))?;
+            let v_pad = if repeats > 1 {
+                candle_transformers::utils::repeat_kv(v_pad, repeats)?
+            } else {
+                v_pad
+            };
+            Tensor::cat(&[&ctx, &v_pad], 2)?
+        } else {
+            ctx
+        };
+        row_outs.push(ctx);
+    }
+    Ok(Some(Tensor::cat(&row_outs, 0)?))
+}
+
+#[cfg(not(feature = "cuda"))]
+#[allow(dead_code)]
+fn try_flash_attention_per_row(
+    _q: &Tensor,
+    _k: &Tensor,
+    _v: &Tensor,
+    _seqlens: &[usize],
+    _scale: f32,
+) -> Result<Option<Tensor>> {
+    Ok(None)
 }

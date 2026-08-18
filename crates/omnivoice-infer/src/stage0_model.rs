@@ -533,13 +533,40 @@ impl Stage0RuntimePlan {
         )?;
         let mut batch_input_ids = prepared.input_ids.clone();
         let mut tokens = prepared.tokens_init.clone();
+        // Text positions never change during denoise; cache their embeddings once.
+        let cached_text_embeds = model.cache_text_embeds(&batch_input_ids)?;
+        let empty_capture_layers = BTreeSet::new();
+        // Per-row active lengths for flash-attn: cond rows then uncond rows.
+        let flash_seqlens: Vec<usize> = prepared
+            .cond_lens
+            .iter()
+            .copied()
+            .chain(prepared.target_lens.iter().copied())
+            .collect();
+        let max_target_len = prepared.target_lens.iter().copied().max().unwrap_or(0);
+        // One host Gumbel draw + one H2D for the whole denoise loop (not per step).
+        let mut gumbel_step_idx = 0usize;
+        let gumbel_bank = if config.position_temperature > 0.0 {
+            build_position_gumbel_bank(
+                &schedules,
+                num_codebooks,
+                max_target_len,
+                config.num_step,
+                &self.device,
+                host_rng.as_mut().expect("host rng"),
+            )?
+        } else {
+            None
+        };
 
         let initial_forward = if debug_enabled {
-            Some(model.forward(
+            Some(model.forward_with_text_cache(
                 &batch_input_ids,
                 &prepared.audio_mask,
                 &attention_mask,
                 &capture_layers,
+                Some(&cached_text_embeds),
+                Some(flash_seqlens.as_slice()),
             )?)
         } else {
             None
@@ -552,13 +579,32 @@ impl Stage0RuntimePlan {
                     "inference cancelled".to_string(),
                 ));
             }
-            let forward = model.forward(
+            let forward = model.forward_with_text_cache(
                 &batch_input_ids,
                 &prepared.audio_mask,
                 &attention_mask,
-                &BTreeSet::new(),
+                &empty_capture_layers,
+                Some(&cached_text_embeds),
+                Some(flash_seqlens.as_slice()),
             )?;
-            let batch_logits = forward.logits.to_dtype(DType::F32)?;
+            // Keep full logits in runtime dtype; only cast the (small) target
+            // slices to f32 for scoring — avoids a full (2B,C,S,V) materialization.
+            let batch_logits = &forward.logits;
+            let step_needs_noise = schedules
+                .iter()
+                .take(batch_size)
+                .any(|s| s.get(step).copied().unwrap_or(0) > 0);
+            let shared_step_noise = if step_needs_noise {
+                if let Some(bank) = gumbel_bank.as_ref() {
+                    let noise = bank.i(gumbel_step_idx..gumbel_step_idx + 1)?;
+                    gumbel_step_idx += 1;
+                    Some(noise)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             for (batch_index, batch_schedule) in schedules.iter().enumerate().take(batch_size) {
                 let update_count = batch_schedule[step];
                 if update_count == 0 {
@@ -569,18 +615,22 @@ impl Stage0RuntimePlan {
                 }
                 let target_len = prepared.target_lens[batch_index];
                 let cond_len = prepared.cond_lens[batch_index];
-                let c_logits = batch_logits.i((
-                    batch_index..batch_index + 1,
-                    ..,
-                    (cond_len - target_len)..cond_len,
-                    ..,
-                ))?;
-                let u_logits = batch_logits.i((
-                    batch_size + batch_index..batch_size + batch_index + 1,
-                    ..,
-                    0..target_len,
-                    ..,
-                ))?;
+                let c_logits = batch_logits
+                    .i((
+                        batch_index..batch_index + 1,
+                        ..,
+                        (cond_len - target_len)..cond_len,
+                        ..,
+                    ))?
+                    .to_dtype(DType::F32)?;
+                let u_logits = batch_logits
+                    .i((
+                        batch_size + batch_index..batch_size + batch_index + 1,
+                        ..,
+                        0..target_len,
+                        ..,
+                    ))?
+                    .to_dtype(DType::F32)?;
                 let batch_input_ids_before_update =
                     if debug_enabled && capture_steps.contains(&step) {
                         Some(batch_input_ids.clone())
@@ -598,6 +648,13 @@ impl Stage0RuntimePlan {
                     )?;
                 let current_tokens_view =
                     tokens.i((batch_index..batch_index + 1, .., 0..target_len))?;
+                let step_noise = if let Some(noise) = shared_step_noise.as_ref() {
+                    // bank row: (1,1,C,Tmax) → (1,C,T) to match confidence scores
+                    let noise = noise.i((0, .., .., 0..target_len))?; // (1,C,T)
+                    Some(noise)
+                } else {
+                    None
+                };
                 let updated_tokens = apply_step_updates_device(
                     &current_tokens_view,
                     &pred_tokens_tensor,
@@ -607,6 +664,7 @@ impl Stage0RuntimePlan {
                     &layer_penalties,
                     config.position_temperature,
                     host_rng.as_mut(),
+                    step_noise.as_ref(),
                 )?;
                 tokens = tokens.slice_assign(
                     &[
@@ -758,9 +816,23 @@ impl Stage0Model {
             .map_err(Into::into)
     }
 
-    fn prepare_embed_inputs(&self, input_ids: &Tensor, audio_mask: &Tensor) -> Result<Tensor> {
+    fn cache_text_embeds(&self, input_ids: &Tensor) -> Result<Tensor> {
         let text_ids = input_ids.i((.., 0, ..))?;
-        let text_embeds = self.backbone.embed_text_tokens(&text_ids)?;
+        self.backbone.embed_text_tokens(&text_ids)
+    }
+
+    fn prepare_embed_inputs(
+        &self,
+        input_ids: &Tensor,
+        audio_mask: &Tensor,
+        cached_text_embeds: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        // Text token ids only change outside the audio region; the denoise loop
+        // only mutates target audio tokens, so text embeddings can be reused.
+        let text_embeds = match cached_text_embeds {
+            Some(embeds) => embeds.clone(),
+            None => self.cache_text_embeds(input_ids)?,
+        };
         let shifted_ids = (input_ids
             .broadcast_mul(&audio_mask.unsqueeze(1)?.to_dtype(DType::I64)?)?
             + self
@@ -782,10 +854,33 @@ impl Stage0Model {
         attention_mask: &Tensor,
         capture_layers: &BTreeSet<usize>,
     ) -> Result<Stage0ForwardOutputs> {
-        let inputs_embeds = self.prepare_embed_inputs(input_ids, audio_mask)?;
-        let backbone =
-            self.backbone
-                .forward_embeds(&inputs_embeds, Some(attention_mask), capture_layers)?;
+        self.forward_with_text_cache(
+            input_ids,
+            audio_mask,
+            attention_mask,
+            capture_layers,
+            None,
+            None,
+        )
+    }
+
+    fn forward_with_text_cache(
+        &self,
+        input_ids: &Tensor,
+        audio_mask: &Tensor,
+        attention_mask: &Tensor,
+        capture_layers: &BTreeSet<usize>,
+        cached_text_embeds: Option<&Tensor>,
+        flash_seqlens: Option<&[usize]>,
+    ) -> Result<Stage0ForwardOutputs> {
+        let inputs_embeds =
+            self.prepare_embed_inputs(input_ids, audio_mask, cached_text_embeds)?;
+        let backbone = self.backbone.forward_embeds_with_flash(
+            &inputs_embeds,
+            Some(attention_mask),
+            capture_layers,
+            flash_seqlens,
+        )?;
         let final_hidden = backbone.final_hidden.clone();
         let (batch_size, seq_len, _) = final_hidden.dims3()?;
         let logits = self
@@ -1040,6 +1135,73 @@ fn apply_position_temperature_cpu(
     Tensor::from_vec(values, shape, &device).map_err(Into::into)
 }
 
+/// Apply position Gumbel without downloading confidence scores from the GPU.
+///
+/// Host `StdRng` still owns the noise stream (device `Tensor::rand` Gumbel has
+/// historically collapsed unmask schedules). Prefer a pre-uploaded `noise`
+/// tensor (one H2D for the whole denoise loop); fall back to per-call sampling.
+fn apply_position_temperature_host_noise(
+    logits: &Tensor,
+    temperature: f32,
+    cpu_rng: Option<&mut StdRng>,
+    precomputed_noise: Option<&Tensor>,
+) -> Result<Tensor> {
+    if temperature <= 0.0 {
+        return Ok(logits.clone());
+    }
+    let logits = logits.to_dtype(DType::F32)?;
+    let shape = logits.shape().dims().to_vec();
+    let n = logits.elem_count();
+    let device = logits.device().clone();
+    let noise = if let Some(noise) = precomputed_noise {
+        noise.to_dtype(DType::F32)?
+    } else {
+        let mut noise = Vec::with_capacity(n);
+        with_rng(cpu_rng, |rng| {
+            for _ in 0..n {
+                noise.push(sample_gumbel(rng));
+            }
+            Ok(())
+        })?;
+        Tensor::from_vec(noise, shape.as_slice(), &device)?
+    };
+    let scaled = (&logits / f64::from(temperature))?;
+    (scaled + noise).map_err(Into::into)
+}
+
+/// Pre-sample host Gumbel noise for every denoise step that needs it, upload once.
+fn build_position_gumbel_bank(
+    schedules: &[Vec<usize>],
+    num_codebooks: usize,
+    max_target_len: usize,
+    num_step: usize,
+    device: &Device,
+    cpu_rng: &mut StdRng,
+) -> Result<Option<Tensor>> {
+    let flat = num_codebooks.saturating_mul(max_target_len);
+    if flat == 0 {
+        return Ok(None);
+    }
+    let mut values = Vec::new();
+    for step in 0..num_step {
+        let needs = schedules.iter().any(|s| s.get(step).copied().unwrap_or(0) > 0);
+        if needs {
+            for _ in 0..flat {
+                values.push(sample_gumbel(cpu_rng));
+            }
+        }
+    }
+    if values.is_empty() {
+        return Ok(None);
+    }
+    let steps_with_noise = values.len() / flat;
+    Ok(Some(Tensor::from_vec(
+        values,
+        (steps_with_noise, 1, num_codebooks, max_target_len),
+        device,
+    )?))
+}
+
 fn validate_batched_inputs(
     batched: &BatchedInputs,
     cond_lens: &[usize],
@@ -1163,19 +1325,10 @@ fn validate_prepared_batch(
             )));
         }
     }
-    if prepared
-        .tokens_init
-        .to_device(&Device::Cpu)?
-        .to_dtype(DType::I64)?
-        .flatten_all()?
-        .to_vec1::<i64>()?
-        .iter()
-        .any(|token| *token != audio_mask_id)
-    {
-        return Err(OmniVoiceError::InvalidData(
-            "tokens_init must be filled with the audio mask token".to_string(),
-        ));
-    }
+    // tokens_init is constructed as `Tensor::full(audio_mask_id, ...)` in the
+    // pack path. Skip a device→host sync check on every generate (was a hidden
+    // tax on short CUDA runs). Shape/length checks above still apply.
+    let _ = audio_mask_id;
     Ok(())
 }
 
@@ -1223,16 +1376,26 @@ fn apply_step_updates_device(
     layer_penalties: &Tensor,
     position_temperature: f32,
     cpu_rng: Option<&mut StdRng>,
+    precomputed_noise: Option<&Tensor>,
 ) -> Result<Tensor> {
     if update_count == 0 {
         return Ok(current_tokens.clone());
     }
     let selection_scores = confidence_scores
         .broadcast_sub(&layer_penalties.broadcast_as(confidence_scores.shape().dims())?)?;
-    // Always use host StdRng for position Gumbel (see run_loop_device comment).
-    // Scores are small; backbone forward remains on the model device.
+    // Host StdRng for Gumbel draws (quality); apply noise on-device to avoid
+    // per-step D2H of confidence scores that serializes the CUDA pipeline.
     let selection_scores = if position_temperature > 0.0 {
-        apply_position_temperature_cpu(&selection_scores, position_temperature, cpu_rng)?
+        if selection_scores.device().is_cpu() {
+            apply_position_temperature_cpu(&selection_scores, position_temperature, cpu_rng)?
+        } else {
+            apply_position_temperature_host_noise(
+                &selection_scores,
+                position_temperature,
+                cpu_rng,
+                precomputed_noise,
+            )?
+        }
     } else {
         selection_scores
     };
