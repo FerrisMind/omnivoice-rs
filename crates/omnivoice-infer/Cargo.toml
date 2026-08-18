@@ -9,6 +9,7 @@ authors.workspace = true
 candle-core.workspace = true
 candle-nn.workspace = true
 candle-transformers.workspace = true
+candle-flash-attn = { workspace = true, optional = true }
 fslock.workspace = true
 half.workspace = true
 hound.workspace = true
@@ -34,6 +35,6 @@ candle-transformers = { version = "0.10.2", features = ["metal"] }
 [features]
 default = []
 audio-helper = ["dep:mistralrs-audio"]
-cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "dep:candle-flash-attn"]
 metal = []
 phase6-tests = []
