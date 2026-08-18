@@ -79,10 +79,13 @@ impl DTypeSpec {
 
     pub fn resolve_for_device(self, device: DeviceSpec) -> DType {
         match self {
-            Self::Auto => {
-                let _ = device;
-                DType::F32
-            }
+            Self::Auto => match device {
+                // Stage0 backbone: f16 on CUDA/Metal (pairs with flash-attn on long
+                // CUDA sequences). Stage1/audio stay f32 via audio dtype resolver.
+                DeviceSpec::Cuda(_) | DeviceSpec::Auto => DType::F16,
+                DeviceSpec::Metal => DType::F16,
+                DeviceSpec::Cpu => DType::F32,
+            },
             Self::F32 => DType::F32,
             Self::F16 => DType::F16,
             Self::BF16 => DType::BF16,
@@ -92,8 +95,11 @@ impl DTypeSpec {
     pub fn resolve_for_runtime_device(self, device: &Device) -> DType {
         match self {
             Self::Auto => {
-                let _ = device;
-                DType::F32
+                if device.is_cuda() || device.is_metal() {
+                    DType::F16
+                } else {
+                    DType::F32
+                }
             }
             Self::F32 => DType::F32,
             Self::F16 => DType::F16,

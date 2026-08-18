@@ -91,6 +91,12 @@ impl Phase3Pipeline {
         Ok(())
     }
 
+    /// Drop a loaded ASR model to reclaim device memory.
+    pub fn unload_asr_model(&self) {
+        let mut guard = self.asr.lock().unwrap_or_else(|poison| poison.into_inner());
+        *guard = None;
+    }
+
     pub fn transcribe(
         &self,
         ref_audio: &ReferenceAudioInput,
@@ -207,6 +213,10 @@ impl Phase3Pipeline {
     ) -> Result<Vec<GeneratedAudioResult>> {
         self.ensure_not_cancelled()?;
         let materialized = self.materialize_device_request(request)?;
+        // ASR is only needed while resolving missing ref_text during materialize.
+        // Drop it before stage0/stage1 so Whisper does not keep multi-GB VRAM
+        // reserved for the rest of the process (hurts long-form / multi-scenario).
+        self.unload_asr_model();
         let task = self.frontend.build_task_with_device_prompts(
             &materialized.request,
             &materialized.device_voice_clone_prompts,

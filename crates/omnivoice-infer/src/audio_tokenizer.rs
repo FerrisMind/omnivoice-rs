@@ -329,12 +329,12 @@ impl AudioTokenizerRuntimePlan {
                 actual: format!("({quantizers}, {steps})"),
             });
         }
-        let values = codes.to_device(&Device::Cpu)?.to_vec2::<i64>()?;
-        if values
-            .iter()
-            .flatten()
-            .any(|value| *value < 0 || *value >= self.config.codebook_size as i64)
-        {
+        // Range check on-device (min/max) — avoid full D2H of codes on every
+        // voice-clone encode, which used to serialize the CUDA stream.
+        let codes_f = codes.to_dtype(DType::F32)?;
+        let min_v = codes_f.min_all()?.to_scalar::<f32>()?;
+        let max_v = codes_f.max_all()?.to_scalar::<f32>()?;
+        if min_v < 0.0 || max_v >= self.config.codebook_size as f32 {
             return Err(OmniVoiceError::InvalidData(format!(
                 "audio tokenizer produced a code outside [0, {})",
                 self.config.codebook_size
