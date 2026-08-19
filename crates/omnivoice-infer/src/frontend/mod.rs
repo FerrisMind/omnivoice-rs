@@ -1,11 +1,13 @@
 use std::{fs, path::Path};
 
+use candle_core::quantized::gguf_file;
+use candle_core::quantized::tokenizer::TokenizerFromGguf;
 use candle_core::{Device, Tensor};
 use serde::Deserialize;
-use tokenizers::Tokenizer;
+use tokenizers::{AddedToken, Tokenizer};
 
 use crate::{
-    artifacts::RuntimeArtifacts,
+    artifacts::{gguf_u32, RuntimeArtifacts},
     contracts::{
         GenerationConfig, GenerationRequest, GenerationTask, I64Tensor3, PreparedPrompt,
         PromptTensorBundle, VoiceClonePrompt,
@@ -129,6 +131,59 @@ struct ModelConfigFile {
     audio_mask_id: i64,
 }
 
+const OMNIVOICE_GGUF_SPECIAL_KEYS: [&str; 7] = [
+    "omnivoice.special.denoise",
+    "omnivoice.special.lang_start",
+    "omnivoice.special.lang_end",
+    "omnivoice.special.instruct_start",
+    "omnivoice.special.instruct_end",
+    "omnivoice.special.text_start",
+    "omnivoice.special.text_end",
+];
+
+fn register_omnivoice_gguf_specials(
+    tokenizer: &mut Tokenizer,
+    content: &gguf_file::Content,
+) -> Result<()> {
+    let mut specials = Vec::with_capacity(OMNIVOICE_GGUF_SPECIAL_KEYS.len());
+    let mut expected_ids = Vec::with_capacity(OMNIVOICE_GGUF_SPECIAL_KEYS.len());
+    for key in OMNIVOICE_GGUF_SPECIAL_KEYS {
+        let id = gguf_u32(content, key)?;
+        let token = tokenizer.id_to_token(id).ok_or_else(|| {
+            OmniVoiceError::InvalidData(format!(
+                "GGUF special `{key}` id {id} is missing from the tokenizer vocab"
+            ))
+        })?;
+        if token.is_empty() {
+            return Err(OmniVoiceError::InvalidData(format!(
+                "GGUF special `{key}` id {id} has an empty vocab string"
+            )));
+        }
+        specials.push(
+            AddedToken::from(&token, true)
+                .normalized(false)
+                .lstrip(false)
+                .rstrip(false)
+                .single_word(false),
+        );
+        expected_ids.push((key, token, id));
+    }
+    tokenizer.add_special_tokens(&specials);
+    for (key, token, expected_id) in expected_ids {
+        let actual_id = tokenizer.token_to_id(&token).ok_or_else(|| {
+            OmniVoiceError::InvalidData(format!(
+                "GGUF special `{key}` token `{token}` was not registered"
+            ))
+        })?;
+        if actual_id != expected_id {
+            return Err(OmniVoiceError::InvalidData(format!(
+                "GGUF special `{key}` id shifted from {expected_id} to {actual_id}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl Frontend {
     pub fn from_model_root(model_root: impl AsRef<Path>) -> Result<Self> {
         let runtime = RuntimeArtifacts::from_model_root(model_root)?;
@@ -136,9 +191,21 @@ impl Frontend {
     }
 
     pub fn from_runtime_artifacts(runtime: &RuntimeArtifacts) -> Result<Self> {
-        let tokenizer = Tokenizer::from_file(runtime.text_tokenizer().tokenizer_path())?;
-        let model_config: ModelConfigFile =
-            serde_json::from_str(&fs::read_to_string(runtime.generator().config_path())?)?;
+        let (tokenizer, model_config) = if let Some(gguf) = runtime.gguf_bundle() {
+            let content = gguf.open_generator_content()?;
+            let mut tokenizer = Tokenizer::from_gguf(&content)?;
+            register_omnivoice_gguf_specials(&mut tokenizer, &content)?;
+            let model_config = ModelConfigFile {
+                num_audio_codebook: runtime.contracts().num_audio_codebooks,
+                audio_mask_id: runtime.contracts().audio_mask_id,
+            };
+            (tokenizer, model_config)
+        } else {
+            let tokenizer = Tokenizer::from_file(runtime.text_tokenizer()?.tokenizer_path())?;
+            let model_config: ModelConfigFile =
+                serde_json::from_str(&fs::read_to_string(runtime.generator()?.config_path())?)?;
+            (tokenizer, model_config)
+        };
         Ok(Self {
             tokenizer,
             num_audio_codebook: model_config.num_audio_codebook,

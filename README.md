@@ -53,7 +53,6 @@ cargo run -p omnivoice-cli --features cuda -- infer `
   --language en `
   --output artifacts\demo.wav `
   --device cuda:0 `
-  --dtype f32 `
   --seed 1234
 ```
 
@@ -73,8 +72,7 @@ $env:OMNIVOICE_API_KEY="local-dev-token"
 cargo run -p omnivoice-server --features cuda -- `
   --host 127.0.0.1 `
   --port 8000 `
-  --device cuda:0 `
-  --dtype f32
+  --device cuda:0
 ```
 
 ## 🎧 Listening samples

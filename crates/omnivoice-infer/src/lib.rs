@@ -4,6 +4,7 @@ pub mod artifacts;
 pub mod asr;
 pub mod audio_input;
 pub mod audio_tokenizer;
+mod codec_layers;
 pub mod contracts;
 pub mod error;
 pub mod frontend;
@@ -17,11 +18,13 @@ pub mod runtime;
 pub mod stage0_loop;
 pub mod stage0_model;
 pub mod stage0_qwen3;
+pub mod stage0_qwen3_quantized;
 pub mod stage1_decoder;
 pub mod stage1_model;
 
 pub use contracts::{BoolTensor2, BoolTensor4, GeneratedAudioResult, GenerationUsage};
 pub use error::{OmniVoiceError, Result};
+pub use artifacts::ModelWeightDType;
 pub use runtime::{DTypeSpec, DeviceSpec, RuntimeOptions};
 
 pub fn workspace_phase_marker() -> &'static str {

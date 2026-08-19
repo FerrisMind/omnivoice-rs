@@ -12,9 +12,7 @@ cargo run -p omnivoice-cli -- infer `
   --text "This is a voice design example." `
   --language en `
   --instruct "female, low pitch, british accent" `
-  --output out\design.wav `
-  --device cpu `
-  --dtype f32
+  --output out\design.wav
 ```
 
 ## How It Works in This Port

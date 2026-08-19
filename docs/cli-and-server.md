@@ -37,9 +37,7 @@ cargo run -p omnivoice-cli -- infer `
   --model model `
   --text "Hello, this is an auto voice example." `
   --language en `
-  --output out\auto.wav `
-  --device cpu `
-  --dtype f32
+  --output out\auto.wav
 ```
 
 ### 2. Voice Clone
@@ -53,9 +51,7 @@ cargo run -p omnivoice-cli -- infer `
   --language en `
   --ref-audio ref.wav `
   --ref-text (Get-Content ref_text.txt -Raw) `
-  --output out\clone.wav `
-  --device cpu `
-  --dtype f32
+  --output out\clone.wav
 ```
 
 ### 3. Voice Design
@@ -68,9 +64,7 @@ cargo run -p omnivoice-cli -- infer `
   --text "This sample uses a designed voice." `
   --language en `
   --instruct "female, low pitch, british accent" `
-  --output out\design.wav `
-  --device cpu `
-  --dtype f32
+  --output out\design.wav
 ```
 
 ## Device and DType Selection
@@ -86,15 +80,25 @@ Accepted device values:
 
 Accepted dtype values:
 
-- `auto`
+- `auto` (default)
 - `f32`
 - `f16`
 - `bf16`
 
+`--dtype` is an optional debug override. You do not need it for normal inference. It does not pick which GGUF file to load and does not unpack quantized weights.
+
+`auto` (default) chooses stage0 activations as:
+
+- safetensors on CPU → `f32`
+- GGUF on CPU → `f32` (Candle's quantized `f16` CPU kernel is scalar and much slower)
+- safetensors on GPU → `bf16` if the weights are BF16, otherwise `f16`
+- GGUF on GPU → `f16` (Candle `QMatMul` kernels accept `f32`/`f16` activations only, not `bf16`)
+
+Weights stay in their file type. codec/stage1 stay `f32` until quantized conv is wired.
+
 Current implementation notes:
 
 - `auto` device prefers `CUDA -> Metal -> CPU`
-- `auto` dtype currently resolves to `f32`
 - CPU-only inference is supported
 - GPU acceleration is optional but preferred when available
 
@@ -152,9 +156,7 @@ cargo run -p omnivoice-server -- `
   --host 127.0.0.1 `
   --port 8000 `
   --base-path /edge `
-  --request-timeout-secs 300 `
-  --device auto `
-  --dtype auto
+  --request-timeout-secs 300
 ```
 
 ## `POST /v1/audio/speech`

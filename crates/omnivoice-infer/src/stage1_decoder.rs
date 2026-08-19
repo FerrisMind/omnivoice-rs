@@ -6,12 +6,16 @@ use std::{
     sync::OnceLock,
 };
 
-use candle_core::{DType, Device, Tensor};
+use candle_core::{quantized::gguf_file, DType, Device, Tensor};
 use regex::Regex;
 use serde::Deserialize;
 
 use crate::{
-    artifacts::{AudioTokenizerArtifacts, RuntimeArtifacts, RuntimeContracts},
+    artifacts::{
+        AudioTokenizerArtifacts, GgufBundleArtifacts, RuntimeArtifacts,
+        RuntimeContracts,
+    },
+    codec_layers::CodecWeightSource,
     contracts::{DecodedAudio, F32Tensor3, GeneratedTokens, I64Tensor2},
     error::{OmniVoiceError, Result},
     postprocess::{
@@ -126,11 +130,44 @@ impl Stage1DecoderBundle {
     }
 
     pub fn from_runtime_artifacts(runtime: &RuntimeArtifacts) -> Result<Self> {
+        if let Some(gguf) = runtime.gguf_bundle() {
+            return Self::from_gguf_bundle(runtime.model_root(), gguf, runtime.contracts());
+        }
         Self::from_artifacts(
             runtime.model_root(),
-            runtime.audio_tokenizer(),
+            runtime.audio_tokenizer()?,
             runtime.contracts(),
         )
+    }
+
+    fn from_gguf_bundle(
+        model_root: impl AsRef<Path>,
+        gguf: &GgufBundleArtifacts,
+        contracts: &RuntimeContracts,
+    ) -> Result<Self> {
+        let model_root = model_root.as_ref().to_path_buf();
+        let expected_codebooks = contracts.num_audio_codebooks;
+        let model_config =
+            inspect_stage1_model_config(gguf.audio_tokenizer_path(), expected_codebooks)?;
+        let expected_audio_vocab_size =
+            model_config.codebook_size.checked_add(1).ok_or_else(|| {
+                OmniVoiceError::InvalidData(
+                    "stage1 codebook size overflows audio vocabulary".to_string(),
+                )
+            })?;
+        if expected_audio_vocab_size != contracts.audio_vocab_size {
+            return Err(OmniVoiceError::InvalidData(format!(
+                "stage1 codebook size {} does not match manifest audio_vocab_size {}",
+                model_config.codebook_size, contracts.audio_vocab_size
+            )));
+        }
+        Ok(Self {
+            model_root,
+            weights_path: gguf.audio_tokenizer_path().to_path_buf(),
+            output_sample_rate: contracts.sample_rate,
+            expected_codebooks,
+            model_config,
+        })
     }
 
     pub fn from_artifacts(
@@ -543,8 +580,12 @@ impl Stage1RuntimePlan {
 
     fn model(&self) -> Result<&Stage1Model> {
         let result = self.model.get_or_init(|| {
-            mmap_var_builder(self.bundle.weights_path(), self.runtime_dtype, &self.device)
-                .and_then(|vb| Stage1Model::load(vb, self.bundle.model_config()))
+            CodecWeightSource::from_weight_path(
+                self.bundle.weights_path(),
+                self.runtime_dtype,
+                &self.device,
+            )
+            .and_then(|ws| Stage1Model::load(&ws, self.bundle.model_config()))
                 .map_err(|error| error.to_string())
         });
         match result {
@@ -771,7 +812,16 @@ fn inspect_stage1_model_config(
     weights_path: impl AsRef<Path>,
     expected_codebooks: usize,
 ) -> Result<Stage1ModelConfig> {
-    let tensors = read_safetensor_header(weights_path)?;
+    let weights_path = weights_path.as_ref();
+    let tensors = if weights_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+    {
+        read_gguf_header(weights_path)?
+    } else {
+        read_safetensor_header(weights_path)?
+    };
     let quantizer_regex = Regex::new(r"^quantizer\.quantizers\.(\d+)\.").map_err(|error| {
         OmniVoiceError::InvalidData(format!("failed to build quantizer regex: {error}"))
     })?;
@@ -960,6 +1010,22 @@ fn read_safetensor_header(
         .collect()
 }
 
+fn read_gguf_header(path: impl AsRef<Path>) -> Result<std::collections::BTreeMap<String, SafetensorHeaderEntry>> {
+    let path = path.as_ref();
+    let mut file = fs::File::open(path)?;
+    let content = gguf_file::Content::read(&mut file)?;
+    let mut header = std::collections::BTreeMap::new();
+    for (name, info) in content.tensor_infos {
+        header.insert(
+            name,
+            SafetensorHeaderEntry {
+                shape: info.shape.dims().to_vec(),
+            },
+        );
+    }
+    Ok(header)
+}
+
 fn tensor_shape<'a>(
     header: &'a std::collections::BTreeMap<String, SafetensorHeaderEntry>,
     name: &str,
@@ -968,17 +1034,6 @@ fn tensor_shape<'a>(
         .get(name)
         .map(|entry| entry.shape.as_slice())
         .ok_or_else(|| OmniVoiceError::InvalidData(format!("missing stage1 tensor {name}")))
-}
-
-fn mmap_var_builder(
-    weights_path: &Path,
-    dtype: DType,
-    device: &Device,
-) -> Result<candle_nn::VarBuilder<'static>> {
-    let paths = [weights_path];
-    // SAFETY: Candle's mmap-backed safetensors loader is the intended zero-copy path for
-    // immutable weight files. The mapped file is read-only and owned by the backend.
-    Ok(unsafe { candle_nn::VarBuilder::from_mmaped_safetensors(&paths, dtype, device)? })
 }
 
 fn shape2(shape: &[usize]) -> Result<(usize, usize)> {

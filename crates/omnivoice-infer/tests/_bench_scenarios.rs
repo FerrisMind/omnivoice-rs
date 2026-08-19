@@ -60,6 +60,7 @@ fn bench_listening_scenarios() {
     let model = PathBuf::from(&cfg.model);
     let device = parse_device(&cfg.device);
     let dtype = match cfg.dtype.to_ascii_lowercase().as_str() {
+        "auto" => DTypeSpec::Auto,
         "f32" | "float32" => DTypeSpec::F32,
         "f16" | "float16" => DTypeSpec::F16,
         "bf16" | "bfloat16" => DTypeSpec::BF16,

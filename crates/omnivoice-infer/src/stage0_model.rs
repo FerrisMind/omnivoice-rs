@@ -8,14 +8,17 @@ use std::{
     },
 };
 
-use candle_core::{DType, Device, IndexOp, Module, Tensor};
+use candle_core::{
+    quantized::QMatMul,
+    DType, Device, IndexOp, Module, Tensor,
+};
 use candle_nn::{Embedding, Linear, VarBuilder};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use safetensors::SafeTensors;
 use serde::Deserialize;
 
 use crate::{
-    artifacts::{GeneratorArtifacts, RuntimeArtifacts},
+    artifacts::{GeneratorArtifacts, GgufBundleArtifacts, RuntimeArtifacts},
     contracts::{
         BatchedInputs, F32Tensor3, F32Tensor4, I64Tensor2, I64Tensor3, PreparedInferenceBatch,
     },
@@ -23,7 +26,9 @@ use crate::{
     runtime::RuntimeOptions,
     stage0_loop::{build_timesteps, build_unmask_schedules},
     stage0_qwen3::{Stage0ForwardPass, Stage0Qwen3Backbone, Stage0Qwen3Config},
+    stage0_qwen3_quantized::Stage0Qwen3QuantizedBackbone,
 };
+use crate::codec_layers::QuantizedEmbedding;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LocalQwen3Config {
@@ -175,13 +180,67 @@ impl LocalQwen3Config {
 impl Stage0Config {
     pub fn from_model_root(model_root: impl AsRef<Path>) -> Result<Self> {
         let runtime = RuntimeArtifacts::from_model_root(model_root)?;
-        Self::from_artifacts(runtime.generator())
+        Self::from_runtime_artifacts(&runtime)
     }
 
     pub fn from_artifacts(generator: &GeneratorArtifacts) -> Result<Self> {
         Ok(serde_json::from_str(&fs::read_to_string(
             generator.config_path(),
         )?)?)
+    }
+
+    pub fn from_runtime_artifacts(runtime: &RuntimeArtifacts) -> Result<Self> {
+        if let Some(gguf) = runtime.gguf_bundle() {
+            return Self::from_gguf_bundle(gguf);
+        }
+        Self::from_artifacts(runtime.generator()?)
+    }
+
+    pub fn from_gguf_bundle(gguf: &GgufBundleArtifacts) -> Result<Self> {
+        let content = gguf.open_generator_content()?;
+        let vocab_size = content
+            .metadata
+            .get("tokenizer.ggml.tokens")
+            .and_then(|value| value.to_vec().ok())
+            .map(|tokens| tokens.len())
+            .ok_or_else(|| {
+                OmniVoiceError::InvalidData(
+                    "GGUF generator is missing tokenizer.ggml.tokens metadata".to_string(),
+                )
+            })?;
+        Ok(Self {
+            audio_vocab_size: gguf_metadata_usize(&content, "omnivoice.audio_vocab_size")?,
+            audio_mask_id: gguf_metadata_usize(&content, "omnivoice.audio_mask_id")? as i64,
+            num_audio_codebook: gguf_metadata_usize(&content, "omnivoice.num_audio_codebook")?,
+            llm_config: LocalQwen3Config {
+                hidden_size: gguf_metadata_usize(&content, "omnivoice-lm.embedding_length")?,
+                intermediate_size: gguf_metadata_usize(
+                    &content,
+                    "omnivoice-lm.feed_forward_length",
+                )?,
+                num_hidden_layers: gguf_metadata_usize(&content, "omnivoice-lm.block_count")?,
+                num_attention_heads: gguf_metadata_usize(
+                    &content,
+                    "omnivoice-lm.attention.head_count",
+                )?,
+                num_key_value_heads: gguf_metadata_usize(
+                    &content,
+                    "omnivoice-lm.attention.head_count_kv",
+                )?,
+                head_dim: gguf_metadata_usize(&content, "omnivoice-lm.attention.key_length")?,
+                max_position_embeddings: 4096,
+                rms_norm_eps: gguf_metadata_f64(
+                    &content,
+                    "omnivoice-lm.attention.layer_norm_rms_epsilon",
+                )?,
+                attention_bias: false,
+                hidden_act: default_hidden_act(),
+                rope_parameters: RopeParameters {
+                    rope_theta: gguf_metadata_f64(&content, "omnivoice-lm.rope.freq_base")?,
+                },
+                vocab_size,
+            },
+        })
     }
 }
 
@@ -195,7 +254,7 @@ pub struct Stage0WeightLayout {
 impl Stage0WeightLayout {
     pub fn from_model_root(model_root: impl AsRef<Path>) -> Result<Self> {
         let runtime = RuntimeArtifacts::from_model_root(model_root)?;
-        Self::from_artifacts(runtime.generator())
+        Self::from_runtime_artifacts(&runtime)
     }
 
     pub fn from_artifacts(generator: &GeneratorArtifacts) -> Result<Self> {
@@ -238,6 +297,17 @@ impl Stage0WeightLayout {
         })
     }
 
+    pub fn from_runtime_artifacts(runtime: &RuntimeArtifacts) -> Result<Self> {
+        if let Some(gguf) = runtime.gguf_bundle() {
+            return Ok(Self {
+                weights_path: gguf.generator_path().to_path_buf(),
+                accepted_prefixes: BTreeSet::new(),
+                ignored_keys: BTreeSet::new(),
+            });
+        }
+        Self::from_artifacts(runtime.generator()?)
+    }
+
     pub fn accepted_prefixes(&self) -> &BTreeSet<String> {
         &self.accepted_prefixes
     }
@@ -252,13 +322,76 @@ impl Stage0WeightLayout {
 }
 
 #[derive(Debug)]
+enum Stage0AudioEmbeddings {
+    Dense(Embedding),
+    Quantized(QuantizedEmbedding),
+}
+
+impl Stage0AudioEmbeddings {
+    fn forward(&self, input_ids: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Dense(layer) => layer.forward(input_ids).map_err(Into::into),
+            Self::Quantized(layer) => layer.forward(input_ids),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct Stage0Model {
-    backbone: Stage0Qwen3Backbone,
-    audio_embeddings: Embedding,
-    audio_heads: Linear,
+    backbone: Stage0BackboneKind,
+    audio_embeddings: Stage0AudioEmbeddings,
+    audio_heads: Stage0HeadProjection,
     codebook_layer_offsets: Tensor,
     num_audio_codebook: usize,
     audio_vocab_size: usize,
+    activation_dtype: DType,
+}
+
+#[derive(Debug)]
+enum Stage0BackboneKind {
+    Dense(Stage0Qwen3Backbone),
+    Quantized(Stage0Qwen3QuantizedBackbone),
+}
+
+impl Stage0BackboneKind {
+    fn embed_text_tokens(&self, input_ids: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Dense(model) => model.embed_text_tokens(input_ids),
+            Self::Quantized(model) => model.embed_text_tokens(input_ids),
+        }
+    }
+
+    fn forward_embeds_with_flash(
+        &self,
+        input_embeds: &Tensor,
+        attention_mask: Option<&Tensor>,
+        capture_layers: &BTreeSet<usize>,
+        flash_seqlens: Option<&[usize]>,
+    ) -> Result<Stage0ForwardPass> {
+        match self {
+            Self::Dense(model) => {
+                model.forward_embeds_with_flash(input_embeds, attention_mask, capture_layers, flash_seqlens)
+            }
+            Self::Quantized(model) => {
+                model.forward_embeds_with_flash(input_embeds, attention_mask, capture_layers, flash_seqlens)
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum Stage0HeadProjection {
+    Dense(Linear),
+    Quantized(QMatMul),
+}
+
+impl Stage0HeadProjection {
+    fn forward(&self, hidden: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Dense(layer) => layer.forward(hidden).map_err(Into::into),
+            Self::Quantized(layer) => layer.forward(hidden).map_err(Into::into),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -292,10 +425,10 @@ impl Stage0RuntimePlan {
         runtime: &RuntimeArtifacts,
         device: Device,
     ) -> Result<Self> {
-        let runtime_dtype = options.resolve_dtype_for_runtime_device(&device);
+        let runtime_dtype = options.resolve_stage0_dtype(&device, runtime)?;
         Ok(Self {
-            config: Stage0Config::from_artifacts(runtime.generator())?,
-            weight_layout: Stage0WeightLayout::from_artifacts(runtime.generator())?,
+            config: Stage0Config::from_runtime_artifacts(runtime)?,
+            weight_layout: Stage0WeightLayout::from_runtime_artifacts(runtime)?,
             device,
             runtime_dtype,
             cpu_seed: Mutex::new(options.seed()),
@@ -757,6 +890,13 @@ impl Stage0Model {
         device: &Device,
         dtype: DType,
     ) -> Result<Self> {
+        if weights_path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+        {
+            return Self::load_from_gguf(config, weights_path, device, dtype);
+        }
         let vb = mmap_var_builder(weights_path, dtype, device)?;
         let llm_vb = vb.clone().rename_f(|name| {
             if let Some(stripped) = name.strip_prefix("model.") {
@@ -765,8 +905,10 @@ impl Stage0Model {
                 format!("llm.{name}")
             }
         });
-        let backbone =
-            Stage0Qwen3Backbone::load(&config.llm_config.to_stage0_qwen3_config()?, llm_vb)?;
+        let backbone = Stage0BackboneKind::Dense(Stage0Qwen3Backbone::load(
+            &config.llm_config.to_stage0_qwen3_config()?,
+            llm_vb,
+        )?);
         let audio_embeddings_weight = vb.get(
             (
                 config.num_audio_codebook * config.audio_vocab_size,
@@ -774,8 +916,10 @@ impl Stage0Model {
             ),
             "audio_embeddings.weight",
         )?;
-        let audio_embeddings =
-            Embedding::new(audio_embeddings_weight, config.llm_config.hidden_size);
+        let audio_embeddings = Stage0AudioEmbeddings::Dense(Embedding::new(
+            audio_embeddings_weight,
+            config.llm_config.hidden_size,
+        ));
         let audio_heads_weight = vb.get(
             (
                 config.num_audio_codebook * config.audio_vocab_size,
@@ -783,7 +927,7 @@ impl Stage0Model {
             ),
             "audio_heads.weight",
         )?;
-        let audio_heads = Linear::new(audio_heads_weight, None);
+        let audio_heads = Stage0HeadProjection::Dense(Linear::new(audio_heads_weight, None));
         let codebook_layer_offsets = Tensor::from_vec(
             AudioEmbeddingMixer::new(config.num_audio_codebook, config.audio_vocab_size)
                 .layer_offsets(),
@@ -797,6 +941,58 @@ impl Stage0Model {
             codebook_layer_offsets,
             num_audio_codebook: config.num_audio_codebook,
             audio_vocab_size: config.audio_vocab_size,
+            activation_dtype: dtype,
+        })
+    }
+
+    fn load_from_gguf(
+        config: &Stage0Config,
+        weights_path: &Path,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<Self> {
+        let qvb = candle_transformers::quantized_var_builder::VarBuilder::from_gguf(
+            weights_path,
+            device,
+        )?;
+        let backbone = Stage0BackboneKind::Quantized(Stage0Qwen3QuantizedBackbone::load(
+            &config.llm_config.to_stage0_qwen3_config()?,
+            qvb.clone(),
+            dtype,
+        )?);
+        // Candle 0.11+: gather rows from packed Q4 without materializing the full table.
+        let audio_embeddings = Stage0AudioEmbeddings::Quantized(QuantizedEmbedding::new(
+            qvb.get(
+                (
+                    config.num_audio_codebook * config.audio_vocab_size,
+                    config.llm_config.hidden_size,
+                ),
+                "audio_embeddings.weight",
+            )?,
+            dtype,
+            device.clone(),
+        ));
+        let audio_heads = Stage0HeadProjection::Quantized(QMatMul::QTensor(qvb.get(
+            (
+                config.num_audio_codebook * config.audio_vocab_size,
+                config.llm_config.hidden_size,
+            ),
+            "audio_heads.weight",
+        )?));
+        let codebook_layer_offsets = Tensor::from_vec(
+            AudioEmbeddingMixer::new(config.num_audio_codebook, config.audio_vocab_size)
+                .layer_offsets(),
+            (1, config.num_audio_codebook, 1),
+            device,
+        )?;
+        Ok(Self {
+            backbone,
+            audio_embeddings,
+            audio_heads,
+            codebook_layer_offsets,
+            num_audio_codebook: config.num_audio_codebook,
+            audio_vocab_size: config.audio_vocab_size,
+            activation_dtype: dtype,
         })
     }
 
@@ -843,25 +1039,9 @@ impl Stage0Model {
             .unsqueeze(candle_core::D::Minus1)?
             .broadcast_as(audio_embeds.shape().dims())?;
         selection_mask
-            .where_cond(&audio_embeds, &text_embeds)
+            .where_cond(&audio_embeds, &text_embeds)?
+            .to_dtype(self.activation_dtype)
             .map_err(Into::into)
-    }
-
-    fn forward(
-        &self,
-        input_ids: &Tensor,
-        audio_mask: &Tensor,
-        attention_mask: &Tensor,
-        capture_layers: &BTreeSet<usize>,
-    ) -> Result<Stage0ForwardOutputs> {
-        self.forward_with_text_cache(
-            input_ids,
-            audio_mask,
-            attention_mask,
-            capture_layers,
-            None,
-            None,
-        )
     }
 
     fn forward_with_text_cache(
@@ -1587,6 +1767,44 @@ fn mmap_var_builder(
     // read-only memory maps. We map immutable safetensors files and only hand the backend to
     // Candle for read-only tensor materialization.
     Ok(unsafe { VarBuilder::from_mmaped_safetensors(&paths, dtype, device)? })
+}
+
+fn gguf_metadata_usize(content: &candle_core::quantized::gguf_file::Content, key: &str) -> Result<usize> {
+    match content.metadata.get(key) {
+        Some(candle_core::quantized::gguf_file::Value::U8(v)) => Ok((*v).into()),
+        Some(candle_core::quantized::gguf_file::Value::I8(v)) if *v >= 0 => Ok(*v as usize),
+        Some(candle_core::quantized::gguf_file::Value::U16(v)) => Ok((*v).into()),
+        Some(candle_core::quantized::gguf_file::Value::I16(v)) if *v >= 0 => Ok(*v as usize),
+        Some(candle_core::quantized::gguf_file::Value::U32(v)) => Ok(*v as usize),
+        Some(candle_core::quantized::gguf_file::Value::I32(v)) if *v >= 0 => Ok(*v as usize),
+        Some(candle_core::quantized::gguf_file::Value::U64(v)) => usize::try_from(*v).map_err(|_| {
+            OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` exceeds usize"))
+        }),
+        Some(candle_core::quantized::gguf_file::Value::I64(v)) if *v >= 0 => {
+            usize::try_from(*v).map_err(|_| {
+                OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` exceeds usize"))
+            })
+        }
+        Some(other) => Err(OmniVoiceError::InvalidData(format!(
+            "GGUF metadata `{key}` is not a non-negative integer: {other:?}"
+        ))),
+        None => Err(OmniVoiceError::InvalidData(format!(
+            "missing GGUF metadata key `{key}`"
+        ))),
+    }
+}
+
+fn gguf_metadata_f64(content: &candle_core::quantized::gguf_file::Content, key: &str) -> Result<f64> {
+    match content.metadata.get(key) {
+        Some(candle_core::quantized::gguf_file::Value::F32(v)) => Ok((*v).into()),
+        Some(candle_core::quantized::gguf_file::Value::F64(v)) => Ok(*v),
+        Some(other) => Err(OmniVoiceError::InvalidData(format!(
+            "GGUF metadata `{key}` is not a float: {other:?}"
+        ))),
+        None => Err(OmniVoiceError::InvalidData(format!(
+            "missing GGUF metadata key `{key}`"
+        ))),
+    }
 }
 
 fn tensor_to_f32_tensor3(tensor: &Tensor) -> Result<F32Tensor3> {

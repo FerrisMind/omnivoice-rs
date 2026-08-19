@@ -1,0 +1,43 @@
+name: macOS SSH
+
+on:
+  workflow_dispatch:
+    inputs:
+      install_rust:
+        description: "Install stable Rust toolchain before opening SSH session"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  macos-ssh:
+    name: macOS 14 SSH session
+    runs-on: macos-14
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        if: ${{ inputs.install_rust }}
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        if: ${{ inputs.install_rust }}
+        uses: Swatinem/rust-cache@v2
+
+      - name: Print quickstart hints
+        run: |
+          echo "After SSH login, common commands:"
+          echo "  cargo clippy --workspace --all-targets --features metal -- -D warnings"
+          echo "  cargo test -p omnivoice-infer --features metal -- --test-threads=1"
+          echo "  cargo test -p omnivoice-cli --features metal -- --test-threads=1"
+
+      - name: Setup tmate session
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true

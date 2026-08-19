@@ -46,7 +46,7 @@ pub fn classify_model_source(model_spec: Option<&str>, default_repo: &str) -> Re
 pub fn resolve_tts_model_root(model_spec: Option<&str>) -> Result<PathBuf> {
     match classify_tts_model_source(model_spec)? {
         ModelSource::LocalPath(path) => {
-            ensure_local_runtime_manifest(&path)?;
+            let _ = ensure_local_runtime_manifest(&path);
             Ok(path)
         }
         ModelSource::HuggingFaceRepo(repo_id) => download_tts_snapshot(&repo_id),

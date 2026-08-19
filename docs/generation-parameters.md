@@ -88,8 +88,6 @@ cargo run -p omnivoice-cli -- infer `
   --text "Long-form synthesis example." `
   --language en `
   --output out\sample.wav `
-  --device cpu `
-  --dtype f32 `
   --num-step 16 `
   --guidance-scale 2.0 `
   --t-shift 0.1 `

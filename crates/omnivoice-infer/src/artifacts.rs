@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use candle_core::quantized::{gguf_file, GgmlDType};
 use half::{bf16, f16};
 use safetensors::{tensor::TensorView, Dtype, SafeTensors};
 use serde::Deserialize;
@@ -20,6 +21,16 @@ use crate::{
 };
 
 pub const RUNTIME_MANIFEST_FILE_NAME: &str = "omnivoice.artifacts.json";
+const DEFAULT_GGUF_LM_FILE: &str = "omnivoice-base-f16.gguf";
+const DEFAULT_GGUF_CODEC_FILE: &str = "omnivoice-tokenizer-f16.gguf";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelWeightDType {
+    F32,
+    F16,
+    BF16,
+    Quantized,
+}
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct RuntimeArtifactManifest {
@@ -104,11 +115,25 @@ impl RuntimeContracts {
 #[derive(Debug, Clone)]
 pub struct RuntimeArtifacts {
     model_root: PathBuf,
-    manifest_path: PathBuf,
-    manifest: RuntimeArtifactManifest,
-    generator: GeneratorArtifacts,
-    text_tokenizer: TextTokenizerArtifacts,
-    audio_tokenizer: AudioTokenizerArtifacts,
+    manifest_path: Option<PathBuf>,
+    manifest: Option<RuntimeArtifactManifest>,
+    generator: Option<GeneratorArtifacts>,
+    text_tokenizer: Option<TextTokenizerArtifacts>,
+    audio_tokenizer: Option<AudioTokenizerArtifacts>,
+    gguf_bundle: Option<GgufBundleArtifacts>,
+    contracts: RuntimeContracts,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeArtifactFormat {
+    SafetensorsManifest,
+    GgufBundle,
+}
+
+#[derive(Debug, Clone)]
+pub struct GgufBundleArtifacts {
+    generator_path: PathBuf,
+    audio_tokenizer_path: PathBuf,
 }
 
 impl RuntimeArtifacts {
@@ -119,54 +144,330 @@ impl RuntimeArtifacts {
         }
 
         let manifest_path = model_root.join(RUNTIME_MANIFEST_FILE_NAME);
-        if !manifest_path.exists() {
-            crate::model_source::ensure_local_runtime_manifest(&model_root)?;
+        if manifest_path.exists() {
+            let manifest = RuntimeArtifactManifest::from_model_root(&model_root)?;
+            let generator = GeneratorArtifacts::resolve(&model_root, &manifest.generator)?;
+            let text_tokenizer =
+                TextTokenizerArtifacts::resolve(&model_root, &manifest.text_tokenizer)?;
+            let audio_tokenizer =
+                AudioTokenizerArtifacts::resolve(&model_root, &manifest.audio_tokenizer)?;
+            validate_runtime_contracts(&generator, &audio_tokenizer, &manifest.contracts)?;
+
+            return Ok(Self {
+                model_root,
+                manifest_path: Some(manifest_path),
+                contracts: manifest.contracts.clone(),
+                manifest: Some(manifest),
+                generator: Some(generator),
+                text_tokenizer: Some(text_tokenizer),
+                audio_tokenizer: Some(audio_tokenizer),
+                gguf_bundle: None,
+            });
         }
 
-        let manifest = RuntimeArtifactManifest::from_model_root(&model_root)?;
-        let generator = GeneratorArtifacts::resolve(&model_root, &manifest.generator)?;
-        let text_tokenizer =
-            TextTokenizerArtifacts::resolve(&model_root, &manifest.text_tokenizer)?;
-        let audio_tokenizer =
-            AudioTokenizerArtifacts::resolve(&model_root, &manifest.audio_tokenizer)?;
-        validate_runtime_contracts(&generator, &audio_tokenizer, &manifest.contracts)?;
+        if let Ok(manifest_path) = crate::model_source::ensure_local_runtime_manifest(&model_root) {
+            let manifest = RuntimeArtifactManifest::from_model_root(&model_root)?;
+            let generator = GeneratorArtifacts::resolve(&model_root, &manifest.generator)?;
+            let text_tokenizer =
+                TextTokenizerArtifacts::resolve(&model_root, &manifest.text_tokenizer)?;
+            let audio_tokenizer =
+                AudioTokenizerArtifacts::resolve(&model_root, &manifest.audio_tokenizer)?;
+            validate_runtime_contracts(&generator, &audio_tokenizer, &manifest.contracts)?;
 
+            return Ok(Self {
+                model_root,
+                manifest_path: Some(manifest_path),
+                contracts: manifest.contracts.clone(),
+                manifest: Some(manifest),
+                generator: Some(generator),
+                text_tokenizer: Some(text_tokenizer),
+                audio_tokenizer: Some(audio_tokenizer),
+                gguf_bundle: None,
+            });
+        }
+
+        let gguf_bundle = GgufBundleArtifacts::resolve(&model_root)?;
+        let contracts = gguf_bundle.read_contracts()?;
         Ok(Self {
             model_root,
-            manifest_path,
-            manifest,
-            generator,
-            text_tokenizer,
-            audio_tokenizer,
+            manifest_path: None,
+            manifest: None,
+            generator: None,
+            text_tokenizer: None,
+            audio_tokenizer: None,
+            gguf_bundle: Some(gguf_bundle),
+            contracts,
         })
     }
 
-    pub fn manifest(&self) -> &RuntimeArtifactManifest {
-        &self.manifest
+    pub fn format(&self) -> RuntimeArtifactFormat {
+        match self.gguf_bundle {
+            Some(_) => RuntimeArtifactFormat::GgufBundle,
+            None => RuntimeArtifactFormat::SafetensorsManifest,
+        }
+    }
+
+    pub fn is_gguf_bundle(&self) -> bool {
+        matches!(self.format(), RuntimeArtifactFormat::GgufBundle)
+    }
+
+    pub fn manifest(&self) -> Option<&RuntimeArtifactManifest> {
+        self.manifest.as_ref()
     }
 
     pub fn contracts(&self) -> &RuntimeContracts {
-        &self.manifest.contracts
+        &self.contracts
     }
 
     pub fn model_root(&self) -> &Path {
         &self.model_root
     }
 
-    pub fn manifest_path(&self) -> &Path {
-        &self.manifest_path
+    pub fn manifest_path(&self) -> Option<&Path> {
+        self.manifest_path.as_deref()
     }
 
-    pub fn generator(&self) -> &GeneratorArtifacts {
-        &self.generator
+    pub fn generator(&self) -> Result<&GeneratorArtifacts> {
+        self.generator.as_ref().ok_or_else(|| {
+            OmniVoiceError::Unsupported(
+                "generator safetensors artifacts are unavailable for a GGUF runtime".to_string(),
+            )
+        })
     }
 
-    pub fn text_tokenizer(&self) -> &TextTokenizerArtifacts {
-        &self.text_tokenizer
+    pub fn text_tokenizer(&self) -> Result<&TextTokenizerArtifacts> {
+        self.text_tokenizer.as_ref().ok_or_else(|| {
+            OmniVoiceError::Unsupported(
+                "text tokenizer json artifacts are unavailable for a GGUF runtime".to_string(),
+            )
+        })
     }
 
-    pub fn audio_tokenizer(&self) -> &AudioTokenizerArtifacts {
-        &self.audio_tokenizer
+    pub fn audio_tokenizer(&self) -> Result<&AudioTokenizerArtifacts> {
+        self.audio_tokenizer.as_ref().ok_or_else(|| {
+            OmniVoiceError::Unsupported(
+                "audio tokenizer safetensors artifacts are unavailable for a GGUF runtime"
+                    .to_string(),
+            )
+        })
+    }
+
+    pub fn gguf_bundle(&self) -> Option<&GgufBundleArtifacts> {
+        self.gguf_bundle.as_ref()
+    }
+
+    pub fn native_weight_dtype(&self) -> Result<ModelWeightDType> {
+        if let Some(bundle) = self.gguf_bundle() {
+            let content = bundle.open_generator_content()?;
+            return Ok(classify_gguf_weight_dtype(
+                content.tensor_infos.values().map(|info| info.ggml_dtype),
+            ));
+        }
+        native_weight_dtype_from_safetensors(self.generator()?.weights_path())
+    }
+}
+
+impl GgufBundleArtifacts {
+    fn resolve(model_root: &Path) -> Result<Self> {
+        let generator_path = resolve_gguf_candidate(
+            model_root,
+            &["omnivoice-base-", "base"],
+            DEFAULT_GGUF_LM_FILE,
+        )?;
+        let audio_tokenizer_path = resolve_gguf_candidate(
+            model_root,
+            &["omnivoice-tokenizer-", "tokenizer", "codec"],
+            DEFAULT_GGUF_CODEC_FILE,
+        )?;
+        Ok(Self {
+            generator_path,
+            audio_tokenizer_path,
+        })
+    }
+
+    pub fn generator_path(&self) -> &Path {
+        &self.generator_path
+    }
+
+    pub fn audio_tokenizer_path(&self) -> &Path {
+        &self.audio_tokenizer_path
+    }
+
+    pub fn open_generator_content(&self) -> Result<gguf_file::Content> {
+        read_gguf_content(&self.generator_path)
+    }
+
+    pub fn open_audio_tokenizer_content(&self) -> Result<gguf_file::Content> {
+        read_gguf_content(&self.audio_tokenizer_path)
+    }
+
+    fn read_contracts(&self) -> Result<RuntimeContracts> {
+        let generator = self.open_generator_content()?;
+        let codec = self.open_audio_tokenizer_content()?;
+        let num_audio_codebooks = gguf_u32(&generator, "omnivoice.num_audio_codebook")? as usize;
+        let audio_vocab_size = gguf_u32(&generator, "omnivoice.audio_vocab_size")? as usize;
+        let audio_mask_id = gguf_u32(&generator, "omnivoice.audio_mask_id")? as i64;
+        let sample_rate = gguf_u32(&codec, "omnivoice.sample_rate")?;
+        let hop_length = gguf_u32(&codec, "omnivoice.acoustic.hop_length")? as usize;
+        let frame_rate = usize::try_from(sample_rate)
+            .ok()
+            .and_then(|sr| sr.checked_div(hop_length.max(1)))
+            .filter(|rate| *rate > 0)
+            .ok_or_else(|| {
+                OmniVoiceError::InvalidData(format!(
+                    "invalid GGUF frame-rate inputs sample_rate={sample_rate}, hop_length={hop_length}"
+                ))
+            })?;
+        Ok(RuntimeContracts {
+            num_audio_codebooks,
+            audio_vocab_size,
+            audio_mask_id,
+            token_id_min: 0,
+            token_id_max: audio_mask_id.saturating_sub(1),
+            sample_rate,
+            hop_length,
+            frame_rate,
+        })
+    }
+}
+
+pub(crate) fn classify_gguf_weight_dtype<I>(types: I) -> ModelWeightDType
+where
+    I: IntoIterator<Item = GgmlDType>,
+{
+    let mut f32 = 0usize;
+    let mut f16 = 0usize;
+    let mut bf16 = 0usize;
+    let mut quantized = 0usize;
+    for ty in types {
+        match ty {
+            GgmlDType::F32 => f32 += 1,
+            GgmlDType::F16 => f16 += 1,
+            GgmlDType::BF16 => bf16 += 1,
+            _ => quantized += 1,
+        }
+    }
+    if quantized > 0 {
+        return ModelWeightDType::Quantized;
+    }
+    if bf16 >= f16 && bf16 >= f32 && bf16 > 0 {
+        ModelWeightDType::BF16
+    } else if f16 >= f32 && f16 > 0 {
+        ModelWeightDType::F16
+    } else {
+        ModelWeightDType::F32
+    }
+}
+
+fn native_weight_dtype_from_safetensors(path: &Path) -> Result<ModelWeightDType> {
+    let parsed = read_safetensor_header_map(path)?;
+    let mut f32 = 0usize;
+    let mut f16 = 0usize;
+    let mut bf16 = 0usize;
+    for (key, value) in parsed {
+        if key == "__metadata__" {
+            continue;
+        }
+        let Some(dtype) = value.get("dtype").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        match dtype {
+            "F32" => f32 += 1,
+            "F16" => f16 += 1,
+            "BF16" => bf16 += 1,
+            _ => {}
+        }
+    }
+    if bf16 >= f16 && bf16 >= f32 && bf16 > 0 {
+        Ok(ModelWeightDType::BF16)
+    } else if f16 >= f32 && f16 > 0 {
+        Ok(ModelWeightDType::F16)
+    } else {
+        Ok(ModelWeightDType::F32)
+    }
+}
+
+fn resolve_gguf_candidate(model_root: &Path, patterns: &[&str], fallback: &str) -> Result<PathBuf> {
+    let entries: Vec<PathBuf> = fs::read_dir(model_root)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.is_file())
+        .collect();
+    for pattern in patterns {
+        let needle = pattern.trim_matches('*').to_ascii_lowercase();
+        if let Some(path) = entries.iter().find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.to_ascii_lowercase().contains(&needle))
+                .unwrap_or(false)
+        }) {
+            return Ok(path.clone());
+        }
+    }
+    let fallback_path = model_root.join(fallback);
+    if fallback_path.is_file() {
+        return Ok(fallback_path);
+    }
+    Err(OmniVoiceError::MissingArtifact { path: fallback_path })
+}
+
+fn read_gguf_content(path: &Path) -> Result<gguf_file::Content> {
+    let mut file = std::fs::File::open(path)?;
+    Ok(gguf_file::Content::read(&mut file)?)
+}
+
+pub(crate) fn gguf_u32(content: &gguf_file::Content, key: &str) -> Result<u32> {
+    let value = content.metadata.get(key).ok_or_else(|| {
+        OmniVoiceError::InvalidData(format!("missing GGUF metadata key `{key}`"))
+    })?;
+    gguf_value_u32(value, key)
+}
+
+pub(crate) fn gguf_f64(content: &gguf_file::Content, key: &str) -> Result<f64> {
+    let value = content.metadata.get(key).ok_or_else(|| {
+        OmniVoiceError::InvalidData(format!("missing GGUF metadata key `{key}`"))
+    })?;
+    match value {
+        gguf_file::Value::F32(v) => Ok((*v).into()),
+        gguf_file::Value::F64(v) => Ok(*v),
+        other => Err(OmniVoiceError::InvalidData(format!(
+            "GGUF metadata `{key}` is not a float: {other:?}"
+        ))),
+    }
+}
+
+pub(crate) fn gguf_array_usize(content: &gguf_file::Content, key: &str) -> Result<Vec<usize>> {
+    let value = content.metadata.get(key).ok_or_else(|| {
+        OmniVoiceError::InvalidData(format!("missing GGUF metadata key `{key}`"))
+    })?;
+    let items = value.to_vec().map_err(|_| {
+        OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` is not an array"))
+    })?;
+    items
+        .iter()
+        .map(|item| {
+            usize::try_from(gguf_value_u32(item, key)?).map_err(|_| {
+                OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` exceeds usize"))
+            })
+        })
+        .collect()
+}
+
+fn gguf_value_u32(value: &gguf_file::Value, key: &str) -> Result<u32> {
+    match value {
+        gguf_file::Value::U8(v) => Ok((*v).into()),
+        gguf_file::Value::I8(v) if *v >= 0 => Ok(*v as u32),
+        gguf_file::Value::U16(v) => Ok((*v).into()),
+        gguf_file::Value::I16(v) if *v >= 0 => Ok(*v as u32),
+        gguf_file::Value::U32(v) => Ok(*v),
+        gguf_file::Value::I32(v) if *v >= 0 => Ok(*v as u32),
+        gguf_file::Value::U64(v) => u32::try_from(*v)
+            .map_err(|_| OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` exceeds u32"))),
+        gguf_file::Value::I64(v) if *v >= 0 => u32::try_from(*v).map_err(|_| {
+            OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` exceeds u32"))
+        }),
+        other => Err(OmniVoiceError::InvalidData(format!(
+            "GGUF metadata `{key}` is not a non-negative integer: {other:?}"
+        ))),
     }
 }
 
@@ -1311,7 +1612,15 @@ fn inspect_safetensor_prefixes(
 }
 
 fn read_safetensor_names(path: impl AsRef<Path>) -> Result<Vec<String>> {
-    let path = path.as_ref();
+    let parsed = read_safetensor_header_map(path.as_ref())?;
+    Ok(parsed
+        .keys()
+        .filter(|key| *key != "__metadata__")
+        .cloned()
+        .collect())
+}
+
+fn read_safetensor_header_map(path: &Path) -> Result<serde_json::Map<String, serde_json::Value>> {
     let mut file = fs::File::open(path)?;
     let file_len = file.metadata()?.len();
     if file_len < 8 {
@@ -1363,14 +1672,7 @@ fn read_safetensor_names(path: impl AsRef<Path>) -> Result<Vec<String>> {
             path.display()
         ))
     })?;
-    let parsed: serde_json::Map<String, serde_json::Value> = serde_json::from_str(header)?;
-    let mut names = Vec::with_capacity(parsed.len());
-    for key in parsed.keys() {
-        if key != "__metadata__" {
-            names.push(key.clone());
-        }
-    }
-    Ok(names)
+    Ok(serde_json::from_str(header)?)
 }
 
 fn validate_generator_prefixes(
@@ -1601,5 +1903,34 @@ fn resolve_generation_mode(mode: Option<&str>, ref_audio_length: usize) -> Resul
         Ok(GenerationMode::Clone)
     } else {
         Ok(GenerationMode::Auto)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_gguf_weight_dtype, GgmlDType, ModelWeightDType};
+
+    #[test]
+    fn gguf_weight_dtype_follows_unquantized_weights() {
+        assert_eq!(
+            classify_gguf_weight_dtype([GgmlDType::BF16, GgmlDType::BF16, GgmlDType::F32]),
+            ModelWeightDType::BF16
+        );
+        assert_eq!(
+            classify_gguf_weight_dtype([GgmlDType::F16, GgmlDType::F16]),
+            ModelWeightDType::F16
+        );
+        assert_eq!(
+            classify_gguf_weight_dtype([GgmlDType::F32, GgmlDType::F32]),
+            ModelWeightDType::F32
+        );
+    }
+
+    #[test]
+    fn quantized_gguf_keeps_quantized_weight_dtype() {
+        assert_eq!(
+            classify_gguf_weight_dtype([GgmlDType::Q4K, GgmlDType::Q4K, GgmlDType::F32]),
+            ModelWeightDType::Quantized
+        );
     }
 }

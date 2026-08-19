@@ -1099,55 +1099,84 @@ fn run_artifacts_validate(
     let model_dir = resolve_model_root(&model_dir)?;
     let runtime = RuntimeArtifacts::from_model_root(&model_dir)?;
     println!("phase_marker={}", workspace_phase_marker());
-    println!("runtime_manifest={}", runtime.manifest_path().display());
+    println!(
+        "runtime_manifest={}",
+        runtime
+            .manifest_path()
+            .map_or_else(|| "<gguf-bundle>".to_string(), |path| path.display().to_string())
+    );
     println!("model_root={}", runtime.model_root().display());
-    println!(
-        "generator_config={}",
-        runtime.generator().config_path().display()
-    );
-    println!(
-        "generator_weights={}",
-        runtime.generator().weights_path().display()
-    );
-    println!(
-        "generator_prefixes={}",
-        join_paths(runtime.generator().observed_prefixes())
-    );
-    println!(
-        "text_tokenizer={}",
-        runtime.text_tokenizer().tokenizer_path().display()
-    );
-    println!(
-        "text_tokenizer_config={}",
-        runtime.text_tokenizer().tokenizer_config_path().display()
-    );
-    println!(
-        "chat_template={}",
-        runtime
-            .text_tokenizer()
-            .chat_template_path()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "<missing-optional>".to_string())
-    );
-    println!(
-        "audio_tokenizer_config={}",
-        runtime.audio_tokenizer().config_path().display()
-    );
-    println!(
-        "audio_tokenizer_weights={}",
-        runtime.audio_tokenizer().weights_path().display()
-    );
-    println!(
-        "audio_tokenizer_preprocessor={}",
-        runtime
-            .audio_tokenizer()
-            .preprocessor_config_path()
-            .display()
-    );
-    println!(
-        "audio_tokenizer_prefixes={}",
-        join_paths(runtime.audio_tokenizer().observed_prefixes())
-    );
+    if let Some(gguf) = runtime.gguf_bundle() {
+        println!("generator_config=<gguf-metadata>");
+        println!("generator_weights={}", gguf.generator_path().display());
+        println!(
+            "audio_tokenizer_weights={}",
+            gguf.audio_tokenizer_path().display()
+        );
+    } else {
+        println!(
+            "generator_config={}",
+            runtime.generator()?.config_path().display()
+        );
+        println!(
+            "generator_weights={}",
+            runtime.generator()?.weights_path().display()
+        );
+    }
+    if runtime.is_gguf_bundle() {
+        println!("generator_prefixes=<gguf-quantized>");
+        println!("text_tokenizer=<gguf-metadata>");
+        println!("text_tokenizer_config=<gguf-metadata>");
+        println!("chat_template=<gguf-metadata>");
+        println!("audio_tokenizer_config=<gguf-metadata>");
+        println!(
+            "audio_tokenizer_weights={}",
+            runtime
+                .gguf_bundle()
+                .expect("checked GGUF format above")
+                .audio_tokenizer_path()
+                .display()
+        );
+        println!("audio_tokenizer_preprocessor=<gguf-metadata>");
+        println!("audio_tokenizer_prefixes=<gguf-quantized>");
+    } else {
+        println!(
+            "generator_prefixes={}",
+            join_paths(runtime.generator()?.observed_prefixes())
+        );
+        println!(
+            "text_tokenizer={}",
+            runtime.text_tokenizer()?.tokenizer_path().display()
+        );
+        println!(
+            "text_tokenizer_config={}",
+            runtime.text_tokenizer()?.tokenizer_config_path().display()
+        );
+        println!(
+            "chat_template={}",
+            runtime
+                .text_tokenizer()?
+                .chat_template_path()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<missing-optional>".to_string())
+        );
+        println!(
+            "audio_tokenizer_config={}",
+            runtime.audio_tokenizer()?.config_path().display()
+        );
+        println!(
+            "audio_tokenizer_weights={}",
+            runtime.audio_tokenizer()?.weights_path().display()
+        );
+        println!(
+            "audio_tokenizer_preprocessor={}",
+            runtime.audio_tokenizer()?.preprocessor_config_path().display()
+        );
+        println!(
+            "audio_tokenizer_prefixes={}",
+            join_paths(runtime.audio_tokenizer()?.observed_prefixes())
+        );
+    }
     println!(
         "contracts=codebooks:{} vocab:{} mask:{} token_range:{}..={} sample_rate:{} hop_length:{} frame_rate:{}",
         runtime.contracts().num_audio_codebooks,
@@ -1242,6 +1271,10 @@ fn run_infer(
     println!("model_root={}", options.model_root().display());
     println!("device={:?}", options.device());
     println!("dtype={:?}", options.dtype());
+    println!(
+        "weight_dtype={:?}",
+        RuntimeArtifacts::from_model_root(options.model_root())?.native_weight_dtype()?
+    );
     println!(
         "resolved_device={}",
         describe_runtime_device(pipeline.stage0().device())

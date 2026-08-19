@@ -77,8 +77,7 @@ cargo run -p omnivoice-cli -- infer `
   --text "This is a CPU verification run." `
   --language en `
   --output out\cpu.wav `
-  --device cpu `
-  --dtype f32
+  --device cpu
 ```
 
 ### CUDA inference
@@ -89,8 +88,7 @@ cargo run -p omnivoice-cli --features cuda -- infer `
   --text "This is a CUDA verification run." `
   --language en `
   --output out\cuda.wav `
-  --device cuda:0 `
-  --dtype f32
+  --device cuda:0
 ```
 
 ### Metal inference
@@ -101,8 +99,7 @@ cargo run -p omnivoice-cli --features metal -- infer `
   --text "This is a Metal verification run." `
   --language en `
   --output out\metal.wav `
-  --device metal `
-  --dtype f32
+  --device metal
 ```
 
 ## Test Suites

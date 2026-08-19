@@ -1,10 +1,10 @@
 use candle_core::{IndexOp, Result as CandleResult, Tensor};
-use candle_nn::{
-    Conv1d, Conv1dConfig, ConvTranspose1d, ConvTranspose1dConfig, Embedding, Linear, Module,
-    VarBuilder,
-};
+use candle_nn::Module;
 
 use crate::{
+    codec_layers::{
+        CodecConv1d, CodecConvTranspose1d, CodecEmbedding, CodecLinear, CodecWeightSource,
+    },
     contracts::I64Tensor2,
     error::{OmniVoiceError, Result},
 };
@@ -33,26 +33,27 @@ pub struct Stage1DecodeTrace {
 #[derive(Debug)]
 pub struct Stage1Model {
     quantizer: ResidualVectorQuantizer,
-    fc2: Linear,
+    fc2: CodecLinear,
     decoder: AcousticDecoder,
 }
 
 impl Stage1Model {
-    pub fn load(vb: VarBuilder, config: &Stage1ModelConfig) -> Result<Self> {
+    pub fn load(ws: &CodecWeightSource, config: &Stage1ModelConfig) -> Result<Self> {
         let quantizer = ResidualVectorQuantizer::load(
-            vb.pp("quantizer"),
+            &ws.pp("quantizer"),
             &config.active_quantizer_indices,
             config.codebook_size,
             config.codebook_dim,
             config.quantizer_output_dim,
         )?;
-        let fc2_weight = vb.get(
-            (config.decoder_input_dim, config.quantizer_output_dim),
+        let fc2 = ws.load_linear_named(
+            config.quantizer_output_dim,
+            config.decoder_input_dim,
+            true,
             "fc2.weight",
+            "fc2.bias",
         )?;
-        let fc2_bias = vb.get(config.decoder_input_dim, "fc2.bias")?;
-        let fc2 = Linear::new(fc2_weight, Some(fc2_bias));
-        let decoder = AcousticDecoder::load(vb.pp("acoustic_decoder"), config)?;
+        let decoder = AcousticDecoder::load(&ws.pp("acoustic_decoder"), config)?;
         Ok(Self {
             quantizer,
             fc2,
@@ -126,27 +127,20 @@ impl Stage1Model {
 
 #[derive(Debug)]
 struct VectorQuantizer {
-    codebook: Embedding,
-    project_out: Linear,
+    codebook: CodecEmbedding,
+    project_out: CodecLinear,
 }
 
 impl VectorQuantizer {
     fn load(
-        vb: VarBuilder,
+        ws: &CodecWeightSource,
         codebook_size: usize,
         codebook_dim: usize,
         output_dim: usize,
     ) -> Result<Self> {
-        let codebook = Embedding::new(
-            vb.get((codebook_size, codebook_dim), "codebook.embed")?,
-            codebook_dim,
-        );
-        let project_out_weight = vb.get((output_dim, codebook_dim), "project_out.weight")?;
-        let project_out_bias = vb.get(output_dim, "project_out.bias")?;
-        let project_out = Linear::new(project_out_weight, Some(project_out_bias));
         Ok(Self {
-            codebook,
-            project_out,
+            codebook: ws.load_embedding_at(codebook_size, codebook_dim, "codebook.embed")?,
+            project_out: ws.pp("project_out").load_linear(codebook_dim, output_dim, true)?,
         })
     }
 
@@ -169,7 +163,7 @@ struct ResidualVectorQuantizer {
 
 impl ResidualVectorQuantizer {
     fn load(
-        vb: VarBuilder,
+        ws: &CodecWeightSource,
         active_quantizer_indices: &[usize],
         codebook_size: usize,
         codebook_dim: usize,
@@ -179,7 +173,7 @@ impl ResidualVectorQuantizer {
             .iter()
             .map(|index| {
                 VectorQuantizer::load(
-                    vb.pp("quantizers").pp(*index),
+                    &ws.pp("quantizers").pp(*index),
                     codebook_size,
                     codebook_dim,
                     output_dim,
@@ -209,10 +203,9 @@ impl ResidualVectorQuantizer {
             });
         }
 
-        let project_out = projected_sum.ok_or_else(|| {
+        projected_sum.ok_or_else(|| {
             OmniVoiceError::InvalidData("stage1 quantizer set must not be empty".to_string())
-        })?;
-        Ok(project_out)
+        })
     }
 
     fn decode_codes_with_trace(&self, codes: &Tensor) -> Result<(Tensor, Tensor)> {
@@ -249,8 +242,11 @@ struct Snake1d {
 }
 
 impl Snake1d {
-    fn load(channels: usize, vb: VarBuilder) -> Result<Self> {
-        let alpha = vb.get((1, channels, 1), "alpha")?;
+    fn load(channels: usize, ws: &CodecWeightSource) -> Result<Self> {
+        let alpha = match ws.get((1, channels, 1), "alpha") {
+            Ok(alpha) => alpha,
+            Err(_) => ws.get((channels, 1), "alpha")?.reshape((1, channels, 1))?,
+        };
         Ok(Self { alpha })
     }
 }
@@ -268,29 +264,26 @@ impl Module for Snake1d {
 #[derive(Debug, Clone)]
 struct ResidualUnit {
     snake1: Snake1d,
-    conv1: Conv1d,
+    conv1: CodecConv1d,
     snake2: Snake1d,
-    conv2: Conv1d,
+    conv2: CodecConv1d,
 }
 
 impl ResidualUnit {
-    fn load(dim: usize, dilation: usize, vb: VarBuilder) -> Result<Self> {
-        let snake1 = Snake1d::load(dim, vb.pp("snake1"))?;
-        let conv1 = load_conv1d(
-            dim,
-            dim,
-            7,
-            dilation,
-            ((7 - 1) * dilation) / 2,
-            vb.pp("conv1"),
-        )?;
-        let snake2 = Snake1d::load(dim, vb.pp("snake2"))?;
-        let conv2 = load_conv1d(dim, dim, 1, 1, 0, vb.pp("conv2"))?;
+    fn load(dim: usize, dilation: usize, ws: &CodecWeightSource) -> Result<Self> {
         Ok(Self {
-            snake1,
-            conv1,
-            snake2,
-            conv2,
+            snake1: Snake1d::load(dim, &ws.pp("snake1"))?,
+            conv1: ws.pp("conv1").load_conv1d_flexible(
+                dim,
+                dim,
+                7,
+                dilation,
+                ((7 - 1) * dilation) / 2,
+            )?,
+            snake2: Snake1d::load(dim, &ws.pp("snake2"))?,
+            conv2: ws
+                .pp("conv2")
+                .load_conv1d_flexible(dim, dim, 1, 1, 0)?,
         })
     }
 }
@@ -314,33 +307,27 @@ impl Module for ResidualUnit {
 #[derive(Debug, Clone)]
 struct DecoderBlock {
     snake1: Snake1d,
-    conv_t1: ConvTranspose1d,
+    conv_t1: CodecConvTranspose1d,
     res_unit1: ResidualUnit,
     res_unit2: ResidualUnit,
     res_unit3: ResidualUnit,
 }
 
 impl DecoderBlock {
-    fn load(in_dim: usize, out_dim: usize, stride: usize, vb: VarBuilder) -> Result<Self> {
-        let snake1 = Snake1d::load(in_dim, vb.pp("snake1"))?;
-        let conv_t1 = load_conv_transpose1d(
-            in_dim,
-            out_dim,
-            2 * stride,
-            stride,
-            stride.div_ceil(2),
-            stride % 2,
-            vb.pp("conv_t1"),
-        )?;
-        let res_unit1 = ResidualUnit::load(out_dim, 1, vb.pp("res_unit1"))?;
-        let res_unit2 = ResidualUnit::load(out_dim, 3, vb.pp("res_unit2"))?;
-        let res_unit3 = ResidualUnit::load(out_dim, 9, vb.pp("res_unit3"))?;
+    fn load(in_dim: usize, out_dim: usize, stride: usize, ws: &CodecWeightSource) -> Result<Self> {
         Ok(Self {
-            snake1,
-            conv_t1,
-            res_unit1,
-            res_unit2,
-            res_unit3,
+            snake1: Snake1d::load(in_dim, &ws.pp("snake1"))?,
+            conv_t1: ws.pp("conv_t1").load_conv_transpose1d(
+                in_dim,
+                out_dim,
+                2 * stride,
+                stride,
+                stride.div_ceil(2),
+                stride % 2,
+            )?,
+            res_unit1: ResidualUnit::load(out_dim, 1, &ws.pp("res_unit1"))?,
+            res_unit2: ResidualUnit::load(out_dim, 3, &ws.pp("res_unit2"))?,
+            res_unit3: ResidualUnit::load(out_dim, 9, &ws.pp("res_unit3"))?,
         })
     }
 }
@@ -357,37 +344,38 @@ impl Module for DecoderBlock {
 
 #[derive(Debug, Clone)]
 struct AcousticDecoder {
-    conv1: Conv1d,
+    conv1: CodecConv1d,
     blocks: Vec<DecoderBlock>,
     snake1: Snake1d,
-    conv2: Conv1d,
+    conv2: CodecConv1d,
 }
 
 impl AcousticDecoder {
-    fn load(vb: VarBuilder, config: &Stage1ModelConfig) -> Result<Self> {
-        let conv1 = load_conv1d(
+    fn load(ws: &CodecWeightSource, config: &Stage1ModelConfig) -> Result<Self> {
+        let conv1 = ws.pp("conv1").load_conv1d_flexible(
             config.decoder_input_dim,
             config.decoder_hidden_dim,
             7,
             1,
             3,
-            vb.pp("conv1"),
         )?;
         let mut channels = config.decoder_hidden_dim;
         let mut blocks = Vec::with_capacity(config.decoder_strides.len());
         for (index, stride) in config.decoder_strides.iter().enumerate() {
-            let block =
-                DecoderBlock::load(channels, channels / 2, *stride, vb.pp("block").pp(index))?;
+            let block = DecoderBlock::load(
+                channels,
+                channels / 2,
+                *stride,
+                &ws.pp("block").pp(index),
+            )?;
             channels /= 2;
             blocks.push(block);
         }
-        let snake1 = Snake1d::load(channels, vb.pp("snake1"))?;
-        let conv2 = load_conv1d(channels, 1, 7, 1, 3, vb.pp("conv2"))?;
         Ok(Self {
             conv1,
             blocks,
-            snake1,
-            conv2,
+            snake1: Snake1d::load(channels, &ws.pp("snake1"))?,
+            conv2: ws.pp("conv2").load_conv1d_flexible(channels, 1, 7, 1, 3)?,
         })
     }
 
@@ -411,48 +399,4 @@ impl Module for AcousticDecoder {
         }
         xs.apply(&self.snake1)?.apply(&self.conv2)
     }
-}
-
-fn load_conv1d(
-    in_channels: usize,
-    out_channels: usize,
-    kernel_size: usize,
-    dilation: usize,
-    padding: usize,
-    vb: VarBuilder,
-) -> Result<Conv1d> {
-    let config = Conv1dConfig {
-        dilation,
-        padding,
-        ..Default::default()
-    };
-    let weight = vb.get(
-        (out_channels, in_channels / config.groups, kernel_size),
-        "weight",
-    )?;
-    let bias = vb.get(out_channels, "bias")?;
-    Ok(Conv1d::new(weight, Some(bias), config))
-}
-
-fn load_conv_transpose1d(
-    in_channels: usize,
-    out_channels: usize,
-    kernel_size: usize,
-    stride: usize,
-    padding: usize,
-    output_padding: usize,
-    vb: VarBuilder,
-) -> Result<ConvTranspose1d> {
-    let config = ConvTranspose1dConfig {
-        stride,
-        padding,
-        output_padding,
-        ..Default::default()
-    };
-    let weight = vb.get(
-        (in_channels, out_channels / config.groups, kernel_size),
-        "weight",
-    )?;
-    let bias = vb.get(out_channels, "bias")?;
-    Ok(ConvTranspose1d::new(weight, Some(bias), config))
 }

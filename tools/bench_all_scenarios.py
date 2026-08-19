@@ -351,8 +351,11 @@ def run_rust(
         "test",
         "-p",
         "omnivoice-infer",
-        "--features",
-        "cuda",
+        *(
+            ["--features", "cuda"]
+            if device.startswith("cuda")
+            else []
+        ),
         *profile,
         "--test",
         "_bench_scenarios",
@@ -459,6 +462,7 @@ fn bench_listening_scenarios() {
     let model = PathBuf::from(&cfg.model);
     let device = parse_device(&cfg.device);
     let dtype = match cfg.dtype.to_ascii_lowercase().as_str() {
+        "auto" => DTypeSpec::Auto,
         "f32" | "float32" => DTypeSpec::F32,
         "f16" | "float16" => DTypeSpec::F16,
         "bf16" | "bfloat16" => DTypeSpec::BF16,
@@ -784,7 +788,7 @@ def main() -> int:
     if not args.skip_rust:
         for dev in devices:
             is_cuda = dev.startswith("cuda")
-            for dt in dtypes if is_cuda else ["f32"]:
+            for dt in dtypes if is_cuda else dtypes:
                 key = f"rust_{'cuda' if is_cuda else 'cpu'}_{dt}"
                 results["runs"][key] = run_rust(
                     model_dir=model,

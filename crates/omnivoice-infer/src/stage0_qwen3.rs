@@ -3,7 +3,9 @@ use std::{
     sync::Arc,
 };
 
-use candle_core::{DType, IndexOp, Module, Tensor};
+use candle_core::{DType, Module, Tensor};
+#[cfg(feature = "cuda")]
+use candle_core::IndexOp;
 use candle_nn::{Activation, Embedding, VarBuilder};
 use candle_transformers::models::with_tracing::{linear_b, Linear, RmsNorm};
 

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use candle_core::{DType, Device};
 
 use crate::{
-    artifacts::RuntimeArtifacts,
+    artifacts::{ModelWeightDType, RuntimeArtifactFormat, RuntimeArtifacts},
     error::{OmniVoiceError, Result},
 };
 
@@ -108,6 +108,34 @@ impl DTypeSpec {
     }
 }
 
+pub(crate) fn activation_dtype_for_weights(
+    format: RuntimeArtifactFormat,
+    weights: ModelWeightDType,
+    device: &Device,
+) -> DType {
+    activation_dtype(format, weights, device.is_cuda() || device.is_metal())
+}
+
+fn activation_dtype(
+    format: RuntimeArtifactFormat,
+    weights: ModelWeightDType,
+    on_gpu: bool,
+) -> DType {
+    match format {
+        RuntimeArtifactFormat::SafetensorsManifest if !on_gpu => DType::F32,
+        RuntimeArtifactFormat::GgufBundle if !on_gpu => DType::F32,
+        RuntimeArtifactFormat::SafetensorsManifest => match weights {
+            ModelWeightDType::BF16 => DType::BF16,
+            ModelWeightDType::F16 | ModelWeightDType::F32 | ModelWeightDType::Quantized => {
+                DType::F16
+            }
+        },
+        // Candle QMatMul QTensor kernels accept f32/f16 activations only, not bf16.
+        // On GPU use f16; CPU f16 is a scalar (no rayon) path and is much slower.
+        RuntimeArtifactFormat::GgufBundle => DType::F16,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeOptions {
     model_root: PathBuf,
@@ -167,6 +195,26 @@ impl RuntimeOptions {
 
     pub fn resolve_dtype_for_runtime_device(&self, device: &Device) -> DType {
         self.dtype.resolve_for_runtime_device(device)
+    }
+
+    pub fn resolve_stage0_dtype(
+        &self,
+        device: &Device,
+        runtime: &RuntimeArtifacts,
+    ) -> Result<DType> {
+        match self.dtype {
+            DTypeSpec::Auto => {
+                warn_if_cpu_quantized_without_simd(device, runtime);
+                Ok(activation_dtype_for_weights(
+                    runtime.format(),
+                    runtime.native_weight_dtype()?,
+                    device,
+                ))
+            }
+            DTypeSpec::F32 | DTypeSpec::F16 | DTypeSpec::BF16 => {
+                Ok(self.dtype.resolve_for_runtime_device(device))
+            }
+        }
     }
 
     pub fn resolve_audio_dtype_for_runtime_device(&self, _device: &Device) -> DType {
@@ -237,6 +285,25 @@ fn resolve_cuda_device(index: usize) -> Result<Device> {
     )))
 }
 
+fn warn_if_cpu_quantized_without_simd(device: &Device, runtime: &RuntimeArtifacts) {
+    let _ = (device, runtime);
+    #[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
+    if device.is_cpu()
+        && matches!(
+            runtime.native_weight_dtype(),
+            Ok(ModelWeightDType::Quantized)
+        )
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            eprintln!(
+                "warning: GGUF Q4 CPU kernels compiled without AVX2; \
+                 rebuild with -C target-cpu=native (see .cargo/config.toml)"
+            );
+        });
+    }
+}
+
 #[cfg(all(feature = "metal", target_os = "macos"))]
 fn resolve_metal_device() -> Result<Device> {
     Ok(Device::new_metal(0)?)
@@ -251,7 +318,9 @@ fn resolve_metal_device() -> Result<Device> {
 
 #[cfg(test)]
 mod tests {
-    use super::DeviceSpec;
+    use super::{activation_dtype, DeviceSpec};
+    use crate::artifacts::{ModelWeightDType, RuntimeArtifactFormat};
+    use candle_core::DType;
 
     #[test]
     fn device_spec_accepts_official_aliases() {
@@ -265,5 +334,85 @@ mod tests {
         assert_eq!(DeviceSpec::parse("cpu").unwrap(), DeviceSpec::Cpu);
         assert_eq!(DeviceSpec::parse("cuda:3").unwrap(), DeviceSpec::Cuda(3));
         assert_eq!(DeviceSpec::parse("metal").unwrap(), DeviceSpec::Metal);
+    }
+
+    #[test]
+    fn auto_activations_are_f32_on_cpu() {
+        assert_eq!(
+            activation_dtype(
+                RuntimeArtifactFormat::SafetensorsManifest,
+                ModelWeightDType::F16,
+                false,
+            ),
+            DType::F32
+        );
+        assert_eq!(
+            activation_dtype(
+                RuntimeArtifactFormat::SafetensorsManifest,
+                ModelWeightDType::BF16,
+                false,
+            ),
+            DType::F32
+        );
+        assert_eq!(
+            activation_dtype(
+                RuntimeArtifactFormat::SafetensorsManifest,
+                ModelWeightDType::F32,
+                false,
+            ),
+            DType::F32
+        );
+        assert_eq!(
+            activation_dtype(
+                RuntimeArtifactFormat::GgufBundle,
+                ModelWeightDType::Quantized,
+                false,
+            ),
+            DType::F32
+        );
+    }
+
+    #[test]
+    fn auto_activations_use_f16_or_bf16_elsewhere() {
+        assert_eq!(
+            activation_dtype(
+                RuntimeArtifactFormat::GgufBundle,
+                ModelWeightDType::Quantized,
+                false,
+            ),
+            DType::F32
+        );
+        assert_eq!(
+            activation_dtype(
+                RuntimeArtifactFormat::GgufBundle,
+                ModelWeightDType::BF16,
+                true,
+            ),
+            DType::F16
+        );
+        assert_eq!(
+            activation_dtype(
+                RuntimeArtifactFormat::SafetensorsManifest,
+                ModelWeightDType::BF16,
+                true,
+            ),
+            DType::BF16
+        );
+        assert_eq!(
+            activation_dtype(
+                RuntimeArtifactFormat::SafetensorsManifest,
+                ModelWeightDType::F16,
+                true,
+            ),
+            DType::F16
+        );
+        assert_eq!(
+            activation_dtype(
+                RuntimeArtifactFormat::SafetensorsManifest,
+                ModelWeightDType::F32,
+                true,
+            ),
+            DType::F16
+        );
     }
 }

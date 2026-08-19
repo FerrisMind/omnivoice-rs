@@ -36,7 +36,7 @@ pub struct Phase3Pipeline {
     runtime_artifacts: RuntimeArtifacts,
     frontend: Frontend,
     asr: Mutex<Option<(String, WhisperAsr)>>,
-    audio_tokenizer: AudioTokenizerRuntimePlan,
+    audio_tokenizer: Option<AudioTokenizerRuntimePlan>,
     stage0: Stage0RuntimePlan,
     stage1: Stage1RuntimePlan,
 }
@@ -46,11 +46,11 @@ impl Phase3Pipeline {
         let runtime_artifacts = options.load_runtime_artifacts()?;
         let frontend = Frontend::from_runtime_artifacts(&runtime_artifacts)?;
         let shared_device = options.resolve_device()?;
-        let audio_tokenizer = AudioTokenizerRuntimePlan::from_runtime_artifacts_with_device(
+        let audio_tokenizer = Some(AudioTokenizerRuntimePlan::from_runtime_artifacts_with_device(
             options.clone(),
             &runtime_artifacts,
             shared_device.clone(),
-        )?;
+        )?);
         let stage0 = Stage0RuntimePlan::from_runtime_artifacts_with_device(
             options.clone(),
             &runtime_artifacts,
@@ -95,6 +95,14 @@ impl Phase3Pipeline {
     pub fn unload_asr_model(&self) {
         let mut guard = self.asr.lock().unwrap_or_else(|poison| poison.into_inner());
         *guard = None;
+    }
+
+    fn audio_tokenizer(&self) -> Result<&AudioTokenizerRuntimePlan> {
+        self.audio_tokenizer.as_ref().ok_or_else(|| {
+            OmniVoiceError::Unsupported(
+                "reference-audio encoding is not available for this runtime".to_string(),
+            )
+        })
     }
 
     pub fn transcribe(
@@ -159,7 +167,7 @@ impl Phase3Pipeline {
                 }
             }
         };
-        let tokens = self.audio_tokenizer.encode_waveform(
+        let tokens = self.audio_tokenizer()?.encode_waveform(
             &prepared.waveform,
             self.runtime_artifacts.contracts().sample_rate,
         )?;
@@ -605,7 +613,7 @@ impl Phase3Pipeline {
                 }
             }
         };
-        let ref_audio_tokens = self.audio_tokenizer.encode_waveform_device(
+        let ref_audio_tokens = self.audio_tokenizer()?.encode_waveform_device(
             &prepared.waveform,
             self.runtime_artifacts.contracts().sample_rate,
         )?;

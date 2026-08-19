@@ -53,7 +53,6 @@ cargo run -p omnivoice-cli --features cuda -- infer `
   --language en `
   --output artifacts\demo.wav `
   --device cuda:0 `
-  --dtype f32 `
   --seed 1234
 ```
 

@@ -1,9 +1,11 @@
 use candle_core::{IndexOp, Module, Tensor};
-use candle_nn::{group_norm, Conv1d, Conv1dConfig, GroupNorm, LayerNorm, Linear, VarBuilder};
+use candle_nn::{GroupNorm, LayerNorm};
 
 use crate::{
-    audio_tokenizer::{load_linear, parse_activation, AudioTokenizerModelConfig},
+    audio_tokenizer::parse_activation,
+    codec_layers::{CodecConv1d, CodecLinear, CodecWeightSource},
     error::{OmniVoiceError, Result},
+    audio_tokenizer::AudioTokenizerModelConfig,
 };
 
 #[derive(Debug)]
@@ -14,11 +16,11 @@ pub(crate) struct HubertModel {
 }
 
 impl HubertModel {
-    pub(crate) fn load(config: &AudioTokenizerModelConfig, vb: VarBuilder<'_>) -> Result<Self> {
+    pub(crate) fn load(config: &AudioTokenizerModelConfig, ws: &CodecWeightSource) -> Result<Self> {
         Ok(Self {
-            feature_extractor: HubertFeatureExtractor::load(config, vb.pp("feature_extractor"))?,
-            feature_projection: HubertFeatureProjection::load(config, vb.pp("feature_projection"))?,
-            encoder: HubertEncoder::load(config, vb.pp("encoder"))?,
+            feature_extractor: HubertFeatureExtractor::load(config, &ws.pp("feature_extractor"))?,
+            feature_projection: HubertFeatureProjection::load(config, &ws.pp("feature_projection"))?,
+            encoder: HubertEncoder::load(config, &ws.pp("encoder"))?,
         })
     }
 
@@ -53,7 +55,7 @@ struct HubertFeatureExtractor {
 }
 
 impl HubertFeatureExtractor {
-    fn load(config: &AudioTokenizerModelConfig, vb: VarBuilder<'_>) -> Result<Self> {
+    fn load(config: &AudioTokenizerModelConfig, ws: &CodecWeightSource) -> Result<Self> {
         if config.semantic_feat_extract_norm != "group" {
             return Err(OmniVoiceError::Unsupported(format!(
                 "unsupported Hubert feature extractor norm {}",
@@ -68,22 +70,22 @@ impl HubertFeatureExtractor {
                 config.semantic_conv_dim[layer_index - 1]
             };
             let out_dim = config.semantic_conv_dim[layer_index];
-            let conv = load_conv1d(
-                vb.pp("conv_layers").pp(layer_index).pp("conv"),
+            let layer_ws = ws.pp("conv_layers").pp(layer_index);
+            let conv = layer_ws.pp("conv").load_conv1d(
                 in_dim,
                 out_dim,
                 config.semantic_conv_kernel[layer_index],
                 config.semantic_conv_stride[layer_index],
                 0,
+                1,
                 config.semantic_conv_bias,
                 1,
             )?;
             let group_norm = if layer_index == 0 {
-                Some(group_norm(
-                    out_dim,
+                Some(load_group_norm(
+                    &layer_ws.pp("layer_norm"),
                     out_dim,
                     1e-5,
-                    vb.pp("conv_layers").pp(layer_index).pp("layer_norm"),
                 )?)
             } else {
                 None
@@ -108,7 +110,7 @@ impl HubertFeatureExtractor {
 
 #[derive(Debug)]
 struct HubertConvLayer {
-    conv: Conv1d,
+    conv: CodecConv1d,
     group_norm: Option<GroupNorm>,
     activation: candle_nn::Activation,
 }
@@ -126,14 +128,14 @@ impl HubertConvLayer {
 #[derive(Debug)]
 struct HubertFeatureProjection {
     layer_norm: Option<LayerNorm>,
-    projection: Linear,
+    projection: CodecLinear,
 }
 
 impl HubertFeatureProjection {
-    fn load(config: &AudioTokenizerModelConfig, vb: VarBuilder<'_>) -> Result<Self> {
+    fn load(config: &AudioTokenizerModelConfig, ws: &CodecWeightSource) -> Result<Self> {
         let layer_norm = if config.semantic_feat_proj_layer_norm {
             Some(load_layer_norm(
-                vb.pp("layer_norm"),
+                &ws.pp("layer_norm"),
                 config.semantic_conv_dim.last().copied().unwrap_or(512),
                 config.semantic_layer_norm_eps,
             )?)
@@ -142,8 +144,7 @@ impl HubertFeatureProjection {
         };
         Ok(Self {
             layer_norm,
-            projection: load_linear(
-                vb.pp("projection"),
+            projection: ws.pp("projection").load_linear(
                 config.semantic_conv_dim.last().copied().unwrap_or(512),
                 config.semantic_hidden_size,
                 true,
@@ -169,18 +170,18 @@ struct HubertEncoder {
 }
 
 impl HubertEncoder {
-    fn load(config: &AudioTokenizerModelConfig, vb: VarBuilder<'_>) -> Result<Self> {
+    fn load(config: &AudioTokenizerModelConfig, ws: &CodecWeightSource) -> Result<Self> {
         let mut layers = Vec::with_capacity(config.semantic_num_layers);
         for layer_index in 0..config.semantic_num_layers {
             layers.push(HubertEncoderLayer::load(
                 config,
-                vb.pp("layers").pp(layer_index),
+                &ws.pp("layers").pp(layer_index),
             )?);
         }
         Ok(Self {
-            pos_conv_embed: HubertPositionalConvEmbedding::load(config, vb.pp("pos_conv_embed"))?,
+            pos_conv_embed: HubertPositionalConvEmbedding::load(config, &ws.pp("pos_conv_embed"))?,
             layer_norm: load_layer_norm(
-                vb.pp("layer_norm"),
+                &ws.pp("layer_norm"),
                 config.semantic_hidden_size,
                 config.semantic_layer_norm_eps,
             )?,
@@ -205,15 +206,14 @@ impl HubertEncoder {
 
 #[derive(Debug)]
 struct HubertPositionalConvEmbedding {
-    conv: Conv1d,
+    conv: CodecConv1d,
     activation: candle_nn::Activation,
     pad_remove: usize,
 }
 
 impl HubertPositionalConvEmbedding {
-    fn load(config: &AudioTokenizerModelConfig, vb: VarBuilder<'_>) -> Result<Self> {
-        let conv = load_weight_norm_conv1d(
-            vb.pp("conv"),
+    fn load(config: &AudioTokenizerModelConfig, ws: &CodecWeightSource) -> Result<Self> {
+        let conv = ws.pp("conv").load_weight_norm_conv1d(
             config.semantic_hidden_size,
             config.semantic_hidden_size / config.semantic_num_conv_pos_groups,
             config.semantic_num_conv_pos_embeddings,
@@ -251,17 +251,17 @@ struct HubertEncoderLayer {
 }
 
 impl HubertEncoderLayer {
-    fn load(config: &AudioTokenizerModelConfig, vb: VarBuilder<'_>) -> Result<Self> {
+    fn load(config: &AudioTokenizerModelConfig, ws: &CodecWeightSource) -> Result<Self> {
         Ok(Self {
-            attention: HubertAttention::load(config, vb.pp("attention"))?,
+            attention: HubertAttention::load(config, &ws.pp("attention"))?,
             layer_norm: load_layer_norm(
-                vb.pp("layer_norm"),
+                &ws.pp("layer_norm"),
                 config.semantic_hidden_size,
                 config.semantic_layer_norm_eps,
             )?,
-            feed_forward: HubertFeedForward::load(config, vb.pp("feed_forward"))?,
+            feed_forward: HubertFeedForward::load(config, &ws.pp("feed_forward"))?,
             final_layer_norm: load_layer_norm(
-                vb.pp("final_layer_norm"),
+                &ws.pp("final_layer_norm"),
                 config.semantic_hidden_size,
                 config.semantic_layer_norm_eps,
             )?,
@@ -283,37 +283,33 @@ impl HubertEncoderLayer {
 
 #[derive(Debug)]
 struct HubertAttention {
-    q_proj: Linear,
-    k_proj: Linear,
-    v_proj: Linear,
-    out_proj: Linear,
+    q_proj: CodecLinear,
+    k_proj: CodecLinear,
+    v_proj: CodecLinear,
+    out_proj: CodecLinear,
     num_heads: usize,
     head_dim: usize,
 }
 
 impl HubertAttention {
-    fn load(config: &AudioTokenizerModelConfig, vb: VarBuilder<'_>) -> Result<Self> {
+    fn load(config: &AudioTokenizerModelConfig, ws: &CodecWeightSource) -> Result<Self> {
         Ok(Self {
-            q_proj: load_linear(
-                vb.pp("q_proj"),
+            q_proj: ws.pp("q_proj").load_linear(
                 config.semantic_hidden_size,
                 config.semantic_hidden_size,
                 true,
             )?,
-            k_proj: load_linear(
-                vb.pp("k_proj"),
+            k_proj: ws.pp("k_proj").load_linear(
                 config.semantic_hidden_size,
                 config.semantic_hidden_size,
                 true,
             )?,
-            v_proj: load_linear(
-                vb.pp("v_proj"),
+            v_proj: ws.pp("v_proj").load_linear(
                 config.semantic_hidden_size,
                 config.semantic_hidden_size,
                 true,
             )?,
-            out_proj: load_linear(
-                vb.pp("out_proj"),
+            out_proj: ws.pp("out_proj").load_linear(
                 config.semantic_hidden_size,
                 config.semantic_hidden_size,
                 true,
@@ -357,22 +353,20 @@ impl HubertAttention {
 
 #[derive(Debug)]
 struct HubertFeedForward {
-    intermediate_dense: Linear,
-    output_dense: Linear,
+    intermediate_dense: CodecLinear,
+    output_dense: CodecLinear,
     activation: candle_nn::Activation,
 }
 
 impl HubertFeedForward {
-    fn load(config: &AudioTokenizerModelConfig, vb: VarBuilder<'_>) -> Result<Self> {
+    fn load(config: &AudioTokenizerModelConfig, ws: &CodecWeightSource) -> Result<Self> {
         Ok(Self {
-            intermediate_dense: load_linear(
-                vb.pp("intermediate_dense"),
+            intermediate_dense: ws.pp("intermediate_dense").load_linear(
                 config.semantic_hidden_size,
                 config.semantic_intermediate_size,
                 true,
             )?,
-            output_dense: load_linear(
-                vb.pp("output_dense"),
+            output_dense: ws.pp("output_dense").load_linear(
                 config.semantic_intermediate_size,
                 config.semantic_hidden_size,
                 true,
@@ -392,12 +386,12 @@ impl HubertFeedForward {
 
 #[derive(Debug)]
 pub(crate) struct SemanticEncoder {
-    conv: Conv1d,
+    conv: CodecConv1d,
     conv_blocks: Vec<SemanticEncoderBlock>,
 }
 
 impl SemanticEncoder {
-    pub(crate) fn load(config: &AudioTokenizerModelConfig, vb: VarBuilder<'_>) -> Result<Self> {
+    pub(crate) fn load(config: &AudioTokenizerModelConfig, ws: &CodecWeightSource) -> Result<Self> {
         let mut conv_blocks = Vec::with_capacity(config.strides.len());
         let mut in_channels = config.semantic_hidden_size;
         for (index, stride) in config.strides.iter().copied().enumerate() {
@@ -407,18 +401,18 @@ impl SemanticEncoder {
                 in_channels,
                 out_channels,
                 stride,
-                vb.pp("conv_blocks").pp(index),
+                &ws.pp("conv_blocks").pp(index),
             )?);
             in_channels = out_channels;
         }
         Ok(Self {
-            conv: load_conv1d(
-                vb.pp("conv"),
+            conv: ws.pp("conv").load_conv1d(
                 config.semantic_hidden_size,
                 config.semantic_hidden_size,
                 config.kernel_size,
                 1,
                 config.kernel_size / 2,
+                1,
                 false,
                 1,
             )?,
@@ -438,7 +432,7 @@ impl SemanticEncoder {
 #[derive(Debug)]
 struct SemanticEncoderBlock {
     residual_units: Vec<SemanticResidualUnit>,
-    conv: Conv1d,
+    conv: CodecConv1d,
 }
 
 impl SemanticEncoderBlock {
@@ -447,7 +441,7 @@ impl SemanticEncoderBlock {
         in_channels: usize,
         out_channels: usize,
         stride: usize,
-        vb: VarBuilder<'_>,
+        ws: &CodecWeightSource,
     ) -> Result<Self> {
         let mut residual_units = Vec::with_capacity(config.block_dilations.len());
         for (index, dilation) in config.block_dilations.iter().copied().enumerate() {
@@ -456,20 +450,20 @@ impl SemanticEncoderBlock {
                 in_channels,
                 out_channels.min(in_channels),
                 dilation,
-                vb.pp("res_units").pp(index),
+                &ws.pp("res_units").pp(index),
             )?);
         }
         let kernel = if stride == 1 { 3 } else { 2 * stride };
         let padding = (kernel - 1) / 2;
         Ok(Self {
             residual_units,
-            conv: load_conv1d(
-                vb.pp("conv"),
+            conv: ws.pp("conv").load_conv1d(
                 in_channels,
                 out_channels,
                 kernel,
                 stride,
                 padding,
+                1,
                 true,
                 1,
             )?,
@@ -488,8 +482,8 @@ impl SemanticEncoderBlock {
 #[derive(Debug)]
 struct SemanticResidualUnit {
     activation: candle_nn::Activation,
-    conv1: Conv1d,
-    conv2: Conv1d,
+    conv1: CodecConv1d,
+    conv2: CodecConv1d,
 }
 
 impl SemanticResidualUnit {
@@ -498,28 +492,28 @@ impl SemanticResidualUnit {
         in_channels: usize,
         out_channels: usize,
         dilation: usize,
-        vb: VarBuilder<'_>,
+        ws: &CodecWeightSource,
     ) -> Result<Self> {
         let padding = ((config.unit_kernel_size - 1) / 2) * dilation;
         Ok(Self {
             activation: candle_nn::Activation::Elu(1.0),
-            conv1: load_conv1d(
-                vb.pp("conv1"),
+            conv1: ws.pp("conv1").load_conv1d(
                 in_channels,
                 out_channels,
                 config.unit_kernel_size,
                 1,
                 padding,
+                1,
                 false,
                 1,
             )?,
-            conv2: load_conv1d(
-                vb.pp("conv2"),
+            conv2: ws.pp("conv2").load_conv1d(
                 out_channels,
                 out_channels,
                 1,
                 1,
                 0,
+                1,
                 false,
                 1,
             )?,
@@ -536,63 +530,21 @@ impl SemanticResidualUnit {
     }
 }
 
-fn load_layer_norm(vb: VarBuilder<'_>, hidden_size: usize, eps: f64) -> Result<LayerNorm> {
+fn load_layer_norm(ws: &CodecWeightSource, hidden_size: usize, eps: f64) -> Result<LayerNorm> {
     Ok(LayerNorm::new(
-        vb.get(hidden_size, "weight")?,
-        vb.get(hidden_size, "bias")?,
+        ws.get(hidden_size, "weight")?,
+        ws.get(hidden_size, "bias")?,
         eps,
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn load_conv1d(
-    vb: VarBuilder<'_>,
-    in_channels: usize,
-    out_channels: usize,
-    kernel_size: usize,
-    stride: usize,
-    padding: usize,
-    with_bias: bool,
-    groups: usize,
-) -> Result<Conv1d> {
-    let config = Conv1dConfig {
-        stride,
-        padding,
-        groups,
-        ..Default::default()
-    };
-    let weight = vb.get((out_channels, in_channels / groups, kernel_size), "weight")?;
-    let bias = if with_bias {
-        Some(vb.get(out_channels, "bias")?)
-    } else {
-        None
-    };
-    Ok(Conv1d::new(weight, bias, config))
-}
-
-fn load_weight_norm_conv1d(
-    vb: VarBuilder<'_>,
-    out_channels: usize,
-    in_channels_per_group: usize,
-    kernel_size: usize,
-    padding: usize,
-    groups: usize,
-) -> Result<Conv1d> {
-    let g = vb.get((1, 1, kernel_size), "parametrizations.weight.original0")?;
-    let v = vb.get(
-        (out_channels, in_channels_per_group, kernel_size),
-        "parametrizations.weight.original1",
-    )?;
-    let norm = v.sqr()?.sum_keepdim((0, 1))?.sqrt()?;
-    let scale = g.broadcast_div(&norm)?;
-    let weight = v.broadcast_mul(&scale.broadcast_as(v.shape().dims())?)?;
-    Ok(Conv1d::new(
-        weight,
-        Some(vb.get(out_channels, "bias")?),
-        Conv1dConfig {
-            padding,
-            groups,
-            ..Default::default()
-        },
-    ))
+fn load_group_norm(ws: &CodecWeightSource, num_channels: usize, eps: f64) -> Result<GroupNorm> {
+    GroupNorm::new(
+        ws.get(num_channels, "weight")?,
+        ws.get(num_channels, "bias")?,
+        num_channels,
+        num_channels,
+        eps,
+    )
+    .map_err(Into::into)
 }

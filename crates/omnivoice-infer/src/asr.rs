@@ -234,9 +234,15 @@ pub fn default_local_asr_model_path() -> &'static str {
 
 pub fn default_asr_model_spec(model_root: Option<&Path>) -> String {
     if let Some(model_root) = model_root {
-        let local_path = model_root.join(DEFAULT_LOCAL_ASR_DIR_NAME);
-        if local_path.exists() {
-            return local_path.display().to_string();
+        let nested = model_root.join(DEFAULT_LOCAL_ASR_DIR_NAME);
+        if nested.is_dir() {
+            return nested.display().to_string();
+        }
+        if let Some(parent) = model_root.parent() {
+            let sibling = parent.join(DEFAULT_LOCAL_ASR_DIR_NAME);
+            if sibling.is_dir() {
+                return sibling.display().to_string();
+            }
         }
     }
     DEFAULT_HF_ASR_MODEL.to_string()
@@ -591,6 +597,22 @@ mod tests {
             DEFAULT_HF_ASR_MODEL
         );
         assert_eq!(default_asr_model_spec(None), DEFAULT_HF_ASR_MODEL);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn default_asr_model_spec_uses_sibling_whisper_next_to_tts_root() {
+        let root = unique_temp_dir("default-sibling-whisper");
+        let tts_root = root.join("OmniVoice-GGUF");
+        let whisper_root = root.join("whisper");
+        fs::create_dir_all(&tts_root).unwrap();
+        fs::create_dir_all(&whisper_root).unwrap();
+
+        assert_eq!(
+            default_asr_model_spec(Some(tts_root.as_path())),
+            whisper_root.display().to_string()
+        );
 
         fs::remove_dir_all(root).unwrap();
     }

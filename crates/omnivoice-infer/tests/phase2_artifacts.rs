@@ -21,7 +21,7 @@ fn runtime_manifest_matches_real_model_layout() {
     }
     let artifacts = RuntimeArtifacts::from_model_root(model_root()).unwrap();
 
-    assert_eq!(artifacts.manifest().version, 1);
+    assert_eq!(artifacts.manifest().unwrap().version, 1);
     assert_eq!(artifacts.contracts().num_audio_codebooks, 8);
     assert_eq!(artifacts.contracts().audio_vocab_size, 1025);
     assert_eq!(artifacts.contracts().audio_mask_id, 1024);
@@ -31,10 +31,12 @@ fn runtime_manifest_matches_real_model_layout() {
     assert_eq!(artifacts.contracts().token_id_range(), 0..=1023);
     assert!(artifacts
         .generator()
+        .unwrap()
         .weights_path()
         .ends_with("model/model.safetensors"));
     assert!(artifacts
         .audio_tokenizer()
+        .unwrap()
         .weights_path()
         .ends_with("model/audio_tokenizer/model.safetensors"));
 }
@@ -104,7 +106,7 @@ fn runtime_loader_allows_missing_optional_chat_template() {
 
     let artifacts = RuntimeArtifacts::from_model_root(temp.path()).unwrap();
 
-    assert!(artifacts.text_tokenizer().chat_template_path().is_none());
+    assert!(artifacts.text_tokenizer().unwrap().chat_template_path().is_none());
 }
 
 #[test]

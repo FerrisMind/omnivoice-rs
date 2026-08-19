@@ -24,9 +24,7 @@ cargo run -p omnivoice-cli -- infer `
   --model model `
   --text "Hello world" `
   --language en `
-  --output out\hello.wav `
-  --device cpu `
-  --dtype f32
+  --output out\hello.wav
 ```
 
 In server requests, use the `language` extension field.

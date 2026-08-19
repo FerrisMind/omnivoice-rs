@@ -19,8 +19,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL = ROOT / "artifacts" / "v2" / "model"
-DEFAULT_REF_AUDIO = ROOT / "artifacts" / "v2" / "ref.wav"
-DEFAULT_REF_TEXT = ROOT / "artifacts" / "v2" / "ref_text.txt"
+DEFAULT_REF_AUDIO = ROOT / "ref.wav"
+DEFAULT_REF_TEXT = ROOT / "ref_text.txt"
 DEFAULT_OUT = ROOT / "artifacts" / "listening_demo_rust"
 DEFAULT_CLI = ROOT / "target" / "debug" / "omnivoice-cli.exe"
 DEFAULT_SEED = 1234
@@ -291,7 +291,13 @@ def run_infer(
     }
     if proc.returncode != 0 or not out_wav.is_file():
         meta["ok"] = False
-        meta["error"] = (proc.stderr or proc.stdout or "infer failed").strip()[-500:]
+        err = (proc.stderr or proc.stdout or "").strip()
+        if not err:
+            err = (
+                f"infer failed (exit {proc.returncode}, no stdout/stderr; "
+                "check for another omnivoice-cli process or rerun with logging)"
+            )
+        meta["error"] = err[-2000:]
         return meta
     meta["ok"] = True
     meta["wav"] = str(out_wav)
@@ -401,6 +407,11 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--dtype-cpu", default="f32")
     p.add_argument("--only", default="")
+    p.add_argument(
+        "--skip-ok",
+        action="store_true",
+        help="reuse existing WAV+JSON when that scenario already succeeded",
+    )
     return p.parse_args()
 
 
@@ -458,6 +469,15 @@ def main() -> int:
         for scenario in scenarios:
             wav = device_dir / f"{scenario.id}.wav"
             meta_path = device_dir / f"{scenario.id}.json"
+            if args.skip_ok and wav.is_file() and meta_path.is_file():
+                try:
+                    existing = json.loads(meta_path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    existing = {}
+                if existing.get("ok"):
+                    print(f"[{device}] {scenario.id} skip (already ok)", flush=True)
+                    rows.append(existing)
+                    continue
             print(f"[{device}] {scenario.id} ...", flush=True)
             try:
                 meta = run_infer(
