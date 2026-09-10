@@ -4,10 +4,11 @@ use std::{
 };
 
 use candle_core::{
-    quantized::{QMatMul, QTensor},
-    quantized::GgmlDType,
+    quantized::{GgmlDType, QMatMul, QTensor},
     DType, Module, Tensor,
 };
+#[cfg(feature = "cuda")]
+use candle_core::IndexOp;
 use candle_nn::Activation;
 use candle_transformers::quantized_var_builder::VarBuilder as QuantizedVarBuilder;
 
@@ -282,17 +283,17 @@ impl QwenAttention {
             // Flash-Attention v2 expects half precision. Cast on-demand for quantized path.
             if q.device().is_cuda() {
                 let qh = if matches!(q.dtype(), DType::F16 | DType::BF16) {
-                    q
+                    q.clone()
                 } else {
                     q.to_dtype(DType::F16)?
                 };
                 let kh = if matches!(k.dtype(), DType::F16 | DType::BF16) {
-                    k
+                    k.clone()
                 } else {
                     k.to_dtype(DType::F16)?
                 };
                 let vh = if matches!(v.dtype(), DType::F16 | DType::BF16) {
-                    v
+                    v.clone()
                 } else {
                     v.to_dtype(DType::F16)?
                 };
