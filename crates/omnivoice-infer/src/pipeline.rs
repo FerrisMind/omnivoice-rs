@@ -31,6 +31,39 @@ struct MaterializedDeviceRequest {
     device_voice_clone_prompts: Vec<Option<DeviceVoiceClonePrompt>>,
 }
 
+// Stage timing (bench harness support). When OMNIVOICE_STAGE_TIME=1 each
+// measurement additionally prints `[stage] name=<n> ms=<ms>` to stderr.
+// Timings are ALWAYS accumulated so the CLI can drain them per iteration
+// via `drain_stage_timings` when `--bench-json` is set.
+static STAGE_TIME_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static STAGE_TIMINGS: Mutex<Vec<(&'static str, f64)>> = Mutex::new(Vec::new());
+
+fn stage_time_enabled() -> bool {
+    *STAGE_TIME_ENABLED.get_or_init(|| {
+        std::env::var("OMNIVOICE_STAGE_TIME").is_ok_and(|value| value == "1")
+    })
+}
+
+fn record_stage(name: &'static str, started: &std::time::Instant) {
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    if let Ok(mut timings) = STAGE_TIMINGS.lock() {
+        timings.push((name, elapsed_ms));
+    }
+    if stage_time_enabled() {
+        eprintln!("[stage] name={name} ms={elapsed_ms:.2}");
+    }
+}
+
+/// Drain accumulated (stage_name, elapsed_ms) pairs since the last drain.
+/// Used by the CLI `--bench-json` reporting so each iteration row holds only
+/// its own stages.
+pub fn drain_stage_timings() -> Vec<(&'static str, f64)> {
+    STAGE_TIMINGS
+        .lock()
+        .map(|mut timings| std::mem::take(&mut *timings))
+        .unwrap_or_default()
+}
+
 #[derive(Debug)]
 pub struct Phase3Pipeline {
     runtime_artifacts: RuntimeArtifacts,
@@ -220,15 +253,19 @@ impl Phase3Pipeline {
         request: &GenerationRequest,
     ) -> Result<Vec<GeneratedAudioResult>> {
         self.ensure_not_cancelled()?;
+        let t_stage = std::time::Instant::now();
         let materialized = self.materialize_device_request(request)?;
+        record_stage("stage_materialize", &t_stage);
         // ASR is only needed while resolving missing ref_text during materialize.
         // Drop it before stage0/stage1 so Whisper does not keep multi-GB VRAM
         // reserved for the rest of the process (hurts long-form / multi-scenario).
         self.unload_asr_model();
+        let t_stage = std::time::Instant::now();
         let task = self.frontend.build_task_with_device_prompts(
             &materialized.request,
             &materialized.device_voice_clone_prompts,
         )?;
+        record_stage("stage_frontend_build", &t_stage);
         let usage = self.estimate_generation_usage(&materialized.request, &task)?;
         let audio = self.generate_audio_from_device_task(&task)?;
 
@@ -667,17 +704,21 @@ impl Phase3Pipeline {
         if !short_idx.is_empty() {
             self.ensure_not_cancelled()?;
             let short_task = task.slice_task(&short_idx);
+            let t_stage = std::time::Instant::now();
             let short_results = self.generate_iterative_task_device(&short_task)?;
+            record_stage("stage0_generate", &t_stage);
             for (slot, generated) in short_idx.into_iter().zip(short_results) {
                 self.ensure_not_cancelled()?;
                 // Materialize device results immediately so later Metal batch runs do not retain
                 // live token tensors from earlier sub-batches.
                 let generated = GeneratedTokens::Single(tensor_to_i64_tensor2(&generated)?);
+                let t_stage = std::time::Instant::now();
                 let audio = self.stage1.decode_final(
                     &generated,
                     task.ref_rms[slot],
                     task.generation_config.postprocess_output,
                 )?;
+                record_stage("stage1_decode", &t_stage);
                 self.ensure_not_cancelled()?;
                 results[slot] = Some(audio);
             }
@@ -685,7 +726,9 @@ impl Phase3Pipeline {
         if !long_idx.is_empty() {
             self.ensure_not_cancelled()?;
             let long_task = task.slice_task(&long_idx);
+            let t_stage = std::time::Instant::now();
             let long_results = self.generate_chunked_task_device(&long_task)?;
+            record_stage("stage0_chunk_generate", &t_stage);
             for (slot, generated) in long_idx.into_iter().zip(long_results) {
                 self.ensure_not_cancelled()?;
                 let generated = GeneratedTokens::Chunked(
@@ -694,11 +737,13 @@ impl Phase3Pipeline {
                         .map(tensor_to_i64_tensor2)
                         .collect::<Result<Vec<_>>>()?,
                 );
+                let t_stage = std::time::Instant::now();
                 let audio = self.stage1.decode_final(
                     &generated,
                     task.ref_rms[slot],
                     task.generation_config.postprocess_output,
                 )?;
+                record_stage("stage1_decode", &t_stage);
                 self.ensure_not_cancelled()?;
                 results[slot] = Some(audio);
             }

@@ -27,13 +27,15 @@ mistralrs-audio = { workspace = true, optional = true }
 unicode-general-category.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-candle-core = { version = "0.11.0", features = ["metal"] }
-candle-nn = { version = "0.11.0", features = ["metal"] }
-candle-transformers = { version = "0.11.0", features = ["metal"] }
+candle-core = { path = "../../../candle-fork/candle-core", version = "0.1.0", features = ["metal"] }
+candle-nn = { path = "../../../candle-fork/candle-nn", version = "0.1.0", features = ["metal"] }
+candle-transformers = { path = "../../../candle-fork/candle-transformers", version = "0.1.0", features = ["metal"] }
 
 [features]
 default = []
 audio-helper = ["dep:mistralrs-audio"]
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "dep:candle-flash-attn"]
 metal = []
+vulkan = ["candle-core/vulkan", "candle-nn/vulkan", "candle-transformers/vulkan"]
+wgpu = ["candle-core/wgpu", "candle-nn/wgpu", "candle-transformers/wgpu"]
 phase6-tests = []

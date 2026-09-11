@@ -14,6 +14,8 @@ pub enum DeviceSpec {
     Cpu,
     Cuda(usize),
     Metal,
+    Vulkan(usize),
+    Wgpu(usize),
 }
 
 impl DeviceSpec {
@@ -34,11 +36,29 @@ impl DeviceSpec {
         if normalized == "metal" {
             return Ok(Self::Metal);
         }
+        if normalized == "vulkan" {
+            return Ok(Self::Vulkan(0));
+        }
+        if normalized == "wgpu" {
+            return Ok(Self::Wgpu(0));
+        }
         if let Some(index) = normalized.strip_prefix("cuda:") {
             let ordinal = index.parse::<usize>().map_err(|_| {
                 OmniVoiceError::InvalidRequest(format!("invalid cuda device ordinal in {value}"))
             })?;
             return Ok(Self::Cuda(ordinal));
+        }
+        if let Some(index) = normalized.strip_prefix("vulkan:") {
+            let ordinal = index.parse::<usize>().map_err(|_| {
+                OmniVoiceError::InvalidRequest(format!("invalid vulkan device ordinal in {value}"))
+            })?;
+            return Ok(Self::Vulkan(ordinal));
+        }
+        if let Some(index) = normalized.strip_prefix("wgpu:") {
+            let ordinal = index.parse::<usize>().map_err(|_| {
+                OmniVoiceError::InvalidRequest(format!("invalid wgpu device ordinal in {value}"))
+            })?;
+            return Ok(Self::Wgpu(ordinal));
         }
         Err(OmniVoiceError::InvalidRequest(format!(
             "unsupported device spec {value}"
@@ -51,6 +71,8 @@ impl DeviceSpec {
             Self::Cpu => Ok(Device::Cpu),
             Self::Cuda(index) => resolve_cuda_device(index),
             Self::Metal => resolve_metal_device(),
+            Self::Vulkan(index) => resolve_vulkan_device(index),
+            Self::Wgpu(index) => resolve_wgpu_device(index),
         }
     }
 }
@@ -80,10 +102,13 @@ impl DTypeSpec {
     pub fn resolve_for_device(self, device: DeviceSpec) -> DType {
         match self {
             Self::Auto => match device {
-                // Stage0 backbone: f16 on CUDA/Metal (pairs with flash-attn on long
-                // CUDA sequences). Stage1/audio stay f32 via audio dtype resolver.
-                DeviceSpec::Cuda(_) | DeviceSpec::Auto => DType::F16,
-                DeviceSpec::Metal => DType::F16,
+                // Stage0 backbone: f16 on GPU backends. Stage1/audio stay f32
+                // via the audio dtype resolver.
+                DeviceSpec::Cuda(_)
+                | DeviceSpec::Metal
+                | DeviceSpec::Vulkan(_)
+                | DeviceSpec::Wgpu(_)
+                | DeviceSpec::Auto => DType::F16,
                 DeviceSpec::Cpu => DType::F32,
             },
             Self::F32 => DType::F32,
@@ -95,7 +120,7 @@ impl DTypeSpec {
     pub fn resolve_for_runtime_device(self, device: &Device) -> DType {
         match self {
             Self::Auto => {
-                if device.is_cuda() || device.is_metal() {
+                if device_prefers_f16_activations(device) {
                     DType::F16
                 } else {
                     DType::F32
@@ -108,12 +133,19 @@ impl DTypeSpec {
     }
 }
 
+fn device_prefers_f16_activations(device: &Device) -> bool {
+    device.is_cuda()
+        || device.is_metal()
+        || device.is_vulkan()
+        || device.is_wgpu()
+}
+
 pub(crate) fn activation_dtype_for_weights(
     format: RuntimeArtifactFormat,
     weights: ModelWeightDType,
     device: &Device,
 ) -> DType {
-    activation_dtype(format, weights, device.is_cuda() || device.is_metal())
+    activation_dtype(format, weights, device_prefers_f16_activations(device))
 }
 
 fn activation_dtype(
@@ -228,24 +260,18 @@ impl RuntimeOptions {
     }
 }
 
-#[cfg(all(feature = "cuda", feature = "metal", target_os = "macos"))]
-const AUTO_DEVICE_ORDER: [DeviceSpec; 3] =
-    [DeviceSpec::Cuda(0), DeviceSpec::Metal, DeviceSpec::Cpu];
-
-#[cfg(all(feature = "cuda", not(all(feature = "metal", target_os = "macos"))))]
-const AUTO_DEVICE_ORDER: [DeviceSpec; 2] = [DeviceSpec::Cuda(0), DeviceSpec::Cpu];
-
-#[cfg(all(not(feature = "cuda"), all(feature = "metal", target_os = "macos")))]
-const AUTO_DEVICE_ORDER: [DeviceSpec; 2] = [DeviceSpec::Metal, DeviceSpec::Cpu];
-
-#[cfg(all(
-    not(feature = "cuda"),
-    not(all(feature = "metal", target_os = "macos"))
-))]
-const AUTO_DEVICE_ORDER: [DeviceSpec; 1] = [DeviceSpec::Cpu];
-
-pub fn auto_device_resolution_order() -> &'static [DeviceSpec] {
-    &AUTO_DEVICE_ORDER
+pub fn auto_device_resolution_order() -> Vec<DeviceSpec> {
+    let mut order = Vec::with_capacity(5);
+    #[cfg(feature = "cuda")]
+    order.push(DeviceSpec::Cuda(0));
+    #[cfg(feature = "vulkan")]
+    order.push(DeviceSpec::Vulkan(0));
+    #[cfg(feature = "wgpu")]
+    order.push(DeviceSpec::Wgpu(0));
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    order.push(DeviceSpec::Metal);
+    order.push(DeviceSpec::Cpu);
+    order
 }
 
 fn resolve_auto_device() -> Result<Device> {
@@ -253,14 +279,29 @@ fn resolve_auto_device() -> Result<Device> {
         match candidate {
             DeviceSpec::Cuda(index) => {
                 #[cfg(feature = "cuda")]
-                if let Ok(device) = Device::new_cuda(*index) {
+                if let Ok(device) = Device::new_cuda(index) {
                     return Ok(device);
                 }
                 #[cfg(not(feature = "cuda"))]
                 let _ = index;
             }
-            DeviceSpec::Metal =>
-            {
+            DeviceSpec::Vulkan(index) => {
+                #[cfg(feature = "vulkan")]
+                if let Ok(device) = Device::new_vulkan(index) {
+                    return Ok(device);
+                }
+                #[cfg(not(feature = "vulkan"))]
+                let _ = index;
+            }
+            DeviceSpec::Wgpu(index) => {
+                #[cfg(feature = "wgpu")]
+                if let Ok(device) = Device::new_wgpu(index) {
+                    return Ok(device);
+                }
+                #[cfg(not(feature = "wgpu"))]
+                let _ = index;
+            }
+            DeviceSpec::Metal => {
                 #[cfg(all(feature = "metal", target_os = "macos"))]
                 if let Ok(device) = Device::new_metal(0) {
                     return Ok(device);
@@ -316,6 +357,30 @@ fn resolve_metal_device() -> Result<Device> {
     ))
 }
 
+#[cfg(feature = "vulkan")]
+fn resolve_vulkan_device(index: usize) -> Result<Device> {
+    Ok(Device::new_vulkan(index)?)
+}
+
+#[cfg(not(feature = "vulkan"))]
+fn resolve_vulkan_device(index: usize) -> Result<Device> {
+    Err(OmniVoiceError::Unsupported(format!(
+        "vulkan device vulkan:{index} requires the `vulkan` feature"
+    )))
+}
+
+#[cfg(feature = "wgpu")]
+fn resolve_wgpu_device(index: usize) -> Result<Device> {
+    Ok(Device::new_wgpu(index)?)
+}
+
+#[cfg(not(feature = "wgpu"))]
+fn resolve_wgpu_device(index: usize) -> Result<Device> {
+    Err(OmniVoiceError::Unsupported(format!(
+        "wgpu device wgpu:{index} requires the `wgpu` feature"
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{activation_dtype, DeviceSpec};
@@ -326,6 +391,8 @@ mod tests {
     fn device_spec_accepts_official_aliases() {
         assert_eq!(DeviceSpec::parse("cuda").unwrap(), DeviceSpec::Cuda(0));
         assert_eq!(DeviceSpec::parse("mps").unwrap(), DeviceSpec::Metal);
+        assert_eq!(DeviceSpec::parse("vulkan").unwrap(), DeviceSpec::Vulkan(0));
+        assert_eq!(DeviceSpec::parse("wgpu").unwrap(), DeviceSpec::Wgpu(0));
     }
 
     #[test]
@@ -334,6 +401,8 @@ mod tests {
         assert_eq!(DeviceSpec::parse("cpu").unwrap(), DeviceSpec::Cpu);
         assert_eq!(DeviceSpec::parse("cuda:3").unwrap(), DeviceSpec::Cuda(3));
         assert_eq!(DeviceSpec::parse("metal").unwrap(), DeviceSpec::Metal);
+        assert_eq!(DeviceSpec::parse("vulkan:1").unwrap(), DeviceSpec::Vulkan(1));
+        assert_eq!(DeviceSpec::parse("wgpu:2").unwrap(), DeviceSpec::Wgpu(2));
     }
 
     #[test]

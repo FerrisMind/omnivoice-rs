@@ -26,7 +26,7 @@ use crate::{
     runtime::RuntimeOptions,
     stage0_loop::{build_timesteps, build_unmask_schedules},
     stage0_qwen3::{Stage0ForwardPass, Stage0Qwen3Backbone, Stage0Qwen3Config},
-    stage0_qwen3_quantized::Stage0Qwen3QuantizedBackbone,
+    stage0_qwen3_quantized::{keep_quantized_matmul, Stage0Qwen3QuantizedBackbone},
 };
 use crate::codec_layers::QuantizedEmbedding;
 
@@ -971,14 +971,17 @@ impl Stage0Model {
             )?,
             dtype,
             device.clone(),
-        ));
-        let audio_heads = Stage0HeadProjection::Quantized(QMatMul::QTensor(qvb.get(
+        )?);
+        // Route through the float-safe helper: on a float GGUF (F32/BF16 base
+        // files) `audio_heads.weight` is not packed-quant, and a raw
+        // `QMatMul::QTensor(...)` would hit candle's cuda dequantize_f16 bail.
+        let audio_heads = Stage0HeadProjection::Quantized(keep_quantized_matmul(qvb.get(
             (
                 config.num_audio_codebook * config.audio_vocab_size,
                 config.llm_config.hidden_size,
             ),
             "audio_heads.weight",
-        )?));
+        )?)?);
         let codebook_layer_offsets = Tensor::from_vec(
             AudioEmbeddingMixer::new(config.num_audio_codebook, config.audio_vocab_size)
                 .layer_offsets(),

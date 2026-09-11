@@ -317,7 +317,12 @@ impl QwenAttention {
         let k_t = k.transpose(2, 3)?.contiguous()?;
         let mut scores = q.matmul(&k_t)?.affine(scale, 0.0)?;
         if let Some(mask) = attention_mask {
-            scores = scores.broadcast_add(mask)?;
+            // Quantized matmuls hard-code F32 outputs on vulkan/wgpu regardless of
+            // the runtime activation dtype, so `scores` can be F32 while the mask
+            // prepared in stage0_model is the GGUF runtime dtype (F16 on GPU).
+            // Normalize the mask to the scores dtype so the add is single-dtype on
+            // every backend (no-op on cuda/cpu, where the dtypes already match).
+            scores = scores.broadcast_add(&mask.to_dtype(scores.dtype())?)?;
         }
         let probs = candle_nn::ops::softmax_last_dim(&scores)?;
         let context = probs.matmul(&v)?;
@@ -383,11 +388,15 @@ impl QwenDecoderLayer {
         let hidden = self
             .self_attn
             .forward(&hidden, attention_mask, flash_seqlens)?;
-        let hidden = (hidden + residual)?;
+        // Attention output can be F32 (vulkan/wgpu quantized matmuls) while the
+        // running residual is the GGUF runtime dtype (F16 on GPU) — cast back so
+        // the add is single-dtype on every backend (no-op on cuda/cpu).
+        let hidden = (hidden.to_dtype(residual.dtype())? + residual)?;
         let residual = &hidden;
         let post_attention = self.post_attention_layernorm.forward(&hidden)?;
         let mlp_hidden = self.mlp.forward(&post_attention)?;
-        Ok((residual + mlp_hidden)?)
+        // Same normalization: MLP output carries the quantized-matmul output dtype.
+        Ok((residual + mlp_hidden.to_dtype(residual.dtype())?)?)
     }
 }
 
@@ -423,15 +432,25 @@ impl LocalRmsNorm {
     }
 }
 
-fn keep_quantized_matmul(weight: Arc<QTensor>) -> Result<QMatMul> {
+pub(crate) fn keep_quantized_matmul(weight: Arc<QTensor>) -> Result<QMatMul> {
     // CUDA quantized kernels accept *packed* Q4/Q8, not float weights.
     // If GGUF tensor alias is actually float (F32/F16/BF16), fall back to dense
     // matmul and dequantize directly to f16 to keep memory down.
+    //
+    // NOTE: use `dequantize(...)` + `to_dtype(F16)` rather than
+    // `dequantize_f16(...)`. On CUDA, `QTensor::dequantize_f16` dispatches to a
+    // specialized kernel path that only supports packed-quant source dtypes and
+    // bails with "unsupported dtype for dequantize F32" for float sources
+    // (candle quantized/cuda.rs dequantize_f16 has no float-source branch).
+    // Plain `dequantize` handles F32/F16/BF16 sources on every backend:
+    // cuda via the CPU-fallback path (quantized/cuda.rs:679-681), wgpu via the
+    // raw-float device path (quantized/mod.rs:327-338), vulkan via the device
+    // copy/cast path (vulkan_backend.rs:4324-4338), cpu natively.
     let dtype = weight.dtype();
     match dtype {
         GgmlDType::F32 | GgmlDType::F16 | GgmlDType::BF16 => {
             let device = weight.device();
-            let w = weight.dequantize_f16(&device)?;
+            let w = weight.dequantize(&device)?.to_dtype(DType::F16)?;
             Ok(QMatMul::TensorF16(w))
         }
         _ => Ok(QMatMul::QTensor(weight)),
@@ -458,16 +477,26 @@ fn get_quantized_qtensor_by_candidates(
     vb: &QuantizedVarBuilder,
     names: &[&str],
 ) -> Result<Arc<QTensor>> {
+    // Packed Q4/Q8 variants are required by Candle's CUDA quantized kernels.
+    // Some GGUF tensor aliases resolve to float tensors; skip those in favor of
+    // a packed candidate, but remember the first float alias as a fallback so
+    // whole-file-float GGUFs (F32/BF16 base files) still load via
+    // `keep_quantized_matmul`'s dense-matmul path.
+    let mut float_fallback: Option<Arc<QTensor>> = None;
     for name in names {
         if let Ok(tensor) = vb.get_no_shape(name) {
             let dtype = tensor.dtype();
-            // Packed Q4/Q8 variants are required by Candle's CUDA quantized kernels.
-            // Some GGUF tensor aliases resolve to float tensors; skip those.
             if matches!(dtype, GgmlDType::F32 | GgmlDType::F16 | GgmlDType::BF16) {
+                if float_fallback.is_none() {
+                    float_fallback = Some(tensor);
+                }
                 continue;
             }
             return Ok(tensor);
         }
+    }
+    if let Some(tensor) = float_fallback {
+        return Ok(tensor);
     }
     Err(candle_core::Error::msg(format!(
         "cannot find any quantized GGUF tensor candidate: {}",
@@ -495,7 +524,7 @@ impl Stage0Qwen3QuantizedBackbone {
             embed_tokens_q,
             activation_dtype,
             qvb.device().clone(),
-        );
+        )?;
         let rotary = Arc::new(RotaryEmbedding::new(cfg, qvb.device())?);
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         for index in 0..cfg.num_hidden_layers {

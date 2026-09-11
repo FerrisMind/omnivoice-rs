@@ -160,6 +160,9 @@ fn execute_command(command: CliCommand) -> Result<(), OmniVoiceError> {
             audio_chunk_duration,
             audio_chunk_threshold,
             seed,
+            warmup,
+            repeat,
+            bench_json,
         } => run_infer(
             model_dir,
             text,
@@ -185,6 +188,9 @@ fn execute_command(command: CliCommand) -> Result<(), OmniVoiceError> {
             audio_chunk_duration,
             audio_chunk_threshold,
             seed,
+            warmup,
+            repeat,
+            bench_json,
         ),
         CliCommand::InferBatch {
             model_dir,
@@ -305,6 +311,9 @@ enum CliCommand {
         audio_chunk_duration: f32,
         audio_chunk_threshold: f32,
         seed: Option<u64>,
+        warmup: usize,
+        repeat: usize,
+        bench_json: Option<PathBuf>,
     },
     InferBatch {
         model_dir: PathBuf,
@@ -475,6 +484,9 @@ fn parse_infer(args: &[String]) -> Result<CliCommand, OmniVoiceError> {
     let mut audio_chunk_duration = 15.0f32;
     let mut audio_chunk_threshold = 30.0f32;
     let mut seed = None;
+    let mut warmup = 0usize;
+    let mut repeat = 1usize;
+    let mut bench_json = None;
     let mut index = 1;
 
     while index < args.len() {
@@ -575,6 +587,23 @@ fn parse_infer(args: &[String]) -> Result<CliCommand, OmniVoiceError> {
                 seed = Some(parse_u64_arg(args, index, "--seed")?);
                 index += 2;
             }
+            "--warmup" => {
+                warmup = parse_usize_arg(args, index, "--warmup")?;
+                index += 2;
+            }
+            "--repeat" => {
+                repeat = parse_usize_arg(args, index, "--repeat")?;
+                if repeat == 0 {
+                    return Err(OmniVoiceError::InvalidRequest(
+                        "--repeat must be at least 1".to_string(),
+                    ));
+                }
+                index += 2;
+            }
+            "--bench-json" => {
+                bench_json = Some(PathBuf::from(required_value(args, index, "--bench-json")?));
+                index += 2;
+            }
             other => {
                 return Err(OmniVoiceError::InvalidRequest(format!(
                     "unknown argument: {other}\n{}",
@@ -609,6 +638,9 @@ fn parse_infer(args: &[String]) -> Result<CliCommand, OmniVoiceError> {
         audio_chunk_duration,
         audio_chunk_threshold,
         seed,
+        warmup,
+        repeat,
+        bench_json,
     })
 }
 
@@ -1225,7 +1257,11 @@ fn run_infer(
     audio_chunk_duration: f32,
     audio_chunk_threshold: f32,
     seed: Option<u64>,
+    warmup: usize,
+    repeat: usize,
+    bench_json: Option<PathBuf>,
 ) -> Result<(), OmniVoiceError> {
+    let load_started = std::time::Instant::now();
     let model_dir = resolve_model_root(&model_dir)?;
     let mut options = RuntimeOptions::new(model_dir)
         .with_device(device)
@@ -1234,6 +1270,7 @@ fn run_infer(
         options = options.with_seed(seed);
     }
     let pipeline = Phase3Pipeline::from_options(options.clone())?;
+    let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
     let mut request = GenerationRequest::new_text_only(text);
     request.languages = vec![language];
     request.ref_texts = vec![ref_text];
@@ -1255,16 +1292,142 @@ fn run_infer(
     request.generation_config.audio_chunk_duration = audio_chunk_duration;
     request.generation_config.audio_chunk_threshold = audio_chunk_threshold;
 
-    let generated = pipeline.generate(&request)?;
-    let audio = generated.into_iter().next().ok_or_else(|| {
-        OmniVoiceError::InvalidData("live inference did not generate any audio".to_string())
-    })?;
-    if let Some(parent) = output.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
+    let has_ref_audio = request.ref_audios.iter().any(|reference| reference.is_some());
+
+    // Bench harness support: warmup iterations are run and discarded BEFORE the
+    // timed loop so weights are resident; marker lines on stdout are the sync
+    // points the memory driver samples between.
+    let mut warmup_wall_ms: Vec<f64> = Vec::new();
+    for warmup_index in 0..warmup {
+        let started = std::time::Instant::now();
+        if warmup_index == 0 {
+            // Warmup call 1: text-only request, num_step 8 — loads audio
+            // tokenizer / stage1 weights (precedent: RUST_BENCH_SRC warm block).
+            let mut warmup_request = GenerationRequest::new_text_only("Warmup.");
+            warmup_request.languages = vec![Some("English".to_string())];
+            warmup_request.generation_config.num_step = 8;
+            pipeline.generate(&warmup_request)?;
+        } else if warmup_index == 1 && has_ref_audio {
+            // Warmup call 2: the full main request, discarded — ensures the
+            // clone/tokenizer path weights are resident.
+            pipeline.generate(&request)?;
+        } else {
+            pipeline.generate(&request)?;
         }
+        let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
+        warmup_wall_ms.push(wall_ms);
+        println!("OMNIVOICE_WARMUP_END {warmup_index}");
+        use std::io::Write as _;
+        let _ = std::io::stdout().flush();
     }
-    audio.write_wav(&output)?;
+    // Drain stage timings accumulated during warmup so timed iteration 0
+    // holds only its own stages (spec §3.2: each bench-json iteration row
+    // contains only its own stages).
+    omnivoice_infer::pipeline::drain_stage_timings();
+
+    let mut iterations: Vec<serde_json::Value> = Vec::new();
+    let mut last_sample_rate = 0u32;
+    let mut last_frame_count = 0usize;
+    for iteration_index in 0..repeat {
+        if let Some(seed) = seed {
+            pipeline.stage0().set_seed(seed + iteration_index as u64)?;
+        }
+        let iteration_output = if repeat == 1 {
+            output.clone()
+        } else {
+            let stem = output
+                .file_stem()
+                .map(|stem| stem.to_os_string())
+                .unwrap_or_else(|| "output".into());
+            let extension = output.extension().map(|ext| ext.to_os_string());
+            output.with_file_name(match extension {
+                Some(extension) => format!(
+                    "{}_iter{}.{}",
+                    stem.to_string_lossy(),
+                    iteration_index,
+                    extension.to_string_lossy()
+                ),
+                None => format!("{}_iter{}", stem.to_string_lossy(), iteration_index),
+            })
+        };
+        let started = std::time::Instant::now();
+        let generated = pipeline.generate(&request)?;
+        let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+        let audio = generated.into_iter().next().ok_or_else(|| {
+            OmniVoiceError::InvalidData("live inference did not generate any audio".to_string())
+        })?;
+        if let Some(parent) = iteration_output.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        audio.write_wav(&iteration_output)?;
+
+        // Drain stage timings accumulated during this iteration so each bench
+        // row holds only its own stages.
+        let mut stage_timings: std::collections::BTreeMap<&'static str, f64> =
+            std::collections::BTreeMap::new();
+        for (name, elapsed_ms) in omnivoice_infer::pipeline::drain_stage_timings() {
+            *stage_timings.entry(name).or_insert(0.0) += elapsed_ms;
+        }
+        let stage_timings_json: serde_json::Map<String, serde_json::Value> = stage_timings
+            .iter()
+            .map(|(name, ms)| (name.to_string(), serde_json::json!(rounded_ms(*ms))))
+            .collect();
+
+        println!("OMNIVOICE_ITER_END {iteration_index} {:.1}", wall_ms);
+        use std::io::Write as _;
+        let _ = std::io::stdout().flush();
+
+        last_sample_rate = audio.sample_rate;
+        last_frame_count = audio.frame_count();
+        iterations.push(serde_json::json!({
+            "index": iteration_index,
+            "wall_ms": rounded_ms(wall_ms),
+            "output_wav": iteration_output.display().to_string(),
+            "frames": audio.frame_count(),
+            "sample_rate": audio.sample_rate,
+            "duration_s": (audio.frame_count() as f64) / (audio.sample_rate as f64),
+            "stage_timings_ms": stage_timings_json,
+        }));
+    }
+
+    if let Some(bench_json) = bench_json {
+        let resolved_dtype = pipeline.stage0().runtime_dtype();
+        let payload = serde_json::json!({
+            "schema": "omnivoice-cli/infer-bench@1",
+            "model": options.model_root().display().to_string(),
+            "device_spec": format!("{:?}", options.device()),
+            "dtype_requested": format!("{:?}", options.dtype()),
+            "dtype_resolved": describe_runtime_dtype(resolved_dtype),
+            "resolved_device": describe_runtime_device(pipeline.stage0().device()),
+            "seed": seed,
+            "load_ms": rounded_ms(load_ms),
+            "warmup": {
+                "count": warmup,
+                "discarded_wall_ms": warmup_wall_ms.iter().map(|ms| rounded_ms(*ms)).collect::<Vec<_>>(),
+            },
+            "iterations": iterations,
+        });
+        if let Some(parent) = bench_json.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        std::fs::write(
+            &bench_json,
+            serde_json::to_string_pretty(&payload).map_err(|error| {
+                OmniVoiceError::InvalidData(format!("failed to serialize bench json: {error}"))
+            })?,
+        )?;
+    }
+
+    let final_output = if repeat == 1 {
+        output.clone()
+    } else {
+        iteration_output_path(&output, repeat - 1)
+    };
 
     println!("phase_marker={}", workspace_phase_marker());
     println!("command=infer");
@@ -1287,11 +1450,41 @@ fn run_infer(
             .map(|value| value.to_string())
             .unwrap_or_else(|| "<none>".to_string())
     );
-    println!("output={}", output.display());
-    println!("sample_rate={}", audio.sample_rate);
-    println!("frame_count={}", audio.frame_count());
+    println!("warmup={}", warmup);
+    println!("repeat={}", repeat);
+    println!("output={}", final_output.display());
+    println!("sample_rate={}", last_sample_rate);
+    println!("frame_count={}", last_frame_count);
 
     Ok(())
+}
+
+fn iteration_output_path(output: &Path, iteration_index: usize) -> PathBuf {
+    let stem = output
+        .file_stem()
+        .map(|stem| stem.to_os_string())
+        .unwrap_or_else(|| "output".into());
+    match output.extension() {
+        Some(extension) => output.with_file_name(format!(
+            "{}_iter{}.{}",
+            stem.to_string_lossy(),
+            iteration_index,
+            extension.to_string_lossy()
+        )),
+        None => output.with_file_name(format!(
+            "{}_iter{}",
+            stem.to_string_lossy(),
+            iteration_index
+        )),
+    }
+}
+
+fn rounded_ms(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
+}
+
+fn describe_runtime_dtype(dtype: candle_core::DType) -> String {
+    format!("{dtype:?}").to_lowercase()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1823,6 +2016,10 @@ fn resolve_batch_devices(
             let cuda_devices = detect_cuda_devices();
             if !cuda_devices.is_empty() {
                 cuda_devices
+            } else if detect_vulkan_device_available() {
+                vec![DeviceSpec::Vulkan(0)]
+            } else if detect_wgpu_device_available() {
+                vec![DeviceSpec::Wgpu(0)]
             } else if detect_metal_device_available() {
                 vec![DeviceSpec::Metal]
             } else {
@@ -1866,6 +2063,10 @@ fn describe_runtime_device(device: &Device) -> String {
         candle_core::DeviceLocation::Cpu => format!("{:?}", DeviceSpec::Cpu),
         candle_core::DeviceLocation::Cuda { gpu_id } => format!("{:?}", DeviceSpec::Cuda(gpu_id)),
         candle_core::DeviceLocation::Metal { gpu_id: _ } => format!("{:?}", DeviceSpec::Metal),
+        candle_core::DeviceLocation::Vulkan { gpu_id } => {
+            format!("{:?}", DeviceSpec::Vulkan(gpu_id))
+        }
+        candle_core::DeviceLocation::Wgpu { gpu_id } => format!("{:?}", DeviceSpec::Wgpu(gpu_id)),
     }
 }
 
@@ -1875,6 +2076,28 @@ fn detect_metal_device_available() -> bool {
         Device::new_metal(0).is_ok()
     }
     #[cfg(not(all(feature = "metal", target_os = "macos")))]
+    {
+        false
+    }
+}
+
+fn detect_vulkan_device_available() -> bool {
+    #[cfg(feature = "vulkan")]
+    {
+        Device::new_vulkan(0).is_ok()
+    }
+    #[cfg(not(feature = "vulkan"))]
+    {
+        false
+    }
+}
+
+fn detect_wgpu_device_available() -> bool {
+    #[cfg(feature = "wgpu")]
+    {
+        Device::new_wgpu(0).is_ok()
+    }
+    #[cfg(not(feature = "wgpu"))]
     {
         false
     }
@@ -2232,7 +2455,7 @@ fn parse_bool_arg(args: &[String], index: usize, name: &str) -> Result<bool, Omn
 }
 
 fn device_usage_values() -> &'static str {
-    "auto|cuda|cuda:N|mps|metal|cpu"
+    "auto|cuda|cuda:N|vulkan|vulkan:N|wgpu|wgpu:N|mps|metal|cpu"
 }
 
 fn artifacts_validate_usage(program: &str) -> String {
@@ -2250,6 +2473,7 @@ fn infer_usage(program: &str) -> String {
             "[--position_temperature <value>] [--class_temperature <value>] ",
             "[--preprocess_prompt <bool>] [--postprocess_output <bool>] [--denoise <bool>] ",
             "[--audio_chunk_duration <seconds>] [--audio_chunk_threshold <seconds>] [--seed <u64>]\n\n",
+            "bench flags:\n  [--warmup <n>] [--repeat <n>] [--bench-json <path>]\n\n",
             "aliases:\n  --ref-audio, --ref-text, --num-step, --guidance-scale, --t-shift,\n",
             "  --layer-penalty-factor, --position-temperature, --class-temperature,\n",
             "  --preprocess-prompt, --postprocess-output, --audio-chunk-duration,\n",
@@ -2321,13 +2545,13 @@ fn usage() -> String {
     [
         "usage:",
         "  omnivoice-cli artifacts validate [--model <path-or-hf-repo>] [--reference-root <path>]",
-        "  omnivoice-cli infer [--model <path-or-hf-repo>] --text <text> --output <wav> [--language <lang>] [--ref-audio <wav>] [--ref-text <text>] [--instruct <text>] [--duration <seconds>] [--speed <factor>] [--asr-model <path-or-hf-repo>] [--device auto|cuda|cuda:N|mps|metal|cpu] [--dtype auto|f16|bf16|f32] [--seed <u64>]",
-        "  omnivoice-cli infer-batch [--model <path-or-hf-repo>] --test-list <jsonl> --res-dir <dir> [--device auto|cuda|cuda:N|mps|metal|cpu] [--dtype auto|f16|bf16|f32] [--batch-size <n>] [--batch-duration <seconds>] [--nj-per-gpu <n>] [--warmup <n>]",
-        "  omnivoice-cli prepare-prompt [--model <path-or-hf-repo>] --reference-root <path> --case <id> [--device auto|cuda|cuda:N|mps|metal|cpu] [--dtype auto|f16|bf16|f32]",
-        "  omnivoice-cli stage1-prepare [--model <path-or-hf-repo>] --reference-root <path> --case <id> [--device auto|cuda|cuda:N|mps|metal|cpu] [--dtype auto|f16|bf16|f32]",
-        "  omnivoice-cli stage1-decode [--model <path-or-hf-repo>] --reference-root <path> --case <id> --out <wav> [--raw] [--device auto|cuda|cuda:N|mps|metal|cpu] [--dtype auto|f16|bf16|f32]",
-        "  omnivoice-cli stage0-generate [--model <path-or-hf-repo>] --reference-root <path> --case <id> --out <json> [--device auto|cuda|cuda:N|mps|metal|cpu] [--dtype auto|f16|bf16|f32]",
-        "  omnivoice-cli stage0-debug [--model <path-or-hf-repo>] --reference-root <path> --case <id> [--device auto|cuda|cuda:N|mps|metal|cpu] [--dtype auto|f16|bf16|f32]",
+        "  omnivoice-cli infer [--model <path-or-hf-repo>] --text <text> --output <wav> [--language <lang>] [--ref-audio <wav>] [--ref-text <text>] [--instruct <text>] [--duration <seconds>] [--speed <factor>] [--asr-model <path-or-hf-repo>] [--device auto|cuda|cuda:N|vulkan|vulkan:N|wgpu|wgpu:N|mps|metal|cpu] [--dtype auto|f16|bf16|f32] [--seed <u64>] [--warmup <n>] [--repeat <n>] [--bench-json <path>]",
+        "  omnivoice-cli infer-batch [--model <path-or-hf-repo>] --test-list <jsonl> --res-dir <dir> [--device auto|cuda|cuda:N|vulkan|vulkan:N|wgpu|wgpu:N|mps|metal|cpu] [--dtype auto|f16|bf16|f32] [--batch-size <n>] [--batch-duration <seconds>] [--nj-per-gpu <n>] [--warmup <n>]",
+        "  omnivoice-cli prepare-prompt [--model <path-or-hf-repo>] --reference-root <path> --case <id> [--device auto|cuda|cuda:N|vulkan|vulkan:N|wgpu|wgpu:N|mps|metal|cpu] [--dtype auto|f16|bf16|f32]",
+        "  omnivoice-cli stage1-prepare [--model <path-or-hf-repo>] --reference-root <path> --case <id> [--device auto|cuda|cuda:N|vulkan|vulkan:N|wgpu|wgpu:N|mps|metal|cpu] [--dtype auto|f16|bf16|f32]",
+        "  omnivoice-cli stage1-decode [--model <path-or-hf-repo>] --reference-root <path> --case <id> --out <wav> [--raw] [--device auto|cuda|cuda:N|vulkan|vulkan:N|wgpu|wgpu:N|mps|metal|cpu] [--dtype auto|f16|bf16|f32]",
+        "  omnivoice-cli stage0-generate [--model <path-or-hf-repo>] --reference-root <path> --case <id> --out <json> [--device auto|cuda|cuda:N|vulkan|vulkan:N|wgpu|wgpu:N|mps|metal|cpu] [--dtype auto|f16|bf16|f32]",
+        "  omnivoice-cli stage0-debug [--model <path-or-hf-repo>] --reference-root <path> --case <id> [--device auto|cuda|cuda:N|vulkan|vulkan:N|wgpu|wgpu:N|mps|metal|cpu] [--dtype auto|f16|bf16|f32]",
     ]
         .join("\n")
 }

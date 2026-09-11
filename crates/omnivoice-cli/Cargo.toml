@@ -16,6 +16,8 @@ hf-hub.workspace = true
 default = []
 cuda = ["omnivoice-infer/cuda"]
 metal = ["omnivoice-infer/metal"]
+vulkan = ["omnivoice-infer/vulkan"]
+wgpu = ["omnivoice-infer/wgpu"]
 
 [[bin]]
 name = "omnivoice-infer"

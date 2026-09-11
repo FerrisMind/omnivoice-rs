@@ -2,6 +2,7 @@
 
 # Rust / Cargo
 /target/
+/target-*/
 **/*.rs.bk
 
 # Local heavy artifacts and reference corpora
@@ -16,6 +17,7 @@
 **/*.before_fix
 /model/
 /refs/
+.swarm/
 
 # Local tools / caches
 /.cache/
@@ -41,20 +43,16 @@ Desktop.ini
 *.userosscache
 *.sln.docstates
 
-# Generated audio / exports
+# Generated audio / exports / local model weights
 *.wav
 *.mp3
 *.flac
 *.ogg
 *.jsonl
+*.gguf
+*.safetensors
 
 # Allow published listening-demo WAVs (and keep other generated audio ignored)
 !artifacts/listening_demo/**/*.wav
 !artifacts/listening_demo_rust/**/*.wav
 artifacts/listening_demo_rust/diag/**
-
-# Keep these root files versioned if explicitly added later
-!Cargo.toml
-!Cargo.lock
-!README.md
-!.gitattributes

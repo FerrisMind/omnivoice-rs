@@ -28,20 +28,25 @@ fn runtime_options_default_to_auto_gpu_first() {
 fn auto_device_resolution_order_is_gpu_first() {
     let order = auto_device_resolution_order();
     assert_eq!(order.last().copied(), Some(DeviceSpec::Cpu));
-    #[cfg(all(feature = "cuda", feature = "metal", target_os = "macos"))]
-    assert_eq!(
-        order,
-        &[DeviceSpec::Cuda(0), DeviceSpec::Metal, DeviceSpec::Cpu]
+    assert!(
+        order.iter().filter(|d| **d == DeviceSpec::Cpu).count() == 1,
+        "cpu must appear exactly once at the end"
     );
-    #[cfg(all(feature = "cuda", not(all(feature = "metal", target_os = "macos"))))]
-    assert_eq!(order, &[DeviceSpec::Cuda(0), DeviceSpec::Cpu]);
-    #[cfg(all(not(feature = "cuda"), all(feature = "metal", target_os = "macos")))]
-    assert_eq!(order, &[DeviceSpec::Metal, DeviceSpec::Cpu]);
+    #[cfg(feature = "cuda")]
+    assert!(order.contains(&DeviceSpec::Cuda(0)));
+    #[cfg(feature = "vulkan")]
+    assert!(order.contains(&DeviceSpec::Vulkan(0)));
+    #[cfg(feature = "wgpu")]
+    assert!(order.contains(&DeviceSpec::Wgpu(0)));
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    assert!(order.contains(&DeviceSpec::Metal));
     #[cfg(all(
         not(feature = "cuda"),
+        not(feature = "vulkan"),
+        not(feature = "wgpu"),
         not(all(feature = "metal", target_os = "macos"))
     ))]
-    assert_eq!(order, &[DeviceSpec::Cpu]);
+    assert_eq!(order, vec![DeviceSpec::Cpu]);
 }
 
 #[test]

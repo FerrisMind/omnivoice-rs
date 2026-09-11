@@ -28,3 +28,5 @@ tower = { version = "0.5.2", features = ["util"] }
 default = []
 cuda = ["omnivoice-infer/cuda"]
 metal = ["omnivoice-infer/metal"]
+vulkan = ["omnivoice-infer/vulkan"]
+wgpu = ["omnivoice-infer/wgpu"]

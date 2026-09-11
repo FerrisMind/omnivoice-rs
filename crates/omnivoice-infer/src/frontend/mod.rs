@@ -168,7 +168,8 @@ fn register_omnivoice_gguf_specials(
         );
         expected_ids.push((key, token, id));
     }
-    tokenizer.add_special_tokens(&specials);
+    // tokenizers 0.23 takes owned AddedToken items (0.22 accepted references).
+    tokenizer.add_special_tokens(specials);
     for (key, token, expected_id) in expected_ids {
         let actual_id = tokenizer.token_to_id(&token).ok_or_else(|| {
             OmniVoiceError::InvalidData(format!(

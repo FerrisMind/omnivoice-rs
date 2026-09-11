@@ -17,35 +17,76 @@ use candle_transformers::quantized_var_builder::VarBuilder as QuantizedVarBuilde
 use crate::error::Result;
 
 /// Lookup table that stays in GGUF storage and gathers rows on demand.
+///
+/// Float GGML blobs (F32/F16/BF16) are materialized as a dense tensor once at
+/// load: candle's vulkan/wgpu quantized stems reject float GGML dtypes
+/// (`quantized dtype X is not supported`) on the quantized embedding/gather
+/// path, while dequantizing a float GGML tensor is a copy/cast, not a weight
+/// expansion (F32 GGML storage IS raw f32 bytes). Packed quants (Q8_0, Q4_K, ...)
+/// keep the native quantized gather.
 #[derive(Debug, Clone)]
 pub struct QuantizedEmbedding {
-    weight: Arc<QTensor>,
+    weight: Option<Arc<QTensor>>,
+    dense: Option<Tensor>,
     activation_dtype: DType,
     device: Device,
 }
 
 impl QuantizedEmbedding {
-    pub fn new(weight: Arc<QTensor>, activation_dtype: DType, device: Device) -> Self {
-        Self {
-            weight,
-            activation_dtype,
-            device,
+    pub fn new(weight: Arc<QTensor>, activation_dtype: DType, device: Device) -> Result<Self> {
+        if matches!(
+            weight.dtype(),
+            GgmlDType::F32 | GgmlDType::F16 | GgmlDType::BF16
+        ) {
+            let dense = weight.dequantize(&device)?;
+            Self::from_dense_tensor(dense, activation_dtype)
+        } else {
+            Ok(Self {
+                weight: Some(weight),
+                dense: None,
+                activation_dtype,
+                device,
+            })
         }
     }
 
+    fn from_dense_tensor(dense: Tensor, activation_dtype: DType) -> Result<Self> {
+        let device = dense.device().clone();
+        Ok(Self {
+            weight: None,
+            dense: Some(dense.to_dtype(activation_dtype)?),
+            activation_dtype,
+            device,
+        })
+    }
+
     pub fn forward(&self, input_ids: &Tensor) -> Result<Tensor> {
-        self.weight
-            .embedding(input_ids)?
+        let hidden = match (&self.weight, &self.dense) {
+            (Some(q), _) => q.embedding(input_ids)?,
+            (_, Some(w)) => {
+                // Same shape semantics as QTensor::embedding / candle_nn Embedding:
+                // flatten ids, gather rows, reshape to (..., hidden).
+                let ids = input_ids.flatten_all()?.to_dtype(DType::U32)?;
+                let mut out_dims = input_ids.dims().to_vec();
+                out_dims.push(w.dim(candle_core::D::Minus1)?);
+                w.index_select(&ids, 0)?.reshape(out_dims)?
+            }
+            _ => unreachable!("QuantizedEmbedding holds exactly one weight variant"),
+        };
+        hidden
             .to_dtype(self.activation_dtype)
             .map_err(Into::into)
     }
 
     /// Full codebook materialization for VQ distance search (encode path only).
     pub fn embeddings(&self) -> Result<Tensor> {
-        self.weight
-            .dequantize(&self.device)?
-            .to_dtype(self.activation_dtype)
-            .map_err(Into::into)
+        match (&self.weight, &self.dense) {
+            (Some(q), _) => Ok(q
+                .dequantize(&self.device)?
+                .to_dtype(self.activation_dtype)?),
+            (_, Some(w)) => Ok(w.clone()),
+            _ => unreachable!("QuantizedEmbedding holds exactly one weight variant"),
+        }
     }
 }
 
@@ -363,7 +404,7 @@ impl CodecWeightSource {
                     qvb.get((vocab_size, hidden_size), "embed")?,
                     *activation_dtype,
                     device.clone(),
-                )),
+                )?),
             }),
         }
     }
@@ -390,7 +431,7 @@ impl CodecWeightSource {
                     qvb.get((vocab_size, hidden_size), name)?,
                     *activation_dtype,
                     device.clone(),
-                )),
+                )?),
             }),
         }
     }
@@ -710,11 +751,20 @@ impl CodecWeightSource {
 }
 
 fn keep_quantized_matmul(weight: Arc<QTensor>) -> Result<QMatMul> {
+    // Use `dequantize(...)` + `to_dtype(F16)` rather than `dequantize_f16(...)`.
+    // On CUDA, `QTensor::dequantize_f16` dispatches to a specialized kernel path
+    // that only supports packed-quant source dtypes and bails with
+    // "unsupported dtype for dequantize F32" for float sources
+    // (candle quantized/cuda.rs dequantize_f16 has no float-source branch).
+    // Plain `dequantize` handles F32/F16/BF16 sources on every backend:
+    // cuda via the CPU-fallback path (quantized/cuda.rs:679-681), wgpu via the
+    // raw-float device path (quantized/mod.rs:327-338), vulkan via the device
+    // copy/cast path (vulkan_backend.rs:4324-4338), cpu natively.
     let dtype = weight.dtype();
     match dtype {
         GgmlDType::F32 | GgmlDType::F16 | GgmlDType::BF16 => {
             let device = weight.device();
-            let w = weight.dequantize_f16(&device)?;
+            let w = weight.dequantize(&device)?.to_dtype(DType::F16)?;
             Ok(QMatMul::TensorF16(w))
         }
         _ => Ok(QMatMul::QTensor(weight)),
