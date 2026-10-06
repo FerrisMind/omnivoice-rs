@@ -13,12 +13,12 @@ license = "Apache-2.0"
 authors = ["FerrisMind"]
 
 [workspace.dependencies]
-# FerrisMind candle fork (Vulkan + WGPU). Local checkout: ../candle
-# Upstream: the FerrisMind candle repo on GitHub (branch wgpu/vulkan)
-candle-core = { path = "../candle/candle-core", version = "0.1.0" }
-candle-nn = { path = "../candle/candle-nn", version = "0.1.0" }
-candle-transformers = { path = "../candle/candle-transformers", version = "0.1.0" }
-candle-flash-attn = { path = "../candle/candle-flash-attn", version = "0.11.0" }
+# FerrisMind candle fork (Vulkan + WGPU), pinned to the latest commit of
+# branch wgpu/vulkan: https://github.com/FerrisMind/candle (addb4aae)
+candle-core = { git = "https://github.com/FerrisMind/candle", rev = "addb4aaeaf9fa4ecd642cbfdde1a4863471c2254", version = "0.1.0" }
+candle-nn = { git = "https://github.com/FerrisMind/candle", rev = "addb4aaeaf9fa4ecd642cbfdde1a4863471c2254", version = "0.1.0" }
+candle-transformers = { git = "https://github.com/FerrisMind/candle", rev = "addb4aaeaf9fa4ecd642cbfdde1a4863471c2254", version = "0.1.0" }
+candle-flash-attn = { git = "https://github.com/FerrisMind/candle", rev = "addb4aaeaf9fa4ecd642cbfdde1a4863471c2254", version = "0.11.0" }
 fslock = "0.2.1"
 half = "2.4.1"
 hound = "3.5.1"

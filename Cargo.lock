@@ -301,6 +301,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 [[package]]
 name = "candle-core"
 version = "0.1.0"
+source = "git+https://github.com/FerrisMind/candle?rev=addb4aaeaf9fa4ecd642cbfdde1a4863471c2254#addb4aaeaf9fa4ecd642cbfdde1a4863471c2254"
 dependencies = [
  "ash",
  "byteorder",
@@ -342,6 +343,7 @@ dependencies = [
 [[package]]
 name = "candle-flash-attn"
 version = "0.11.0"
+source = "git+https://github.com/FerrisMind/candle?rev=addb4aaeaf9fa4ecd642cbfdde1a4863471c2254#addb4aaeaf9fa4ecd642cbfdde1a4863471c2254"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -352,6 +354,7 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.11.0"
+source = "git+https://github.com/FerrisMind/candle?rev=addb4aaeaf9fa4ecd642cbfdde1a4863471c2254#addb4aaeaf9fa4ecd642cbfdde1a4863471c2254"
 dependencies = [
  "cudaforge",
 ]
@@ -359,6 +362,7 @@ dependencies = [
 [[package]]
 name = "candle-metal-kernels"
 version = "0.11.0"
+source = "git+https://github.com/FerrisMind/candle?rev=addb4aaeaf9fa4ecd642cbfdde1a4863471c2254#addb4aaeaf9fa4ecd642cbfdde1a4863471c2254"
 dependencies = [
  "block2",
  "half",
@@ -373,6 +377,7 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.1.0"
+source = "git+https://github.com/FerrisMind/candle?rev=addb4aaeaf9fa4ecd642cbfdde1a4863471c2254#addb4aaeaf9fa4ecd642cbfdde1a4863471c2254"
 dependencies = [
  "candle-core",
  "candle-metal-kernels",
@@ -389,6 +394,7 @@ dependencies = [
 [[package]]
 name = "candle-transformers"
 version = "0.1.0"
+source = "git+https://github.com/FerrisMind/candle?rev=addb4aaeaf9fa4ecd642cbfdde1a4863471c2254#addb4aaeaf9fa4ecd642cbfdde1a4863471c2254"
 dependencies = [
  "byteorder",
  "candle-core",
@@ -406,10 +412,12 @@ dependencies = [
 [[package]]
 name = "candle-vulkan-kernels"
 version = "0.1.0"
+source = "git+https://github.com/FerrisMind/candle?rev=addb4aaeaf9fa4ecd642cbfdde1a4863471c2254#addb4aaeaf9fa4ecd642cbfdde1a4863471c2254"
 
 [[package]]
 name = "candle-wgpu-kernels"
 version = "0.1.0"
+source = "git+https://github.com/FerrisMind/candle?rev=addb4aaeaf9fa4ecd642cbfdde1a4863471c2254#addb4aaeaf9fa4ecd642cbfdde1a4863471c2254"
 
 [[package]]
 name = "castaway"

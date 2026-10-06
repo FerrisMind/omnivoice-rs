@@ -27,9 +27,9 @@ mistralrs-audio = { workspace = true, optional = true }
 unicode-general-category.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-candle-core = { path = "../../../candle/candle-core", version = "0.1.0", features = ["metal"] }
-candle-nn = { path = "../../../candle/candle-nn", version = "0.1.0", features = ["metal"] }
-candle-transformers = { path = "../../../candle/candle-transformers", version = "0.1.0", features = ["metal"] }
+candle-core = { git = "https://github.com/FerrisMind/candle", rev = "addb4aaeaf9fa4ecd642cbfdde1a4863471c2254", version = "0.1.0", features = ["metal"] }
+candle-nn = { git = "https://github.com/FerrisMind/candle", rev = "addb4aaeaf9fa4ecd642cbfdde1a4863471c2254", version = "0.1.0", features = ["metal"] }
+candle-transformers = { git = "https://github.com/FerrisMind/candle", rev = "addb4aaeaf9fa4ecd642cbfdde1a4863471c2254", version = "0.1.0", features = ["metal"] }
 
 [features]
 default = []
