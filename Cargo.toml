@@ -13,13 +13,12 @@ license = "Apache-2.0"
 authors = ["FerrisMind"]
 
 [workspace.dependencies]
-# FerrisMind candle fork (Vulkan + WGPU). Local checkout via junction:
-#   C:\Users\PC\Documents\Default_Project\candle-fork -> D:\Users\ПК\Desktop\candle
-# Upstream: https://github.com/FerrisMind/candle (branch wgpu/vulkan)
-candle-core = { path = "../candle-fork/candle-core", version = "0.1.0" }
-candle-nn = { path = "../candle-fork/candle-nn", version = "0.1.0" }
-candle-transformers = { path = "../candle-fork/candle-transformers", version = "0.1.0" }
-candle-flash-attn = { path = "../candle-fork/candle-flash-attn", version = "0.11.0" }
+# FerrisMind candle fork (Vulkan + WGPU). Local checkout: ../candle
+# Upstream: the FerrisMind candle repo on GitHub (branch wgpu/vulkan)
+candle-core = { path = "../candle/candle-core", version = "0.1.0" }
+candle-nn = { path = "../candle/candle-nn", version = "0.1.0" }
+candle-transformers = { path = "../candle/candle-transformers", version = "0.1.0" }
+candle-flash-attn = { path = "../candle/candle-flash-attn", version = "0.11.0" }
 fslock = "0.2.1"
 half = "2.4.1"
 hound = "3.5.1"
