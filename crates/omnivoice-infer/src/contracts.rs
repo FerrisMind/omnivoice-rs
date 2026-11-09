@@ -24,10 +24,7 @@ impl I64Tensor2 {
     }
 
     pub fn zeros(dims: (usize, usize)) -> Self {
-        Self {
-            dims,
-            data: vec![0; dims.0 * dims.1],
-        }
+        Self { dims, data: vec![0; dims.0 * dims.1] }
     }
 
     pub fn dims(&self) -> (usize, usize) {
@@ -68,17 +65,11 @@ impl I64Tensor3 {
     }
 
     pub fn zeros(dims: (usize, usize, usize)) -> Self {
-        Self {
-            dims,
-            data: vec![0; dims.0 * dims.1 * dims.2],
-        }
+        Self { dims, data: vec![0; dims.0 * dims.1 * dims.2] }
     }
 
     pub fn full(dims: (usize, usize, usize), value: i64) -> Self {
-        Self {
-            dims,
-            data: vec![value; dims.0 * dims.1 * dims.2],
-        }
+        Self { dims, data: vec![value; dims.0 * dims.1 * dims.2] }
     }
 
     pub fn dims(&self) -> (usize, usize, usize) {
@@ -177,10 +168,7 @@ impl BoolTensor2 {
     }
 
     pub fn zeros(dims: (usize, usize)) -> Self {
-        Self {
-            dims,
-            data: vec![false; dims.0 * dims.1],
-        }
+        Self { dims, data: vec![false; dims.0 * dims.1] }
     }
 
     pub fn dims(&self) -> (usize, usize) {
@@ -222,10 +210,7 @@ impl BoolTensor4 {
     }
 
     pub fn zeros(dims: (usize, usize, usize, usize)) -> Self {
-        Self {
-            dims,
-            data: vec![false; dims.0 * dims.1 * dims.2 * dims.3],
-        }
+        Self { dims, data: vec![false; dims.0 * dims.1 * dims.2 * dims.3] }
     }
 
     pub fn dims(&self) -> (usize, usize, usize, usize) {
@@ -454,11 +439,7 @@ pub struct VoiceClonePrompt {
 
 impl VoiceClonePrompt {
     pub fn new_empty(ref_text: impl Into<String>) -> Self {
-        Self {
-            ref_audio_tokens: I64Tensor2::zeros((0, 0)),
-            ref_text: ref_text.into(),
-            ref_rms: None,
-        }
+        Self { ref_audio_tokens: I64Tensor2::zeros((0, 0)), ref_text: ref_text.into(), ref_rms: None }
     }
 }
 
@@ -483,11 +464,7 @@ pub struct WaveformInput {
 
 impl WaveformInput {
     pub fn mono(samples: Vec<f32>, sample_rate: u32) -> Self {
-        Self {
-            samples,
-            sample_rate,
-            channels: 1,
-        }
+        Self { samples, sample_rate, channels: 1 }
     }
 }
 
@@ -547,8 +524,7 @@ impl GenerationTask {
     }
 
     pub fn get_indices(&self, frame_rate: usize) -> (Vec<usize>, Vec<usize>) {
-        let threshold =
-            (self.generation_config.audio_chunk_threshold * frame_rate as f32).max(1.0) as usize;
+        let threshold = (self.generation_config.audio_chunk_threshold * frame_rate as f32).max(1.0) as usize;
         let mut short_idx = Vec::new();
         let mut long_idx = Vec::new();
         for (index, target_len) in self.target_lens.iter().copied().enumerate() {
@@ -563,30 +539,12 @@ impl GenerationTask {
 
     pub fn slice_task(&self, indices: &[usize]) -> Self {
         Self {
-            texts: indices
-                .iter()
-                .map(|&index| self.texts[index].clone())
-                .collect(),
-            target_lens: indices
-                .iter()
-                .map(|&index| self.target_lens[index])
-                .collect(),
-            langs: indices
-                .iter()
-                .map(|&index| self.langs[index].clone())
-                .collect(),
-            instructs: indices
-                .iter()
-                .map(|&index| self.instructs[index].clone())
-                .collect(),
-            ref_texts: indices
-                .iter()
-                .map(|&index| self.ref_texts[index].clone())
-                .collect(),
-            ref_audio_tokens: indices
-                .iter()
-                .map(|&index| self.ref_audio_tokens[index].clone())
-                .collect(),
+            texts: indices.iter().map(|&index| self.texts[index].clone()).collect(),
+            target_lens: indices.iter().map(|&index| self.target_lens[index]).collect(),
+            langs: indices.iter().map(|&index| self.langs[index].clone()).collect(),
+            instructs: indices.iter().map(|&index| self.instructs[index].clone()).collect(),
+            ref_texts: indices.iter().map(|&index| self.ref_texts[index].clone()).collect(),
+            ref_audio_tokens: indices.iter().map(|&index| self.ref_audio_tokens[index].clone()).collect(),
             ref_rms: indices.iter().map(|&index| self.ref_rms[index]).collect(),
             speed: indices.iter().map(|&index| self.speed[index]).collect(),
             generation_config: self.generation_config.clone(),
@@ -594,11 +552,7 @@ impl GenerationTask {
     }
 
     pub fn mode_for(&self, index: usize) -> GenerationMode {
-        if self
-            .ref_audio_tokens
-            .get(index)
-            .is_some_and(Option::is_some)
-        {
+        if self.ref_audio_tokens.get(index).is_some_and(Option::is_some) {
             GenerationMode::Clone
         } else if self.instructs.get(index).is_some_and(|item| item.is_some()) {
             GenerationMode::Design
@@ -630,11 +584,7 @@ pub struct GenerationUsage {
 
 impl GenerationUsage {
     pub fn new(input_tokens: usize, output_tokens: usize) -> Self {
-        Self {
-            input_tokens,
-            output_tokens,
-            total_tokens: input_tokens + output_tokens,
-        }
+        Self { input_tokens, output_tokens, total_tokens: input_tokens + output_tokens }
     }
 }
 
@@ -670,22 +620,15 @@ pub struct TensorParityMetrics {
 
 impl DecodedAudio {
     pub fn new(samples: Vec<f32>, sample_rate: u32) -> Self {
-        Self {
-            samples,
-            sample_rate,
-        }
+        Self { samples, sample_rate }
     }
 
     pub fn validate(&self) -> Result<()> {
         if self.sample_rate == 0 {
-            return Err(OmniVoiceError::InvalidData(
-                "decoded audio sample rate must be greater than zero".to_string(),
-            ));
+            return Err(OmniVoiceError::InvalidData("decoded audio sample rate must be greater than zero".to_string()));
         }
         if let Some(index) = self.samples.iter().position(|sample| !sample.is_finite()) {
-            return Err(OmniVoiceError::InvalidData(format!(
-                "decoded audio sample at index {index} is not finite"
-            )));
+            return Err(OmniVoiceError::InvalidData(format!("decoded audio sample at index {index} is not finite")));
         }
         Ok(())
     }
@@ -714,9 +657,7 @@ impl DecodedAudio {
         let mut reader = hound::WavReader::open(path)?;
         let spec = reader.spec();
         let samples = match spec.sample_format {
-            hound::SampleFormat::Float => reader
-                .samples::<f32>()
-                .collect::<std::result::Result<Vec<_>, _>>()?,
+            hound::SampleFormat::Float => reader.samples::<f32>().collect::<std::result::Result<Vec<_>, _>>()?,
             hound::SampleFormat::Int => match spec.bits_per_sample {
                 8 => reader
                     .samples::<i8>()
@@ -735,16 +676,12 @@ impl DecodedAudio {
                     .map(|sample| sample.map(|value| value as f32 / 2_147_483_648.0))
                     .collect::<std::result::Result<Vec<_>, _>>()?,
                 bits => {
-                    return Err(OmniVoiceError::Unsupported(format!(
-                        "unsupported WAV integer sample width {bits}"
-                    )))
+                    return Err(OmniVoiceError::Unsupported(format!("unsupported WAV integer sample width {bits}")))
                 }
             },
         };
         if spec.channels == 0 || !samples.len().is_multiple_of(spec.channels as usize) {
-            return Err(OmniVoiceError::InvalidData(
-                "WAV channel layout is invalid".to_string(),
-            ));
+            return Err(OmniVoiceError::InvalidData("WAV channel layout is invalid".to_string()));
         }
         let samples = if spec.channels == 1 {
             samples

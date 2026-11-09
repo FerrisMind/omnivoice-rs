@@ -1,17 +1,12 @@
 //! GGUF-friendly codec weights: keep Linear/Embedding packed; dequant Conv only per forward.
 
-use std::{
-    path::Path,
-    sync::Arc,
-};
+use std::{path::Path, sync::Arc};
 
 use candle_core::{
     quantized::{GgmlDType, QMatMul, QTensor},
     DType, Device, Module, Result as CandleResult, Tensor,
 };
-use candle_nn::{
-    Conv1d, Conv1dConfig, ConvTranspose1d, ConvTranspose1dConfig, Embedding, Linear, VarBuilder,
-};
+use candle_nn::{Conv1d, Conv1dConfig, ConvTranspose1d, ConvTranspose1dConfig, Embedding, Linear, VarBuilder};
 use candle_transformers::quantized_var_builder::VarBuilder as QuantizedVarBuilder;
 
 use crate::error::Result;
@@ -34,30 +29,17 @@ pub struct QuantizedEmbedding {
 
 impl QuantizedEmbedding {
     pub fn new(weight: Arc<QTensor>, activation_dtype: DType, device: Device) -> Result<Self> {
-        if matches!(
-            weight.dtype(),
-            GgmlDType::F32 | GgmlDType::F16 | GgmlDType::BF16
-        ) {
+        if matches!(weight.dtype(), GgmlDType::F32 | GgmlDType::F16 | GgmlDType::BF16) {
             let dense = weight.dequantize(&device)?;
             Self::from_dense_tensor(dense, activation_dtype)
         } else {
-            Ok(Self {
-                weight: Some(weight),
-                dense: None,
-                activation_dtype,
-                device,
-            })
+            Ok(Self { weight: Some(weight), dense: None, activation_dtype, device })
         }
     }
 
     fn from_dense_tensor(dense: Tensor, activation_dtype: DType) -> Result<Self> {
         let device = dense.device().clone();
-        Ok(Self {
-            weight: None,
-            dense: Some(dense.to_dtype(activation_dtype)?),
-            activation_dtype,
-            device,
-        })
+        Ok(Self { weight: None, dense: Some(dense.to_dtype(activation_dtype)?), activation_dtype, device })
     }
 
     pub fn forward(&self, input_ids: &Tensor) -> Result<Tensor> {
@@ -73,17 +55,13 @@ impl QuantizedEmbedding {
             }
             _ => unreachable!("QuantizedEmbedding holds exactly one weight variant"),
         };
-        hidden
-            .to_dtype(self.activation_dtype)
-            .map_err(Into::into)
+        hidden.to_dtype(self.activation_dtype).map_err(Into::into)
     }
 
     /// Full codebook materialization for VQ distance search (encode path only).
     pub fn embeddings(&self) -> Result<Tensor> {
         match (&self.weight, &self.dense) {
-            (Some(q), _) => Ok(q
-                .dequantize(&self.device)?
-                .to_dtype(self.activation_dtype)?),
+            (Some(q), _) => Ok(q.dequantize(&self.device)?.to_dtype(self.activation_dtype)?),
             (_, Some(w)) => Ok(w.clone()),
             _ => unreachable!("QuantizedEmbedding holds exactly one weight variant"),
         }
@@ -114,9 +92,7 @@ impl Module for CodecEmbedding {
     fn forward(&self, xs: &Tensor) -> CandleResult<Tensor> {
         match &self.inner {
             CodecEmbeddingInner::Dense(layer) => layer.forward(xs),
-            CodecEmbeddingInner::Quantized(layer) => {
-                layer.forward(xs).map_err(codec_candle_err)
-            }
+            CodecEmbeddingInner::Quantized(layer) => layer.forward(xs).map_err(codec_candle_err),
         }
     }
 }
@@ -129,10 +105,7 @@ pub struct CodecLinear {
 #[derive(Debug, Clone)]
 enum CodecLinearInner {
     Dense(Linear),
-    Quantized {
-        weight: QMatMul,
-        bias: Option<Tensor>,
-    },
+    Quantized { weight: QMatMul, bias: Option<Tensor> },
 }
 
 impl Module for CodecLinear {
@@ -194,13 +167,8 @@ impl Module for CodecConv1d {
 
 impl LazyConv1dWeights {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let weight = self
-            .weight
-            .dequantize(&self.device)?
-            .to_dtype(self.activation_dtype)?;
-        Conv1d::new(weight, self.bias.clone(), self.config)
-            .forward(xs)
-            .map_err(Into::into)
+        let weight = self.weight.dequantize(&self.device)?.to_dtype(self.activation_dtype)?;
+        Conv1d::new(weight, self.bias.clone(), self.config).forward(xs).map_err(Into::into)
     }
 }
 
@@ -212,9 +180,7 @@ impl LazyWeightNormConv1d {
         let norm = v.sqr()?.sum_keepdim((0, 1))?.sqrt()?;
         let scale = g.broadcast_div(&norm)?;
         let weight = v.broadcast_mul(&scale.broadcast_as(v.shape().dims())?)?;
-        Conv1d::new(weight, self.bias.clone(), self.config)
-            .forward(xs)
-            .map_err(Into::into)
+        Conv1d::new(weight, self.bias.clone(), self.config).forward(xs).map_err(Into::into)
     }
 }
 
@@ -249,13 +215,8 @@ impl Module for CodecConvTranspose1d {
 
 impl LazyConvTranspose1dWeights {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let weight = self
-            .weight
-            .dequantize(&self.device)?
-            .to_dtype(self.activation_dtype)?;
-        ConvTranspose1d::new(weight, self.bias.clone(), self.config)
-            .forward(xs)
-            .map_err(Into::into)
+        let weight = self.weight.dequantize(&self.device)?.to_dtype(self.activation_dtype)?;
+        ConvTranspose1d::new(weight, self.bias.clone(), self.config).forward(xs).map_err(Into::into)
     }
 }
 
@@ -271,49 +232,27 @@ pub struct CodecWeightSource {
 #[derive(Clone)]
 enum CodecWeightSourceInner {
     Dense(VarBuilder<'static>),
-    Quantized {
-        qvb: QuantizedVarBuilder,
-        activation_dtype: DType,
-        device: Device,
-    },
+    Quantized { qvb: QuantizedVarBuilder, activation_dtype: DType, device: Device },
 }
 
 impl CodecWeightSource {
     pub fn from_weight_path(path: &Path, activation_dtype: DType, device: &Device) -> Result<Self> {
-        if path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
-        {
+        if path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("gguf")) {
             let qvb = QuantizedVarBuilder::from_gguf(path, device)?;
-            Ok(Self {
-                inner: CodecWeightSourceInner::Quantized {
-                    qvb,
-                    activation_dtype,
-                    device: device.clone(),
-                },
-            })
+            Ok(Self { inner: CodecWeightSourceInner::Quantized { qvb, activation_dtype, device: device.clone() } })
         } else {
             let paths = [path];
             // SAFETY: read-only mmap of immutable weight files for process lifetime.
             let vb = unsafe { VarBuilder::from_mmaped_safetensors(&paths, activation_dtype, device)? };
-            Ok(Self {
-                inner: CodecWeightSourceInner::Dense(vb),
-            })
+            Ok(Self { inner: CodecWeightSourceInner::Dense(vb) })
         }
     }
 
     pub fn pp(&self, suffix: impl ToString) -> Self {
         let suffix = suffix.to_string();
         match &self.inner {
-            CodecWeightSourceInner::Dense(vb) => Self {
-                inner: CodecWeightSourceInner::Dense(vb.pp(suffix.clone())),
-            },
-            CodecWeightSourceInner::Quantized {
-                qvb,
-                activation_dtype,
-                device,
-            } => Self {
+            CodecWeightSourceInner::Dense(vb) => Self { inner: CodecWeightSourceInner::Dense(vb.pp(suffix.clone())) },
+            CodecWeightSourceInner::Quantized { qvb, activation_dtype, device } => Self {
                 inner: CodecWeightSourceInner::Quantized {
                     qvb: qvb.pp(suffix),
                     activation_dtype: *activation_dtype,
@@ -331,63 +270,32 @@ impl CodecWeightSource {
         let shape = shape.into();
         match &self.inner {
             CodecWeightSourceInner::Dense(vb) => vb.get(shape, name).map_err(Into::into),
-            CodecWeightSourceInner::Quantized {
-                qvb,
-                activation_dtype,
-                device,
-            } => qvb
-                .get(shape, name)?
-                .dequantize(device)?
-                .to_dtype(*activation_dtype)
-                .map_err(Into::into),
+            CodecWeightSourceInner::Quantized { qvb, activation_dtype, device } => {
+                qvb.get(shape, name)?.dequantize(device)?.to_dtype(*activation_dtype).map_err(Into::into)
+            }
         }
     }
 
-    pub fn load_linear(
-        &self,
-        in_dim: usize,
-        out_dim: usize,
-        with_bias: bool,
-    ) -> Result<CodecLinear> {
+    pub fn load_linear(&self, in_dim: usize, out_dim: usize, with_bias: bool) -> Result<CodecLinear> {
         match &self.inner {
             CodecWeightSourceInner::Dense(vb) => {
                 let weight = vb.get((out_dim, in_dim), "weight")?;
-                let bias = if with_bias {
-                    Some(vb.get(out_dim, "bias")?)
-                } else {
-                    None
-                };
-                Ok(CodecLinear {
-                    inner: CodecLinearInner::Dense(Linear::new(weight, bias)),
-                })
+                let bias = if with_bias { Some(vb.get(out_dim, "bias")?) } else { None };
+                Ok(CodecLinear { inner: CodecLinearInner::Dense(Linear::new(weight, bias)) })
             }
-            CodecWeightSourceInner::Quantized {
-                qvb,
-                activation_dtype,
-                device,
-            } => {
+            CodecWeightSourceInner::Quantized { qvb, activation_dtype, device } => {
                 let weight = keep_quantized_matmul(qvb.get((out_dim, in_dim), "weight")?)?;
                 let bias = if with_bias {
-                    Some(
-                        qvb.get(out_dim, "bias")?
-                            .dequantize(device)?
-                            .to_dtype(*activation_dtype)?,
-                    )
+                    Some(qvb.get(out_dim, "bias")?.dequantize(device)?.to_dtype(*activation_dtype)?)
                 } else {
                     None
                 };
-                Ok(CodecLinear {
-                    inner: CodecLinearInner::Quantized { weight, bias },
-                })
+                Ok(CodecLinear { inner: CodecLinearInner::Quantized { weight, bias } })
             }
         }
     }
 
-    pub fn load_embedding(
-        &self,
-        vocab_size: usize,
-        hidden_size: usize,
-    ) -> Result<CodecEmbedding> {
+    pub fn load_embedding(&self, vocab_size: usize, hidden_size: usize) -> Result<CodecEmbedding> {
         match &self.inner {
             CodecWeightSourceInner::Dense(vb) => Ok(CodecEmbedding {
                 inner: CodecEmbeddingInner::Dense(Embedding::new(
@@ -395,11 +303,7 @@ impl CodecWeightSource {
                     hidden_size,
                 )),
             }),
-            CodecWeightSourceInner::Quantized {
-                qvb,
-                activation_dtype,
-                device,
-            } => Ok(CodecEmbedding {
+            CodecWeightSourceInner::Quantized { qvb, activation_dtype, device } => Ok(CodecEmbedding {
                 inner: CodecEmbeddingInner::Quantized(QuantizedEmbedding::new(
                     qvb.get((vocab_size, hidden_size), "embed")?,
                     *activation_dtype,
@@ -409,12 +313,7 @@ impl CodecWeightSource {
         }
     }
 
-    pub fn load_embedding_at(
-        &self,
-        vocab_size: usize,
-        hidden_size: usize,
-        name: &str,
-    ) -> Result<CodecEmbedding> {
+    pub fn load_embedding_at(&self, vocab_size: usize, hidden_size: usize, name: &str) -> Result<CodecEmbedding> {
         match &self.inner {
             CodecWeightSourceInner::Dense(vb) => Ok(CodecEmbedding {
                 inner: CodecEmbeddingInner::Dense(Embedding::new(
@@ -422,11 +321,7 @@ impl CodecWeightSource {
                     hidden_size,
                 )),
             }),
-            CodecWeightSourceInner::Quantized {
-                qvb,
-                activation_dtype,
-                device,
-            } => Ok(CodecEmbedding {
+            CodecWeightSourceInner::Quantized { qvb, activation_dtype, device } => Ok(CodecEmbedding {
                 inner: CodecEmbeddingInner::Quantized(QuantizedEmbedding::new(
                     qvb.get((vocab_size, hidden_size), name)?,
                     *activation_dtype,
@@ -447,33 +342,17 @@ impl CodecWeightSource {
         match &self.inner {
             CodecWeightSourceInner::Dense(vb) => {
                 let weight = vb.get((out_dim, in_dim), weight_name)?;
-                let bias = if with_bias {
-                    Some(vb.get(out_dim, bias_name)?)
-                } else {
-                    None
-                };
-                Ok(CodecLinear {
-                    inner: CodecLinearInner::Dense(Linear::new(weight, bias)),
-                })
+                let bias = if with_bias { Some(vb.get(out_dim, bias_name)?) } else { None };
+                Ok(CodecLinear { inner: CodecLinearInner::Dense(Linear::new(weight, bias)) })
             }
-            CodecWeightSourceInner::Quantized {
-                qvb,
-                activation_dtype,
-                device,
-            } => {
+            CodecWeightSourceInner::Quantized { qvb, activation_dtype, device } => {
                 let weight = keep_quantized_matmul(qvb.get((out_dim, in_dim), weight_name)?)?;
                 let bias = if with_bias {
-                    Some(
-                        qvb.get(out_dim, bias_name)?
-                            .dequantize(device)?
-                            .to_dtype(*activation_dtype)?,
-                    )
+                    Some(qvb.get(out_dim, bias_name)?.dequantize(device)?.to_dtype(*activation_dtype)?)
                 } else {
                     None
                 };
-                Ok(CodecLinear {
-                    inner: CodecLinearInner::Quantized { weight, bias },
-                })
+                Ok(CodecLinear { inner: CodecLinearInner::Quantized { weight, bias } })
             }
         }
     }
@@ -490,39 +369,19 @@ impl CodecWeightSource {
         with_bias: bool,
         groups: usize,
     ) -> Result<CodecConv1d> {
-        let config = Conv1dConfig {
-            stride,
-            padding,
-            dilation,
-            groups,
-            ..Default::default()
-        };
+        let config = Conv1dConfig { stride, padding, dilation, groups, ..Default::default() };
         let in_per_group = in_channels / groups;
         let weight_shape = (out_channels, in_per_group, kernel_size);
         match &self.inner {
             CodecWeightSourceInner::Dense(vb) => {
                 let weight = vb.get(weight_shape, "weight")?;
-                let bias = if with_bias {
-                    Some(vb.get(out_channels, "bias")?)
-                } else {
-                    None
-                };
-                Ok(CodecConv1d {
-                    inner: CodecConv1dInner::Dense(Conv1d::new(weight, bias, config)),
-                })
+                let bias = if with_bias { Some(vb.get(out_channels, "bias")?) } else { None };
+                Ok(CodecConv1d { inner: CodecConv1dInner::Dense(Conv1d::new(weight, bias, config)) })
             }
-            CodecWeightSourceInner::Quantized {
-                qvb,
-                activation_dtype,
-                device,
-            } => {
+            CodecWeightSourceInner::Quantized { qvb, activation_dtype, device } => {
                 let weight = qvb.get(weight_shape, "weight")?;
                 let bias = if with_bias {
-                    Some(
-                        qvb.get(out_channels, "bias")?
-                            .dequantize(device)?
-                            .to_dtype(*activation_dtype)?,
-                    )
+                    Some(qvb.get(out_channels, "bias")?.dequantize(device)?.to_dtype(*activation_dtype)?)
                 } else {
                     None
                 };
@@ -547,37 +406,25 @@ impl CodecWeightSource {
         dilation: usize,
         padding: usize,
     ) -> Result<CodecConv1d> {
-        let config = Conv1dConfig {
-            dilation,
-            padding,
-            ..Default::default()
-        };
+        let config = Conv1dConfig { dilation, padding, ..Default::default() };
         let expected_in = in_channels / config.groups;
         match &self.inner {
             CodecWeightSourceInner::Dense(vb) => {
                 let weight = match vb.get((out_channels, expected_in, kernel_size), "weight") {
                     Ok(weight) => weight,
-                    Err(_) if out_channels == 1 => vb
-                        .get((expected_in, kernel_size), "weight")?
-                        .reshape((out_channels, expected_in, kernel_size))?,
+                    Err(_) if out_channels == 1 => vb.get((expected_in, kernel_size), "weight")?.reshape((
+                        out_channels,
+                        expected_in,
+                        kernel_size,
+                    ))?,
                     Err(error) => return Err(error.into()),
                 };
                 let bias = vb.get(out_channels, "bias")?;
-                Ok(CodecConv1d {
-                    inner: CodecConv1dInner::Dense(Conv1d::new(weight, Some(bias), config)),
-                })
+                Ok(CodecConv1d { inner: CodecConv1dInner::Dense(Conv1d::new(weight, Some(bias), config)) })
             }
-            CodecWeightSourceInner::Quantized {
-                qvb,
-                activation_dtype,
-                device,
-            } => {
+            CodecWeightSourceInner::Quantized { qvb, activation_dtype, device } => {
                 if let Ok(weight) = qvb.get((out_channels, expected_in, kernel_size), "weight") {
-                    let bias = Some(
-                        qvb.get(out_channels, "bias")?
-                            .dequantize(device)?
-                            .to_dtype(*activation_dtype)?,
-                    );
+                    let bias = Some(qvb.get(out_channels, "bias")?.dequantize(device)?.to_dtype(*activation_dtype)?);
                     return Ok(CodecConv1d {
                         inner: CodecConv1dInner::Lazy(LazyConv1dWeights {
                             weight,
@@ -595,9 +442,7 @@ impl CodecWeightSource {
                         .to_dtype(*activation_dtype)?
                         .reshape((out_channels, expected_in, kernel_size))?;
                     let bias = vb_get_bias(qvb, out_channels, device, *activation_dtype)?;
-                    return Ok(CodecConv1d {
-                        inner: CodecConv1dInner::Dense(Conv1d::new(weight, bias, config)),
-                    });
+                    return Ok(CodecConv1d { inner: CodecConv1dInner::Dense(Conv1d::new(weight, bias, config)) });
                 }
                 Err(candle_core::Error::msg("missing conv1d weight").into())
             }
@@ -612,15 +457,10 @@ impl CodecWeightSource {
         padding: usize,
         groups: usize,
     ) -> Result<CodecConv1d> {
-        let config = Conv1dConfig {
-            padding,
-            groups,
-            ..Default::default()
-        };
+        let config = Conv1dConfig { padding, groups, ..Default::default() };
         match &self.inner {
             CodecWeightSourceInner::Dense(vb) => {
-                if let Ok(weight) = vb.get((out_channels, in_channels_per_group, kernel_size), "weight")
-                {
+                if let Ok(weight) = vb.get((out_channels, in_channels_per_group, kernel_size), "weight") {
                     return Ok(CodecConv1d {
                         inner: CodecConv1dInner::Dense(Conv1d::new(
                             weight,
@@ -630,34 +470,18 @@ impl CodecWeightSource {
                     });
                 }
                 let g = vb.get((1, 1, kernel_size), "parametrizations.weight.original0")?;
-                let v = vb.get(
-                    (out_channels, in_channels_per_group, kernel_size),
-                    "parametrizations.weight.original1",
-                )?;
+                let v =
+                    vb.get((out_channels, in_channels_per_group, kernel_size), "parametrizations.weight.original1")?;
                 let norm = v.sqr()?.sum_keepdim((0, 1))?.sqrt()?;
                 let scale = g.broadcast_div(&norm)?;
                 let weight = v.broadcast_mul(&scale.broadcast_as(v.shape().dims())?)?;
                 Ok(CodecConv1d {
-                    inner: CodecConv1dInner::Dense(Conv1d::new(
-                        weight,
-                        Some(vb.get(out_channels, "bias")?),
-                        config,
-                    )),
+                    inner: CodecConv1dInner::Dense(Conv1d::new(weight, Some(vb.get(out_channels, "bias")?), config)),
                 })
             }
-            CodecWeightSourceInner::Quantized {
-                qvb,
-                activation_dtype,
-                device,
-            } => {
-                if let Ok(weight) =
-                    qvb.get((out_channels, in_channels_per_group, kernel_size), "weight")
-                {
-                    let bias = Some(
-                        qvb.get(out_channels, "bias")?
-                            .dequantize(device)?
-                            .to_dtype(*activation_dtype)?,
-                    );
+            CodecWeightSourceInner::Quantized { qvb, activation_dtype, device } => {
+                if let Ok(weight) = qvb.get((out_channels, in_channels_per_group, kernel_size), "weight") {
+                    let bias = Some(qvb.get(out_channels, "bias")?.dequantize(device)?.to_dtype(*activation_dtype)?);
                     return Ok(CodecConv1d {
                         inner: CodecConv1dInner::Lazy(LazyConv1dWeights {
                             weight,
@@ -669,15 +493,9 @@ impl CodecWeightSource {
                     });
                 }
                 let g = qvb.get((1, 1, kernel_size), "parametrizations.weight.original0")?;
-                let v = qvb.get(
-                    (out_channels, in_channels_per_group, kernel_size),
-                    "parametrizations.weight.original1",
-                )?;
-                let bias = Some(
-                    qvb.get(out_channels, "bias")?
-                        .dequantize(device)?
-                        .to_dtype(*activation_dtype)?,
-                );
+                let v =
+                    qvb.get((out_channels, in_channels_per_group, kernel_size), "parametrizations.weight.original1")?;
+                let bias = Some(qvb.get(out_channels, "bias")?.dequantize(device)?.to_dtype(*activation_dtype)?);
                 Ok(CodecConv1d {
                     inner: CodecConv1dInner::WeightNormLazy(LazyWeightNormConv1d {
                         g,
@@ -701,41 +519,18 @@ impl CodecWeightSource {
         padding: usize,
         output_padding: usize,
     ) -> Result<CodecConvTranspose1d> {
-        let config = ConvTranspose1dConfig {
-            stride,
-            padding,
-            output_padding,
-            ..Default::default()
-        };
+        let config = ConvTranspose1dConfig { stride, padding, output_padding, ..Default::default() };
         match &self.inner {
             CodecWeightSourceInner::Dense(vb) => {
-                let weight = vb.get(
-                    (in_channels, out_channels / config.groups, kernel_size),
-                    "weight",
-                )?;
+                let weight = vb.get((in_channels, out_channels / config.groups, kernel_size), "weight")?;
                 let bias = vb.get(out_channels, "bias")?;
                 Ok(CodecConvTranspose1d {
-                    inner: CodecConvTranspose1dInner::Dense(ConvTranspose1d::new(
-                        weight,
-                        Some(bias),
-                        config,
-                    )),
+                    inner: CodecConvTranspose1dInner::Dense(ConvTranspose1d::new(weight, Some(bias), config)),
                 })
             }
-            CodecWeightSourceInner::Quantized {
-                qvb,
-                activation_dtype,
-                device,
-            } => {
-                let weight = qvb.get(
-                    (in_channels, out_channels / config.groups, kernel_size),
-                    "weight",
-                )?;
-                let bias = Some(
-                    qvb.get(out_channels, "bias")?
-                        .dequantize(device)?
-                        .to_dtype(*activation_dtype)?,
-                );
+            CodecWeightSourceInner::Quantized { qvb, activation_dtype, device } => {
+                let weight = qvb.get((in_channels, out_channels / config.groups, kernel_size), "weight")?;
+                let bias = Some(qvb.get(out_channels, "bias")?.dequantize(device)?.to_dtype(*activation_dtype)?);
                 Ok(CodecConvTranspose1d {
                     inner: CodecConvTranspose1dInner::Lazy(LazyConvTranspose1dWeights {
                         weight,
@@ -777,9 +572,5 @@ fn vb_get_bias(
     device: &Device,
     activation_dtype: DType,
 ) -> Result<Option<Tensor>> {
-    Ok(Some(
-        qvb.get(out_channels, "bias")?
-            .dequantize(device)?
-            .to_dtype(activation_dtype)?,
-    ))
+    Ok(Some(qvb.get(out_channels, "bias")?.dequantize(device)?.to_dtype(activation_dtype)?))
 }

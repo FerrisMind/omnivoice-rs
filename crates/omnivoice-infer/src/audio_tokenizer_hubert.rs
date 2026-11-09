@@ -3,9 +3,9 @@ use candle_nn::{GroupNorm, LayerNorm};
 
 use crate::{
     audio_tokenizer::parse_activation,
+    audio_tokenizer::AudioTokenizerModelConfig,
     codec_layers::{CodecConv1d, CodecLinear, CodecWeightSource},
     error::{OmniVoiceError, Result},
-    audio_tokenizer::AudioTokenizerModelConfig,
 };
 
 #[derive(Debug)]
@@ -64,11 +64,7 @@ impl HubertFeatureExtractor {
         }
         let mut conv_layers = Vec::with_capacity(config.semantic_conv_dim.len());
         for layer_index in 0..config.semantic_conv_dim.len() {
-            let in_dim = if layer_index == 0 {
-                1
-            } else {
-                config.semantic_conv_dim[layer_index - 1]
-            };
+            let in_dim = if layer_index == 0 { 1 } else { config.semantic_conv_dim[layer_index - 1] };
             let out_dim = config.semantic_conv_dim[layer_index];
             let layer_ws = ws.pp("conv_layers").pp(layer_index);
             let conv = layer_ws.pp("conv").load_conv1d(
@@ -81,20 +77,9 @@ impl HubertFeatureExtractor {
                 config.semantic_conv_bias,
                 1,
             )?;
-            let group_norm = if layer_index == 0 {
-                Some(load_group_norm(
-                    &layer_ws.pp("layer_norm"),
-                    out_dim,
-                    1e-5,
-                )?)
-            } else {
-                None
-            };
-            conv_layers.push(HubertConvLayer {
-                conv,
-                group_norm,
-                activation: config.semantic_feat_extract_activation,
-            });
+            let group_norm =
+                if layer_index == 0 { Some(load_group_norm(&layer_ws.pp("layer_norm"), out_dim, 1e-5)?) } else { None };
+            conv_layers.push(HubertConvLayer { conv, group_norm, activation: config.semantic_feat_extract_activation });
         }
         Ok(Self { conv_layers })
     }
@@ -173,10 +158,7 @@ impl HubertEncoder {
     fn load(config: &AudioTokenizerModelConfig, ws: &CodecWeightSource) -> Result<Self> {
         let mut layers = Vec::with_capacity(config.semantic_num_layers);
         for layer_index in 0..config.semantic_num_layers {
-            layers.push(HubertEncoderLayer::load(
-                config,
-                &ws.pp("layers").pp(layer_index),
-            )?);
+            layers.push(HubertEncoderLayer::load(config, &ws.pp("layers").pp(layer_index))?);
         }
         Ok(Self {
             pos_conv_embed: HubertPositionalConvEmbedding::load(config, &ws.pp("pos_conv_embed"))?,
@@ -273,11 +255,8 @@ impl HubertEncoderLayer {
         let hidden_states = self.attention.forward(hidden_states)?;
         let hidden_states = hidden_states.broadcast_add(&attn_residual)?;
         let hidden_states = self.layer_norm.forward(&hidden_states)?;
-        let hidden_states =
-            hidden_states.broadcast_add(&self.feed_forward.forward(&hidden_states)?)?;
-        self.final_layer_norm
-            .forward(&hidden_states)
-            .map_err(Into::into)
+        let hidden_states = hidden_states.broadcast_add(&self.feed_forward.forward(&hidden_states)?)?;
+        self.final_layer_norm.forward(&hidden_states).map_err(Into::into)
     }
 }
 
@@ -294,26 +273,10 @@ struct HubertAttention {
 impl HubertAttention {
     fn load(config: &AudioTokenizerModelConfig, ws: &CodecWeightSource) -> Result<Self> {
         Ok(Self {
-            q_proj: ws.pp("q_proj").load_linear(
-                config.semantic_hidden_size,
-                config.semantic_hidden_size,
-                true,
-            )?,
-            k_proj: ws.pp("k_proj").load_linear(
-                config.semantic_hidden_size,
-                config.semantic_hidden_size,
-                true,
-            )?,
-            v_proj: ws.pp("v_proj").load_linear(
-                config.semantic_hidden_size,
-                config.semantic_hidden_size,
-                true,
-            )?,
-            out_proj: ws.pp("out_proj").load_linear(
-                config.semantic_hidden_size,
-                config.semantic_hidden_size,
-                true,
-            )?,
+            q_proj: ws.pp("q_proj").load_linear(config.semantic_hidden_size, config.semantic_hidden_size, true)?,
+            k_proj: ws.pp("k_proj").load_linear(config.semantic_hidden_size, config.semantic_hidden_size, true)?,
+            v_proj: ws.pp("v_proj").load_linear(config.semantic_hidden_size, config.semantic_hidden_size, true)?,
+            out_proj: ws.pp("out_proj").load_linear(config.semantic_hidden_size, config.semantic_hidden_size, true)?,
             num_heads: config.semantic_num_heads,
             head_dim: config.semantic_hidden_size / config.semantic_num_heads,
         })
@@ -339,14 +302,13 @@ impl HubertAttention {
             .reshape((batch_size, seq_len, self.num_heads, self.head_dim))?
             .transpose(1, 2)?
             .contiguous()?;
-        let attn_scores = (q.contiguous()?.matmul(&k.transpose(2, 3)?.contiguous()?)?
-            / (self.head_dim as f64).sqrt())?;
+        let attn_scores = (q.contiguous()?.matmul(&k.transpose(2, 3)?.contiguous()?)? / (self.head_dim as f64).sqrt())?;
         let attn_probs = candle_nn::ops::softmax_last_dim(&attn_scores)?;
-        let context = attn_probs
-            .contiguous()?
-            .matmul(&v.contiguous()?)?
-            .transpose(1, 2)?
-            .reshape((batch_size, seq_len, hidden_size))?;
+        let context = attn_probs.contiguous()?.matmul(&v.contiguous()?)?.transpose(1, 2)?.reshape((
+            batch_size,
+            seq_len,
+            hidden_size,
+        ))?;
         self.out_proj.forward(&context).map_err(Into::into)
     }
 }
@@ -378,9 +340,7 @@ impl HubertFeedForward {
     fn forward(&self, hidden_states: &Tensor) -> Result<Tensor> {
         let hidden_states = self.intermediate_dense.forward(hidden_states)?;
         let hidden_states = self.activation.forward(&hidden_states)?;
-        self.output_dense
-            .forward(&hidden_states)
-            .map_err(Into::into)
+        self.output_dense.forward(&hidden_states).map_err(Into::into)
     }
 }
 
@@ -457,16 +417,7 @@ impl SemanticEncoderBlock {
         let padding = (kernel - 1) / 2;
         Ok(Self {
             residual_units,
-            conv: ws.pp("conv").load_conv1d(
-                in_channels,
-                out_channels,
-                kernel,
-                stride,
-                padding,
-                1,
-                true,
-                1,
-            )?,
+            conv: ws.pp("conv").load_conv1d(in_channels, out_channels, kernel, stride, padding, 1, true, 1)?,
         })
     }
 
@@ -507,16 +458,7 @@ impl SemanticResidualUnit {
                 false,
                 1,
             )?,
-            conv2: ws.pp("conv2").load_conv1d(
-                out_channels,
-                out_channels,
-                1,
-                1,
-                0,
-                1,
-                false,
-                1,
-            )?,
+            conv2: ws.pp("conv2").load_conv1d(out_channels, out_channels, 1, 1, 0, 1, false, 1)?,
         })
     }
 
@@ -531,20 +473,10 @@ impl SemanticResidualUnit {
 }
 
 fn load_layer_norm(ws: &CodecWeightSource, hidden_size: usize, eps: f64) -> Result<LayerNorm> {
-    Ok(LayerNorm::new(
-        ws.get(hidden_size, "weight")?,
-        ws.get(hidden_size, "bias")?,
-        eps,
-    ))
+    Ok(LayerNorm::new(ws.get(hidden_size, "weight")?, ws.get(hidden_size, "bias")?, eps))
 }
 
 fn load_group_norm(ws: &CodecWeightSource, num_channels: usize, eps: f64) -> Result<GroupNorm> {
-    GroupNorm::new(
-        ws.get(num_channels, "weight")?,
-        ws.get(num_channels, "bias")?,
-        num_channels,
-        num_channels,
-        eps,
-    )
-    .map_err(Into::into)
+    GroupNorm::new(ws.get(num_channels, "weight")?, ws.get(num_channels, "bias")?, num_channels, num_channels, eps)
+        .map_err(Into::into)
 }

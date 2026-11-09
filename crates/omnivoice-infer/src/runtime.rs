@@ -43,26 +43,24 @@ impl DeviceSpec {
             return Ok(Self::Wgpu(0));
         }
         if let Some(index) = normalized.strip_prefix("cuda:") {
-            let ordinal = index.parse::<usize>().map_err(|_| {
-                OmniVoiceError::InvalidRequest(format!("invalid cuda device ordinal in {value}"))
-            })?;
+            let ordinal = index
+                .parse::<usize>()
+                .map_err(|_| OmniVoiceError::InvalidRequest(format!("invalid cuda device ordinal in {value}")))?;
             return Ok(Self::Cuda(ordinal));
         }
         if let Some(index) = normalized.strip_prefix("vulkan:") {
-            let ordinal = index.parse::<usize>().map_err(|_| {
-                OmniVoiceError::InvalidRequest(format!("invalid vulkan device ordinal in {value}"))
-            })?;
+            let ordinal = index
+                .parse::<usize>()
+                .map_err(|_| OmniVoiceError::InvalidRequest(format!("invalid vulkan device ordinal in {value}")))?;
             return Ok(Self::Vulkan(ordinal));
         }
         if let Some(index) = normalized.strip_prefix("wgpu:") {
-            let ordinal = index.parse::<usize>().map_err(|_| {
-                OmniVoiceError::InvalidRequest(format!("invalid wgpu device ordinal in {value}"))
-            })?;
+            let ordinal = index
+                .parse::<usize>()
+                .map_err(|_| OmniVoiceError::InvalidRequest(format!("invalid wgpu device ordinal in {value}")))?;
             return Ok(Self::Wgpu(ordinal));
         }
-        Err(OmniVoiceError::InvalidRequest(format!(
-            "unsupported device spec {value}"
-        )))
+        Err(OmniVoiceError::InvalidRequest(format!("unsupported device spec {value}")))
     }
 
     pub fn resolve(self) -> Result<Device> {
@@ -93,9 +91,7 @@ impl DTypeSpec {
             "f32" => Ok(Self::F32),
             "f16" => Ok(Self::F16),
             "bf16" => Ok(Self::BF16),
-            other => Err(OmniVoiceError::InvalidRequest(format!(
-                "unsupported dtype spec {other}"
-            ))),
+            other => Err(OmniVoiceError::InvalidRequest(format!("unsupported dtype spec {other}"))),
         }
     }
 
@@ -134,10 +130,7 @@ impl DTypeSpec {
 }
 
 fn device_prefers_f16_activations(device: &Device) -> bool {
-    device.is_cuda()
-        || device.is_metal()
-        || device.is_vulkan()
-        || device.is_wgpu()
+    device.is_cuda() || device.is_metal() || device.is_vulkan() || device.is_wgpu()
 }
 
 pub(crate) fn activation_dtype_for_weights(
@@ -148,19 +141,13 @@ pub(crate) fn activation_dtype_for_weights(
     activation_dtype(format, weights, device_prefers_f16_activations(device))
 }
 
-fn activation_dtype(
-    format: RuntimeArtifactFormat,
-    weights: ModelWeightDType,
-    on_gpu: bool,
-) -> DType {
+fn activation_dtype(format: RuntimeArtifactFormat, weights: ModelWeightDType, on_gpu: bool) -> DType {
     match format {
         RuntimeArtifactFormat::SafetensorsManifest if !on_gpu => DType::F32,
         RuntimeArtifactFormat::GgufBundle if !on_gpu => DType::F32,
         RuntimeArtifactFormat::SafetensorsManifest => match weights {
             ModelWeightDType::BF16 => DType::BF16,
-            ModelWeightDType::F16 | ModelWeightDType::F32 | ModelWeightDType::Quantized => {
-                DType::F16
-            }
+            ModelWeightDType::F16 | ModelWeightDType::F32 | ModelWeightDType::Quantized => DType::F16,
         },
         // Candle QMatMul QTensor kernels accept f32/f16 activations only, not bf16.
         // On GPU use f16; CPU f16 is a scalar (no rayon) path and is much slower.
@@ -178,12 +165,7 @@ pub struct RuntimeOptions {
 
 impl RuntimeOptions {
     pub fn new(model_root: impl Into<PathBuf>) -> Self {
-        Self {
-            model_root: model_root.into(),
-            device: DeviceSpec::default(),
-            dtype: DTypeSpec::default(),
-            seed: None,
-        }
+        Self { model_root: model_root.into(), device: DeviceSpec::default(), dtype: DTypeSpec::default(), seed: None }
     }
 
     pub fn with_device(mut self, device: DeviceSpec) -> Self {
@@ -229,23 +211,13 @@ impl RuntimeOptions {
         self.dtype.resolve_for_runtime_device(device)
     }
 
-    pub fn resolve_stage0_dtype(
-        &self,
-        device: &Device,
-        runtime: &RuntimeArtifacts,
-    ) -> Result<DType> {
+    pub fn resolve_stage0_dtype(&self, device: &Device, runtime: &RuntimeArtifacts) -> Result<DType> {
         match self.dtype {
             DTypeSpec::Auto => {
                 warn_if_cpu_quantized_without_simd(device, runtime);
-                Ok(activation_dtype_for_weights(
-                    runtime.format(),
-                    runtime.native_weight_dtype()?,
-                    device,
-                ))
+                Ok(activation_dtype_for_weights(runtime.format(), runtime.native_weight_dtype()?, device))
             }
-            DTypeSpec::F32 | DTypeSpec::F16 | DTypeSpec::BF16 => {
-                Ok(self.dtype.resolve_for_runtime_device(device))
-            }
+            DTypeSpec::F32 | DTypeSpec::F16 | DTypeSpec::BF16 => Ok(self.dtype.resolve_for_runtime_device(device)),
         }
     }
 
@@ -301,7 +273,8 @@ fn resolve_auto_device() -> Result<Device> {
                 #[cfg(not(feature = "wgpu"))]
                 let _ = index;
             }
-            DeviceSpec::Metal => {
+            DeviceSpec::Metal =>
+            {
                 #[cfg(all(feature = "metal", target_os = "macos"))]
                 if let Ok(device) = Device::new_metal(0) {
                     return Ok(device);
@@ -321,20 +294,13 @@ fn resolve_cuda_device(index: usize) -> Result<Device> {
 
 #[cfg(not(feature = "cuda"))]
 fn resolve_cuda_device(index: usize) -> Result<Device> {
-    Err(OmniVoiceError::Unsupported(format!(
-        "cuda device cuda:{index} requires the `cuda` feature"
-    )))
+    Err(OmniVoiceError::Unsupported(format!("cuda device cuda:{index} requires the `cuda` feature")))
 }
 
 fn warn_if_cpu_quantized_without_simd(device: &Device, runtime: &RuntimeArtifacts) {
     let _ = (device, runtime);
     #[cfg(all(target_arch = "x86_64", not(target_feature = "avx2")))]
-    if device.is_cpu()
-        && matches!(
-            runtime.native_weight_dtype(),
-            Ok(ModelWeightDType::Quantized)
-        )
-    {
+    if device.is_cpu() && matches!(runtime.native_weight_dtype(), Ok(ModelWeightDType::Quantized)) {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
             eprintln!(
@@ -352,9 +318,7 @@ fn resolve_metal_device() -> Result<Device> {
 
 #[cfg(not(all(feature = "metal", target_os = "macos")))]
 fn resolve_metal_device() -> Result<Device> {
-    Err(OmniVoiceError::Unsupported(
-        "metal device requires the `metal` feature".to_string(),
-    ))
+    Err(OmniVoiceError::Unsupported("metal device requires the `metal` feature".to_string()))
 }
 
 #[cfg(feature = "vulkan")]
@@ -364,9 +328,7 @@ fn resolve_vulkan_device(index: usize) -> Result<Device> {
 
 #[cfg(not(feature = "vulkan"))]
 fn resolve_vulkan_device(index: usize) -> Result<Device> {
-    Err(OmniVoiceError::Unsupported(format!(
-        "vulkan device vulkan:{index} requires the `vulkan` feature"
-    )))
+    Err(OmniVoiceError::Unsupported(format!("vulkan device vulkan:{index} requires the `vulkan` feature")))
 }
 
 #[cfg(feature = "wgpu")]
@@ -376,9 +338,7 @@ fn resolve_wgpu_device(index: usize) -> Result<Device> {
 
 #[cfg(not(feature = "wgpu"))]
 fn resolve_wgpu_device(index: usize) -> Result<Device> {
-    Err(OmniVoiceError::Unsupported(format!(
-        "wgpu device wgpu:{index} requires the `wgpu` feature"
-    )))
+    Err(OmniVoiceError::Unsupported(format!("wgpu device wgpu:{index} requires the `wgpu` feature")))
 }
 
 #[cfg(test)]
@@ -408,35 +368,19 @@ mod tests {
     #[test]
     fn auto_activations_are_f32_on_cpu() {
         assert_eq!(
-            activation_dtype(
-                RuntimeArtifactFormat::SafetensorsManifest,
-                ModelWeightDType::F16,
-                false,
-            ),
+            activation_dtype(RuntimeArtifactFormat::SafetensorsManifest, ModelWeightDType::F16, false,),
             DType::F32
         );
         assert_eq!(
-            activation_dtype(
-                RuntimeArtifactFormat::SafetensorsManifest,
-                ModelWeightDType::BF16,
-                false,
-            ),
+            activation_dtype(RuntimeArtifactFormat::SafetensorsManifest, ModelWeightDType::BF16, false,),
             DType::F32
         );
         assert_eq!(
-            activation_dtype(
-                RuntimeArtifactFormat::SafetensorsManifest,
-                ModelWeightDType::F32,
-                false,
-            ),
+            activation_dtype(RuntimeArtifactFormat::SafetensorsManifest, ModelWeightDType::F32, false,),
             DType::F32
         );
         assert_eq!(
-            activation_dtype(
-                RuntimeArtifactFormat::GgufBundle,
-                ModelWeightDType::Quantized,
-                false,
-            ),
+            activation_dtype(RuntimeArtifactFormat::GgufBundle, ModelWeightDType::Quantized, false,),
             DType::F32
         );
     }
@@ -444,43 +388,20 @@ mod tests {
     #[test]
     fn auto_activations_use_f16_or_bf16_elsewhere() {
         assert_eq!(
-            activation_dtype(
-                RuntimeArtifactFormat::GgufBundle,
-                ModelWeightDType::Quantized,
-                false,
-            ),
+            activation_dtype(RuntimeArtifactFormat::GgufBundle, ModelWeightDType::Quantized, false,),
             DType::F32
         );
+        assert_eq!(activation_dtype(RuntimeArtifactFormat::GgufBundle, ModelWeightDType::BF16, true,), DType::F16);
         assert_eq!(
-            activation_dtype(
-                RuntimeArtifactFormat::GgufBundle,
-                ModelWeightDType::BF16,
-                true,
-            ),
-            DType::F16
-        );
-        assert_eq!(
-            activation_dtype(
-                RuntimeArtifactFormat::SafetensorsManifest,
-                ModelWeightDType::BF16,
-                true,
-            ),
+            activation_dtype(RuntimeArtifactFormat::SafetensorsManifest, ModelWeightDType::BF16, true,),
             DType::BF16
         );
         assert_eq!(
-            activation_dtype(
-                RuntimeArtifactFormat::SafetensorsManifest,
-                ModelWeightDType::F16,
-                true,
-            ),
+            activation_dtype(RuntimeArtifactFormat::SafetensorsManifest, ModelWeightDType::F16, true,),
             DType::F16
         );
         assert_eq!(
-            activation_dtype(
-                RuntimeArtifactFormat::SafetensorsManifest,
-                ModelWeightDType::F32,
-                true,
-            ),
+            activation_dtype(RuntimeArtifactFormat::SafetensorsManifest, ModelWeightDType::F32, true,),
             DType::F16
         );
     }

@@ -44,13 +44,7 @@ const ACCENTS: &[&str] = &[
 
 const TRANSLATED_CATEGORIES: &[&[(&str, &str)]] = &[
     &[("male", "男"), ("female", "女")],
-    &[
-        ("child", "儿童"),
-        ("teenager", "少年"),
-        ("young adult", "青年"),
-        ("middle-aged", "中年"),
-        ("elderly", "老年"),
-    ],
+    &[("child", "儿童"), ("teenager", "少年"), ("young adult", "青年"), ("middle-aged", "中年"), ("elderly", "老年")],
     &[
         ("very low pitch", "极低音调"),
         ("low pitch", "低音调"),
@@ -62,8 +56,7 @@ const TRANSLATED_CATEGORIES: &[&[(&str, &str)]] = &[
 ];
 
 pub fn contains_cjk(text: &str) -> bool {
-    text.chars()
-        .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch))
+    text.chars().any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch))
 }
 
 pub fn resolve_instruct(instruct: Option<&str>, use_zh: bool) -> Result<Option<String>> {
@@ -76,11 +69,8 @@ pub fn resolve_instruct(instruct: Option<&str>, use_zh: bool) -> Result<Option<S
         return Ok(None);
     }
 
-    let raw_items: Vec<&str> = instruct
-        .split(&[',', '，'][..])
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-        .collect();
+    let raw_items: Vec<&str> =
+        instruct.split(&[',', '，'][..]).map(str::trim).filter(|item| !item.is_empty()).collect();
 
     let mut unknown = Vec::new();
     let mut normalized = Vec::with_capacity(raw_items.len());
@@ -98,9 +88,7 @@ pub fn resolve_instruct(instruct: Option<&str>, use_zh: bool) -> Result<Option<S
         let mut lines = Vec::with_capacity(unknown.len());
         for (raw, lowered, suggestion) in unknown {
             if let Some(suggestion) = suggestion {
-                lines.push(format!(
-                    "  '{raw}' -> '{lowered}' (unsupported; did you mean '{suggestion}'?)"
-                ));
+                lines.push(format!("  '{raw}' -> '{lowered}' (unsupported; did you mean '{suggestion}'?)"));
             } else {
                 lines.push(format!("  '{raw}' -> '{lowered}' (unsupported)"));
             }
@@ -139,40 +127,21 @@ pub fn resolve_instruct(instruct: Option<&str>, use_zh: bool) -> Result<Option<S
     let unified: Vec<String> = if target_zh {
         normalized
             .into_iter()
-            .map(|item| {
-                instruct_en_to_zh()
-                    .get(item.as_str())
-                    .copied()
-                    .unwrap_or(item.as_str())
-                    .to_string()
-            })
+            .map(|item| instruct_en_to_zh().get(item.as_str()).copied().unwrap_or(item.as_str()).to_string())
             .collect()
     } else {
         normalized
             .into_iter()
-            .map(|item| {
-                instruct_zh_to_en()
-                    .get(item.as_str())
-                    .copied()
-                    .unwrap_or(item.as_str())
-                    .to_string()
-            })
+            .map(|item| instruct_zh_to_en().get(item.as_str()).copied().unwrap_or(item.as_str()).to_string())
             .collect()
     };
 
     let mut conflicts = Vec::new();
     for category in instruct_mutually_exclusive() {
-        let hits: Vec<&str> = unified
-            .iter()
-            .filter_map(|item| category.contains(item.as_str()).then_some(item.as_str()))
-            .collect();
+        let hits: Vec<&str> =
+            unified.iter().filter_map(|item| category.contains(item.as_str()).then_some(item.as_str())).collect();
         if hits.len() > 1 {
-            conflicts.push(
-                hits.iter()
-                    .map(|item| format!("'{item}'"))
-                    .collect::<Vec<_>>()
-                    .join(" vs "),
-            );
+            conflicts.push(hits.iter().map(|item| format!("'{item}'")).collect::<Vec<_>>().join(" vs "));
         }
     }
 
@@ -183,11 +152,7 @@ pub fn resolve_instruct(instruct: Option<&str>, use_zh: bool) -> Result<Option<S
         )));
     }
 
-    let separator = if unified.iter().any(|item| contains_cjk(item)) {
-        "，"
-    } else {
-        ", "
-    };
+    let separator = if unified.iter().any(|item| contains_cjk(item)) { "，" } else { ", " };
 
     Ok(Some(unified.join(separator)))
 }
@@ -198,9 +163,7 @@ fn closest_instruct_match(needle: &str) -> Option<&'static str> {
         .copied()
         .map(|candidate| (candidate, normalized_levenshtein(needle, candidate)))
         .filter(|(_, score)| *score >= 0.6)
-        .max_by(|(_, left), (_, right)| {
-            left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
-        })
+        .max_by(|(_, left), (_, right)| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(candidate, _)| candidate)
 }
 
@@ -217,12 +180,7 @@ fn instruct_en_to_zh() -> &'static HashMap<&'static str, &'static str> {
 }
 
 fn instruct_zh_to_en() -> &'static HashMap<&'static str, &'static str> {
-    INSTRUCT_ZH_TO_EN.get_or_init(|| {
-        instruct_en_to_zh()
-            .iter()
-            .map(|(en, zh)| (*zh, *en))
-            .collect()
-    })
+    INSTRUCT_ZH_TO_EN.get_or_init(|| instruct_en_to_zh().iter().map(|(en, zh)| (*zh, *en)).collect())
 }
 
 fn instruct_mutually_exclusive() -> &'static Vec<HashSet<&'static str>> {
@@ -255,11 +213,7 @@ fn instruct_all_valid() -> &'static HashSet<&'static str> {
 
 fn instruct_valid_en() -> &'static Vec<&'static str> {
     INSTRUCT_VALID_EN.get_or_init(|| {
-        let mut items: Vec<_> = instruct_all_valid()
-            .iter()
-            .copied()
-            .filter(|item| !contains_cjk(item))
-            .collect();
+        let mut items: Vec<_> = instruct_all_valid().iter().copied().filter(|item| !contains_cjk(item)).collect();
         items.sort_unstable();
         items
     })
@@ -267,11 +221,7 @@ fn instruct_valid_en() -> &'static Vec<&'static str> {
 
 fn instruct_valid_zh() -> &'static Vec<&'static str> {
     INSTRUCT_VALID_ZH.get_or_init(|| {
-        let mut items: Vec<_> = instruct_all_valid()
-            .iter()
-            .copied()
-            .filter(|item| contains_cjk(item))
-            .collect();
+        let mut items: Vec<_> = instruct_all_valid().iter().copied().filter(|item| contains_cjk(item)).collect();
         items.sort_unstable();
         items
     })

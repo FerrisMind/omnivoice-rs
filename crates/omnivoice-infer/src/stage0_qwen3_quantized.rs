@@ -3,12 +3,12 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(feature = "cuda")]
+use candle_core::IndexOp;
 use candle_core::{
     quantized::{GgmlDType, QMatMul, QTensor},
     DType, Module, Tensor,
 };
-#[cfg(feature = "cuda")]
-use candle_core::IndexOp;
 use candle_nn::Activation;
 use candle_transformers::quantized_var_builder::VarBuilder as QuantizedVarBuilder;
 
@@ -55,27 +55,13 @@ fn try_flash_attention_per_row(
     let repeats = n_heads / n_kv_heads;
     let mut row_outs = Vec::with_capacity(batch);
     for (batch_index, &active) in seqlens.iter().enumerate() {
-        let q_row = q
-            .i((batch_index..batch_index + 1, .., 0..active, ..))?
-            .transpose(1, 2)?
-            .contiguous()?;
-        let k_row = k
-            .i((batch_index..batch_index + 1, .., 0..active, ..))?
-            .transpose(1, 2)?
-            .contiguous()?;
-        let v_row = v
-            .i((batch_index..batch_index + 1, .., 0..active, ..))?
-            .transpose(1, 2)?
-            .contiguous()?;
-        let ctx = candle_flash_attn::flash_attn(&q_row, &k_row, &v_row, scale, false)?
-            .transpose(1, 2)?;
+        let q_row = q.i((batch_index..batch_index + 1, .., 0..active, ..))?.transpose(1, 2)?.contiguous()?;
+        let k_row = k.i((batch_index..batch_index + 1, .., 0..active, ..))?.transpose(1, 2)?.contiguous()?;
+        let v_row = v.i((batch_index..batch_index + 1, .., 0..active, ..))?.transpose(1, 2)?.contiguous()?;
+        let ctx = candle_flash_attn::flash_attn(&q_row, &k_row, &v_row, scale, false)?.transpose(1, 2)?;
         let ctx = if active < seq_len {
             let v_pad = v.i((batch_index..batch_index + 1, .., active..seq_len, ..))?;
-            let v_pad = if repeats > 1 {
-                candle_transformers::utils::repeat_kv(v_pad, repeats)?
-            } else {
-                v_pad
-            };
+            let v_pad = if repeats > 1 { candle_transformers::utils::repeat_kv(v_pad, repeats)? } else { v_pad };
             Tensor::cat(&[&ctx, &v_pad], 2)?
         } else {
             ctx
@@ -107,20 +93,13 @@ impl RotaryEmbedding {
     fn new(cfg: &Stage0Qwen3BackboneConfig, device: &candle_core::Device) -> Result<Self> {
         let dim = cfg.head_dim;
         let max_seq_len = cfg.max_position_embeddings;
-        let inv_freq: Vec<_> = (0..dim)
-            .step_by(2)
-            .map(|index| 1f32 / cfg.rope_theta.powf(index as f64 / dim as f64) as f32)
-            .collect();
+        let inv_freq: Vec<_> =
+            (0..dim).step_by(2).map(|index| 1f32 / cfg.rope_theta.powf(index as f64 / dim as f64) as f32).collect();
         let inv_freq_len = inv_freq.len();
         let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), device)?.to_dtype(DType::F32)?;
-        let t = Tensor::arange(0u32, max_seq_len as u32, device)?
-            .to_dtype(DType::F32)?
-            .reshape((max_seq_len, 1))?;
+        let t = Tensor::arange(0u32, max_seq_len as u32, device)?.to_dtype(DType::F32)?.reshape((max_seq_len, 1))?;
         let freqs = t.matmul(&inv_freq)?;
-        Ok(Self {
-            sin: freqs.sin()?,
-            cos: freqs.cos()?,
-        })
+        Ok(Self { sin: freqs.sin()?, cos: freqs.cos()? })
     }
 
     fn apply(&self, q: &Tensor, k: &Tensor, offset: usize) -> Result<(Tensor, Tensor)> {
@@ -209,32 +188,17 @@ impl QwenAttention {
             )?)?,
             o_proj: keep_quantized_matmul(get_quantized_qtensor_by_candidates(
                 &vb,
-                &[
-                    "attn_output.weight",
-                    "attn_output",
-                    "self_attn.o_proj.weight",
-                    "self_attn.o_proj",
-                ],
+                &["attn_output.weight", "attn_output", "self_attn.o_proj.weight", "self_attn.o_proj"],
             )?)?,
             q_norm: LocalRmsNorm::from_candidates(
                 &vb,
-                &[
-                    "attn_q_norm.weight",
-                    "attn_q_norm",
-                    "self_attn.q_norm.weight",
-                    "self_attn.q_norm",
-                ],
+                &["attn_q_norm.weight", "attn_q_norm", "self_attn.q_norm.weight", "self_attn.q_norm"],
                 cfg.rms_norm_eps,
                 activation_dtype,
             )?,
             k_norm: LocalRmsNorm::from_candidates(
                 &vb,
-                &[
-                    "attn_k_norm.weight",
-                    "attn_k_norm",
-                    "self_attn.k_norm.weight",
-                    "self_attn.k_norm",
-                ],
+                &["attn_k_norm.weight", "attn_k_norm", "self_attn.k_norm.weight", "self_attn.k_norm"],
                 cfg.rms_norm_eps,
                 activation_dtype,
             )?,
@@ -246,12 +210,7 @@ impl QwenAttention {
         })
     }
 
-    fn forward(
-        &self,
-        xs: &Tensor,
-        attention_mask: Option<&Tensor>,
-        flash_seqlens: Option<&[usize]>,
-    ) -> Result<Tensor> {
+    fn forward(&self, xs: &Tensor, attention_mask: Option<&Tensor>, flash_seqlens: Option<&[usize]>) -> Result<Tensor> {
         // On builds without `feature="cuda"` the flash branch is compiled out,
         // so keep the parameter referenced to avoid `unused_variables`.
         let _ = flash_seqlens;
@@ -259,48 +218,25 @@ impl QwenAttention {
         let q = self.q_proj.forward(xs)?;
         let k = self.k_proj.forward(xs)?;
         let v = self.v_proj.forward(xs)?;
-        let q = q
-            .reshape((batch, seq_len, self.num_heads, self.head_dim))?
-            .transpose(1, 2)?;
-        let k = k
-            .reshape((batch, seq_len, self.num_kv_heads, self.head_dim))?
-            .transpose(1, 2)?;
-        let v = v
-            .reshape((batch, seq_len, self.num_kv_heads, self.head_dim))?
-            .transpose(1, 2)?;
-        let q = self
-            .q_norm
-            .forward(&q.flatten(0, 2)?)?
-            .reshape((batch, self.num_heads, seq_len, self.head_dim))?;
-        let k = self
-            .k_norm
-            .forward(&k.flatten(0, 2)?)?
-            .reshape((batch, self.num_kv_heads, seq_len, self.head_dim))?;
+        let q = q.reshape((batch, seq_len, self.num_heads, self.head_dim))?.transpose(1, 2)?;
+        let k = k.reshape((batch, seq_len, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?;
+        let v = v.reshape((batch, seq_len, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?;
+        let q = self.q_norm.forward(&q.flatten(0, 2)?)?.reshape((batch, self.num_heads, seq_len, self.head_dim))?;
+        let k = self.k_norm.forward(&k.flatten(0, 2)?)?.reshape((batch, self.num_kv_heads, seq_len, self.head_dim))?;
         let (q, k) = self.rotary_emb.apply(&q, &k, 0)?;
 
         #[cfg(feature = "cuda")]
         if let Some(seqlens) = flash_seqlens {
             // Flash-Attention v2 expects half precision. Cast on-demand for quantized path.
             if q.device().is_cuda() {
-                let qh = if matches!(q.dtype(), DType::F16 | DType::BF16) {
-                    q.clone()
-                } else {
-                    q.to_dtype(DType::F16)?
-                };
-                let kh = if matches!(k.dtype(), DType::F16 | DType::BF16) {
-                    k.clone()
-                } else {
-                    k.to_dtype(DType::F16)?
-                };
-                let vh = if matches!(v.dtype(), DType::F16 | DType::BF16) {
-                    v.clone()
-                } else {
-                    v.to_dtype(DType::F16)?
-                };
+                let qh =
+                    if matches!(q.dtype(), DType::F16 | DType::BF16) { q.clone() } else { q.to_dtype(DType::F16)? };
+                let kh =
+                    if matches!(k.dtype(), DType::F16 | DType::BF16) { k.clone() } else { k.to_dtype(DType::F16)? };
+                let vh =
+                    if matches!(v.dtype(), DType::F16 | DType::BF16) { v.clone() } else { v.to_dtype(DType::F16)? };
                 let scale_f32 = 1.0f32 / (self.head_dim as f32).sqrt();
-                if let Some(ctx) =
-                    try_flash_attention_per_row(&qh, &kh, &vh, seqlens, scale_f32)?
-                {
+                if let Some(ctx) = try_flash_attention_per_row(&qh, &kh, &vh, seqlens, scale_f32)? {
                     return Ok(ctx
                         .transpose(1, 2)?
                         .contiguous()?
@@ -326,11 +262,7 @@ impl QwenAttention {
         }
         let probs = candle_nn::ops::softmax_last_dim(&scores)?;
         let context = probs.matmul(&v)?;
-        Ok(context
-            .transpose(1, 2)?
-            .contiguous()?
-            .reshape((batch, seq_len, self.hidden_size))?
-            .apply(&self.o_proj)?)
+        Ok(context.transpose(1, 2)?.contiguous()?.reshape((batch, seq_len, self.hidden_size))?.apply(&self.o_proj)?)
     }
 }
 
@@ -354,40 +286,23 @@ impl QwenDecoderLayer {
             mlp: QwenMlp::load(cfg, vb.clone())?,
             input_layernorm: LocalRmsNorm::from_candidates(
                 &vb,
-                &[
-                    "attn_norm.weight",
-                    "attn_norm",
-                    "input_layernorm.weight",
-                    "input_layernorm",
-                ],
+                &["attn_norm.weight", "attn_norm", "input_layernorm.weight", "input_layernorm"],
                 cfg.rms_norm_eps,
                 activation_dtype,
             )?,
             post_attention_layernorm: LocalRmsNorm::from_candidates(
                 &vb,
-                &[
-                    "ffn_norm.weight",
-                    "ffn_norm",
-                    "post_attention_layernorm.weight",
-                    "post_attention_layernorm",
-                ],
+                &["ffn_norm.weight", "ffn_norm", "post_attention_layernorm.weight", "post_attention_layernorm"],
                 cfg.rms_norm_eps,
                 activation_dtype,
             )?,
         })
     }
 
-    fn forward(
-        &self,
-        xs: &Tensor,
-        attention_mask: Option<&Tensor>,
-        flash_seqlens: Option<&[usize]>,
-    ) -> Result<Tensor> {
+    fn forward(&self, xs: &Tensor, attention_mask: Option<&Tensor>, flash_seqlens: Option<&[usize]>) -> Result<Tensor> {
         let residual = xs;
         let hidden = self.input_layernorm.forward(xs)?;
-        let hidden = self
-            .self_attn
-            .forward(&hidden, attention_mask, flash_seqlens)?;
+        let hidden = self.self_attn.forward(&hidden, attention_mask, flash_seqlens)?;
         // Attention output can be F32 (vulkan/wgpu quantized matmuls) while the
         // running residual is the GGUF runtime dtype (F16 on GPU) — cast back so
         // the add is single-dtype on every backend (no-op on cuda/cpu).
@@ -414,12 +329,7 @@ struct LocalRmsNorm {
 }
 
 impl LocalRmsNorm {
-    fn from_candidates(
-        vb: &QuantizedVarBuilder,
-        names: &[&str],
-        eps: f64,
-        activation_dtype: DType,
-    ) -> Result<Self> {
+    fn from_candidates(vb: &QuantizedVarBuilder, names: &[&str], eps: f64, activation_dtype: DType) -> Result<Self> {
         let qtensor = get_qtensor_by_candidates(vb, names)?;
         // 1D norms are not quantized matmuls; dequant the tiny vector once.
         let weight = qtensor.dequantize(vb.device())?.to_dtype(activation_dtype)?;
@@ -457,26 +367,16 @@ pub(crate) fn keep_quantized_matmul(weight: Arc<QTensor>) -> Result<QMatMul> {
     }
 }
 
-fn get_qtensor_by_candidates(
-    vb: &QuantizedVarBuilder,
-    names: &[&str],
-) -> Result<Arc<QTensor>> {
+fn get_qtensor_by_candidates(vb: &QuantizedVarBuilder, names: &[&str]) -> Result<Arc<QTensor>> {
     for name in names {
         if let Ok(tensor) = vb.get_no_shape(name) {
             return Ok(tensor);
         }
     }
-    Err(candle_core::Error::msg(format!(
-        "cannot find any GGUF tensor candidate: {}",
-        names.join(", ")
-    ))
-    .into())
+    Err(candle_core::Error::msg(format!("cannot find any GGUF tensor candidate: {}", names.join(", "))).into())
 }
 
-fn get_quantized_qtensor_by_candidates(
-    vb: &QuantizedVarBuilder,
-    names: &[&str],
-) -> Result<Arc<QTensor>> {
+fn get_quantized_qtensor_by_candidates(vb: &QuantizedVarBuilder, names: &[&str]) -> Result<Arc<QTensor>> {
     // Packed Q4/Q8 variants are required by Candle's CUDA quantized kernels.
     // Some GGUF tensor aliases resolve to float tensors; skip those in favor of
     // a packed candidate, but remember the first float alias as a fallback so
@@ -498,33 +398,17 @@ fn get_quantized_qtensor_by_candidates(
     if let Some(tensor) = float_fallback {
         return Ok(tensor);
     }
-    Err(candle_core::Error::msg(format!(
-        "cannot find any quantized GGUF tensor candidate: {}",
-        names.join(", ")
-    ))
-    .into())
+    Err(candle_core::Error::msg(format!("cannot find any quantized GGUF tensor candidate: {}", names.join(", ")))
+        .into())
 }
 
 impl Stage0Qwen3QuantizedBackbone {
-    pub fn load(
-        cfg: &Stage0Qwen3BackboneConfig,
-        qvb: QuantizedVarBuilder,
-        activation_dtype: DType,
-    ) -> Result<Self> {
+    pub fn load(cfg: &Stage0Qwen3BackboneConfig, qvb: QuantizedVarBuilder, activation_dtype: DType) -> Result<Self> {
         let embed_tokens_q = get_qtensor_by_candidates(
             &qvb,
-            &[
-                "llm.embed_tokens.weight",
-                "llm.embed_tokens",
-                "llm.token_embd.weight",
-                "llm.token_embd",
-            ],
+            &["llm.embed_tokens.weight", "llm.embed_tokens", "llm.token_embd.weight", "llm.token_embd"],
         )?;
-        let embed_tokens = QuantizedEmbedding::new(
-            embed_tokens_q,
-            activation_dtype,
-            qvb.device().clone(),
-        )?;
+        let embed_tokens = QuantizedEmbedding::new(embed_tokens_q, activation_dtype, qvb.device().clone())?;
         let rotary = Arc::new(RotaryEmbedding::new(cfg, qvb.device())?);
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         for index in 0..cfg.num_hidden_layers {
@@ -533,29 +417,15 @@ impl Stage0Qwen3QuantizedBackbone {
             } else {
                 qvb.pp(format!("llm.layers.{index}"))
             };
-            layers.push(QwenDecoderLayer::load(
-                cfg,
-                rotary.clone(),
-                base,
-                activation_dtype,
-            )?);
+            layers.push(QwenDecoderLayer::load(cfg, rotary.clone(), base, activation_dtype)?);
         }
         let norm = LocalRmsNorm::from_candidates(
             &qvb,
-            &[
-                "llm.output_norm.weight",
-                "llm.output_norm",
-                "llm.norm.weight",
-                "llm.norm",
-            ],
+            &["llm.output_norm.weight", "llm.output_norm", "llm.norm.weight", "llm.norm"],
             cfg.rms_norm_eps,
             activation_dtype,
         )?;
-        Ok(Self {
-            embed_tokens,
-            layers,
-            norm,
-        })
+        Ok(Self { embed_tokens, layers, norm })
     }
 
     pub fn embed_text_tokens(&self, input_ids: &Tensor) -> Result<Tensor> {
@@ -578,9 +448,6 @@ impl Stage0Qwen3QuantizedBackbone {
             }
         }
         let final_hidden = self.norm.forward(&hidden)?;
-        Ok(Stage0BackboneOutput {
-            final_hidden,
-            captured_hidden_layers: captures,
-        })
+        Ok(Stage0BackboneOutput { final_hidden, captured_hidden_layers: captures })
     }
 }

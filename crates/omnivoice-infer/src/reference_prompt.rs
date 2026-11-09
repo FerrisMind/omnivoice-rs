@@ -12,11 +12,7 @@ pub struct ReferencePromptOptions {
 
 impl Default for ReferencePromptOptions {
     fn default() -> Self {
-        Self {
-            sample_rate: 24_000,
-            hop_length: 960,
-            expected_codebooks: 8,
-        }
+        Self { sample_rate: 24_000, hop_length: 960, expected_codebooks: 8 }
     }
 }
 
@@ -56,14 +52,8 @@ impl ReferencePromptBuilder {
             });
         }
         if tokens.dims().1 == 0 {
-            return Err(OmniVoiceError::InvalidRequest(
-                "ref_audio_tokens must contain at least one frame".to_string(),
-            ));
+            return Err(OmniVoiceError::InvalidRequest("ref_audio_tokens must contain at least one frame".to_string()));
         }
-        Ok(VoiceClonePrompt {
-            ref_audio_tokens: tokens,
-            ref_text: ref_text.into(),
-            ref_rms,
-        })
+        Ok(VoiceClonePrompt { ref_audio_tokens: tokens, ref_text: ref_text.into(), ref_rms })
     }
 }

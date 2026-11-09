@@ -16,8 +16,8 @@ pub fn add_punctuation(text: &str) -> String {
     }
 
     let end_punctuation = HashSet::from([
-        ';', ':', ',', '.', '!', '?', '…', ')', ']', '}', '"', '\'', '“', '”', '‘', '’', '；',
-        '：', '，', '。', '！', '？', '、', '）', '】',
+        ';', ':', ',', '.', '!', '?', '…', ')', ']', '}', '"', '\'', '“', '”', '‘', '’', '；', '：', '，', '。', '！',
+        '？', '、', '）', '】',
     ]);
 
     if end_punctuation.contains(&text.chars().last().unwrap_or_default()) {
@@ -51,21 +51,9 @@ pub fn tokenize_with_nonverbal_tags(tokenizer: &Tokenizer, text: &str) -> Result
     for matched in nonverbal_tag_regex().find_iter(text) {
         found_tag = true;
         if matched.start() > last_end {
-            ids.extend(
-                tokenizer
-                    .encode(&text[last_end..matched.start()], false)?
-                    .get_ids()
-                    .iter()
-                    .copied(),
-            );
+            ids.extend(tokenizer.encode(&text[last_end..matched.start()], false)?.get_ids().iter().copied());
         }
-        ids.extend(
-            tokenizer
-                .encode(matched.as_str(), false)?
-                .get_ids()
-                .iter()
-                .copied(),
-        );
+        ids.extend(tokenizer.encode(matched.as_str(), false)?.get_ids().iter().copied());
         last_end = matched.end();
     }
 
@@ -74,28 +62,17 @@ pub fn tokenize_with_nonverbal_tags(tokenizer: &Tokenizer, text: &str) -> Result
     }
 
     if last_end < text.len() {
-        ids.extend(
-            tokenizer
-                .encode(&text[last_end..], false)?
-                .get_ids()
-                .iter()
-                .copied(),
-        );
+        ids.extend(tokenizer.encode(&text[last_end..], false)?.get_ids().iter().copied());
     }
     Ok(ids)
 }
 
-pub fn chunk_text_punctuation(
-    text: &str,
-    chunk_len: usize,
-    min_chunk_len: Option<usize>,
-) -> Vec<String> {
+pub fn chunk_text_punctuation(text: &str, chunk_len: usize, min_chunk_len: Option<usize>) -> Vec<String> {
     let abbreviations: HashSet<&'static str> = HashSet::from([
-        "Mr.", "Mrs.", "Ms.", "Dr.", "Prof.", "Sr.", "Jr.", "Rev.", "Fr.", "Hon.", "Pres.", "Gov.",
-        "Capt.", "Gen.", "Sen.", "Rep.", "Col.", "Maj.", "Lt.", "Cmdr.", "Sgt.", "Cpl.", "Co.",
-        "Corp.", "Inc.", "Ltd.", "Est.", "Dept.", "St.", "Ave.", "Blvd.", "Rd.", "Mt.", "Ft.",
-        "No.", "Jan.", "Feb.", "Mar.", "Apr.", "Aug.", "Sep.", "Sept.", "Oct.", "Nov.", "Dec.",
-        "i.e.", "e.g.", "vs.", "Vs.", "Etc.", "approx.", "fig.", "def.",
+        "Mr.", "Mrs.", "Ms.", "Dr.", "Prof.", "Sr.", "Jr.", "Rev.", "Fr.", "Hon.", "Pres.", "Gov.", "Capt.", "Gen.",
+        "Sen.", "Rep.", "Col.", "Maj.", "Lt.", "Cmdr.", "Sgt.", "Cpl.", "Co.", "Corp.", "Inc.", "Ltd.", "Est.",
+        "Dept.", "St.", "Ave.", "Blvd.", "Rd.", "Mt.", "Ft.", "No.", "Jan.", "Feb.", "Mar.", "Apr.", "Aug.", "Sep.",
+        "Sept.", "Oct.", "Nov.", "Dec.", "i.e.", "e.g.", "vs.", "Vs.", "Etc.", "approx.", "fig.", "def.",
     ]);
     let split_punctuation: HashSet<char> = ".,;:!?。，；：！？".chars().collect();
     let closing_marks: HashSet<char> = "\"'“”‘’）]》>」】".chars().collect();
@@ -116,10 +93,7 @@ pub fn chunk_text_punctuation(
         if split_punctuation.contains(&token) {
             let is_abbreviation = if token == '.' {
                 let current_str: String = current.iter().collect();
-                current_str
-                    .split_whitespace()
-                    .last()
-                    .is_some_and(|word| abbreviations.contains(word))
+                current_str.split_whitespace().last().is_some_and(|word| abbreviations.contains(word))
             } else {
                 false
             };

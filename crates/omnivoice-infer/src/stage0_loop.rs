@@ -10,33 +10,23 @@ pub struct PredictionResult {
     pub dims: (usize, usize),
 }
 
-pub fn build_timesteps(
-    t_start: f32,
-    t_end: f32,
-    num_step: usize,
-    t_shift: f32,
-) -> Result<Vec<f32>> {
+pub fn build_timesteps(t_start: f32, t_end: f32, num_step: usize, t_shift: f32) -> Result<Vec<f32>> {
     if num_step == 0 {
-        return Err(OmniVoiceError::InvalidRequest(
-            "num_step must be > 0".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidRequest("num_step must be > 0".to_string()));
     }
     if !t_start.is_finite() || !t_end.is_finite() || !t_shift.is_finite() || t_shift <= 0.0 {
         return Err(OmniVoiceError::InvalidRequest(
             "timestep parameters must be finite and t_shift must be greater than zero".to_string(),
         ));
     }
-    let capacity = num_step
-        .checked_add(1)
-        .ok_or_else(|| OmniVoiceError::InvalidRequest("num_step is too large".to_string()))?;
+    let capacity =
+        num_step.checked_add(1).ok_or_else(|| OmniVoiceError::InvalidRequest("num_step is too large".to_string()))?;
     let mut timesteps = Vec::with_capacity(capacity);
     for index in 0..=num_step {
         let t = t_start + ((t_end - t_start) * index as f32 / num_step as f32);
         let value = (t_shift * t) / (1.0 + (t_shift - 1.0) * t);
         if !value.is_finite() {
-            return Err(OmniVoiceError::InvalidRequest(
-                "timestep schedule contains a non-finite value".to_string(),
-            ));
+            return Err(OmniVoiceError::InvalidRequest("timestep schedule contains a non-finite value".to_string()));
         }
         timesteps.push(value);
     }
@@ -50,13 +40,10 @@ pub fn build_unmask_schedules(
     num_step: usize,
 ) -> Result<Vec<Vec<usize>>> {
     if num_step == 0 {
-        return Err(OmniVoiceError::InvalidRequest(
-            "num_step must be > 0".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidRequest("num_step must be > 0".to_string()));
     }
-    let expected_len = num_step
-        .checked_add(1)
-        .ok_or_else(|| OmniVoiceError::InvalidRequest("num_step is too large".to_string()))?;
+    let expected_len =
+        num_step.checked_add(1).ok_or_else(|| OmniVoiceError::InvalidRequest("num_step is too large".to_string()))?;
     if timesteps.len() != expected_len {
         return Err(OmniVoiceError::InvalidRequest(format!(
             "timesteps length must be num_step + 1, got {} for num_step {num_step}",
@@ -64,20 +51,16 @@ pub fn build_unmask_schedules(
         )));
     }
     if timesteps.iter().any(|value| !value.is_finite()) {
-        return Err(OmniVoiceError::InvalidRequest(
-            "timesteps must contain only finite values".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidRequest("timesteps must contain only finite values".to_string()));
     }
     if timesteps.windows(2).any(|window| window[1] < window[0]) {
-        return Err(OmniVoiceError::InvalidRequest(
-            "timesteps must be non-decreasing".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidRequest("timesteps must be non-decreasing".to_string()));
     }
     let mut schedules = Vec::with_capacity(target_lens.len());
     for target_len in target_lens {
-        let total_mask = target_len.checked_mul(num_audio_codebook).ok_or_else(|| {
-            OmniVoiceError::InvalidRequest("target token count is too large".to_string())
-        })?;
+        let total_mask = target_len
+            .checked_mul(num_audio_codebook)
+            .ok_or_else(|| OmniVoiceError::InvalidRequest("target token count is too large".to_string()))?;
         let mut remaining = total_mask;
         let mut schedule = Vec::with_capacity(num_step);
         for step in 0..num_step {
@@ -98,9 +81,7 @@ pub fn build_unmask_schedules(
 
 pub fn pack_cfg_batch(prepared: &[PreparedPrompt], target_lens: &[usize]) -> Result<BatchedInputs> {
     if prepared.is_empty() {
-        return Err(OmniVoiceError::InvalidRequest(
-            "prepared prompts cannot be empty".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidRequest("prepared prompts cannot be empty".to_string()));
     }
     if prepared.len() != target_lens.len() {
         return Err(OmniVoiceError::InvalidRequest(format!(
@@ -131,9 +112,7 @@ pub fn pack_cfg_batch(prepared: &[PreparedPrompt], target_lens: &[usize]) -> Res
             )));
         }
         if item.audio_mask_id != prepared[0].audio_mask_id {
-            return Err(OmniVoiceError::InvalidData(format!(
-                "prepared prompt {index} uses a different audio mask id"
-            )));
+            return Err(OmniVoiceError::InvalidData(format!("prepared prompt {index} uses a different audio mask id")));
         }
         if *target_len == 0 || *target_len > item.total_length {
             return Err(OmniVoiceError::InvalidRequest(format!(
@@ -142,24 +121,14 @@ pub fn pack_cfg_batch(prepared: &[PreparedPrompt], target_lens: &[usize]) -> Res
             )));
         }
     }
-    let max_c_len = prepared
-        .iter()
-        .map(|item| item.total_length)
-        .max()
-        .unwrap_or_default();
+    let max_c_len = prepared.iter().map(|item| item.total_length).max().unwrap_or_default();
     let max_target_len = *target_lens.iter().max().unwrap_or(&0);
     let audio_mask_id = prepared[0].audio_mask_id;
 
-    let mut batch_input_ids = I64Tensor3::full(
-        (2 * batch_size, num_audio_codebook, max_c_len),
-        audio_mask_id,
-    );
+    let mut batch_input_ids = I64Tensor3::full((2 * batch_size, num_audio_codebook, max_c_len), audio_mask_id);
     let mut batch_audio_mask = BoolTensor2::zeros((2 * batch_size, max_c_len));
     let mut batch_attention_mask = BoolTensor4::zeros((2 * batch_size, 1, max_c_len, max_c_len));
-    let tokens_init = I64Tensor3::full(
-        (batch_size, num_audio_codebook, max_target_len),
-        audio_mask_id,
-    );
+    let tokens_init = I64Tensor3::full((batch_size, num_audio_codebook, max_target_len), audio_mask_id);
 
     for (index, item) in prepared.iter().enumerate() {
         let cond_len = item.total_length;
@@ -181,10 +150,7 @@ pub fn pack_cfg_batch(prepared: &[PreparedPrompt], target_lens: &[usize]) -> Res
         let uncond_row = batch_size + index;
         for codebook in 0..num_audio_codebook {
             for seq in 0..target_len {
-                let source = item
-                    .prompt
-                    .input_ids
-                    .get(0, codebook, cond_len - target_len + seq);
+                let source = item.prompt.input_ids.get(0, codebook, cond_len - target_len + seq);
                 batch_input_ids.set(uncond_row, codebook, seq, source);
             }
         }
@@ -203,13 +169,7 @@ pub fn pack_cfg_batch(prepared: &[PreparedPrompt], target_lens: &[usize]) -> Res
     let timesteps = build_timesteps(0.0, 1.0, 32, 0.1)?;
     let schedules = build_unmask_schedules(target_lens, num_audio_codebook, &timesteps, 32)?;
 
-    Ok(BatchedInputs {
-        batch_input_ids,
-        batch_audio_mask,
-        batch_attention_mask,
-        tokens_init,
-        schedules,
-    })
+    Ok(BatchedInputs { batch_input_ids, batch_audio_mask, batch_attention_mask, tokens_init, schedules })
 }
 
 pub fn predict_tokens_with_scoring(
@@ -222,14 +182,10 @@ pub fn predict_tokens_with_scoring(
     audio_vocab_size: usize,
 ) -> Result<PredictionResult> {
     if c_logits.len() != u_logits.len() {
-        return Err(OmniVoiceError::InvalidData(
-            "c_logits and u_logits lengths differ".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidData("c_logits and u_logits lengths differ".to_string()));
     }
     if num_audio_codebook == 0 || audio_vocab_size == 0 {
-        return Err(OmniVoiceError::InvalidRequest(
-            "num_audio_codebook and audio_vocab_size must be > 0".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidRequest("num_audio_codebook and audio_vocab_size must be > 0".to_string()));
     }
     if audio_mask_id >= audio_vocab_size {
         return Err(OmniVoiceError::InvalidRequest(format!(
@@ -238,18 +194,11 @@ pub fn predict_tokens_with_scoring(
     }
     if !guidance_scale.is_finite() || !class_temperature.is_finite() || class_temperature < 0.0 {
         return Err(OmniVoiceError::InvalidRequest(
-            "guidance_scale and class_temperature must be finite, with class_temperature non-negative"
-                .to_string(),
+            "guidance_scale and class_temperature must be finite, with class_temperature non-negative".to_string(),
         ));
     }
-    if !c_logits
-        .len()
-        .is_multiple_of(num_audio_codebook * audio_vocab_size)
-    {
-        return Err(OmniVoiceError::InvalidData(format!(
-            "unexpected logits length {}",
-            c_logits.len()
-        )));
+    if !c_logits.len().is_multiple_of(num_audio_codebook * audio_vocab_size) {
+        return Err(OmniVoiceError::InvalidData(format!("unexpected logits length {}", c_logits.len())));
     }
 
     let position_count = c_logits.len() / (num_audio_codebook * audio_vocab_size);
@@ -293,11 +242,7 @@ pub fn predict_tokens_with_scoring(
         }
     }
 
-    Ok(PredictionResult {
-        pred_tokens,
-        confidence_scores,
-        dims: (num_audio_codebook, position_count),
-    })
+    Ok(PredictionResult { pred_tokens, confidence_scores, dims: (num_audio_codebook, position_count) })
 }
 
 pub fn apply_step_updates(
@@ -320,11 +265,7 @@ pub fn apply_step_updates(
         .map(|(index, _)| (index, scores[index]))
         .collect();
     candidates.sort_by(|left, right| {
-        right
-            .1
-            .partial_cmp(&left.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| left.0.cmp(&right.0))
+        right.1.partial_cmp(&left.1).unwrap_or(std::cmp::Ordering::Equal).then_with(|| left.0.cmp(&right.0))
     });
 
     for (index, _) in candidates.into_iter().take(update_count) {

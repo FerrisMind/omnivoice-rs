@@ -110,26 +110,18 @@ impl ModelSource {
 
 fn download_tts_snapshot(repo_id: &str) -> Result<PathBuf> {
     let api = Api::new().map_err(|error| OmniVoiceError::InvalidData(error.to_string()))?;
-    let repo = api.repo(Repo::with_revision(
-        repo_id.to_string(),
-        RepoType::Model,
-        "main".to_string(),
-    ));
+    let repo = api.repo(Repo::with_revision(repo_id.to_string(), RepoType::Model, "main".to_string()));
 
     match repo.get(RUNTIME_MANIFEST_FILE_NAME) {
         Ok(manifest_path) => {
             let snapshot_root = snapshot_root_from_manifest_path(&manifest_path)?;
-            let manifest: RuntimeArtifactManifest =
-                serde_json::from_str(&fs::read_to_string(&manifest_path)?)?;
+            let manifest: RuntimeArtifactManifest = serde_json::from_str(&fs::read_to_string(&manifest_path)?)?;
             for target in manifest_download_targets(&manifest) {
-                repo.get(&target)
-                    .map_err(|error| OmniVoiceError::InvalidData(error.to_string()))?;
+                repo.get(&target).map_err(|error| OmniVoiceError::InvalidData(error.to_string()))?;
             }
             Ok(snapshot_root)
         }
-        Err(_error) if repo_id == DEFAULT_OMNIVOICE_REPO => {
-            download_official_omnivoice_snapshot(&repo)
-        }
+        Err(_error) if repo_id == DEFAULT_OMNIVOICE_REPO => download_official_omnivoice_snapshot(&repo),
         Err(error) => Err(OmniVoiceError::InvalidData(format!(
             "model repo `{repo_id}` is missing required `{RUNTIME_MANIFEST_FILE_NAME}`: {error}"
         ))),
@@ -140,33 +132,22 @@ fn download_official_omnivoice_snapshot(repo: &ApiRepo) -> Result<PathBuf> {
     let manifest = load_official_omnivoice_manifest()?;
     let targets = manifest_download_targets(&manifest);
     let anchor = targets.first().ok_or_else(|| {
-        OmniVoiceError::InvalidData(
-            "official OmniVoice manifest does not define any files".to_string(),
-        )
+        OmniVoiceError::InvalidData("official OmniVoice manifest does not define any files".to_string())
     })?;
-    let anchor_path = repo
-        .get(anchor)
-        .map_err(|error| OmniVoiceError::InvalidData(error.to_string()))?;
+    let anchor_path = repo.get(anchor).map_err(|error| OmniVoiceError::InvalidData(error.to_string()))?;
     let snapshot_root = anchor_path.parent().ok_or_else(|| {
-        OmniVoiceError::InvalidData(format!(
-            "hf-hub returned an invalid snapshot path for {}",
-            repo.url(anchor)
-        ))
+        OmniVoiceError::InvalidData(format!("hf-hub returned an invalid snapshot path for {}", repo.url(anchor)))
     })?;
 
     for target in &targets {
-        repo.get(target)
-            .map_err(|error| OmniVoiceError::InvalidData(error.to_string()))?;
+        repo.get(target).map_err(|error| OmniVoiceError::InvalidData(error.to_string()))?;
     }
 
     materialize_runtime_manifest(snapshot_root, &manifest)?;
     Ok(snapshot_root.to_path_buf())
 }
 
-fn materialize_runtime_manifest(
-    snapshot_root: &Path,
-    manifest: &RuntimeArtifactManifest,
-) -> Result<PathBuf> {
+fn materialize_runtime_manifest(snapshot_root: &Path, manifest: &RuntimeArtifactManifest) -> Result<PathBuf> {
     let manifest_path = snapshot_root.join(RUNTIME_MANIFEST_FILE_NAME);
     if manifest_path.is_file() {
         return Ok(manifest_path);
@@ -202,13 +183,8 @@ pub(crate) fn ensure_local_runtime_manifest(model_root: &Path) -> Result<PathBuf
         "audio_tokenizer/model.safetensors",
         "audio_tokenizer/preprocessor_config.json",
     ];
-    if !required_files
-        .iter()
-        .all(|relative| model_root.join(relative).is_file())
-    {
-        return Err(OmniVoiceError::MissingArtifact {
-            path: manifest_path,
-        });
+    if !required_files.iter().all(|relative| model_root.join(relative).is_file()) {
+        return Err(OmniVoiceError::MissingArtifact { path: manifest_path });
     }
 
     let lock_path = model_root.join(".omnivoice.artifacts.lock");
@@ -227,10 +203,7 @@ pub(crate) fn ensure_local_runtime_manifest(model_root: &Path) -> Result<PathBuf
 
 fn snapshot_root_from_manifest_path(path: &Path) -> Result<PathBuf> {
     path.parent().map(Path::to_path_buf).ok_or_else(|| {
-        OmniVoiceError::InvalidData(format!(
-            "hf-hub returned an invalid snapshot path for {}",
-            path.display()
-        ))
+        OmniVoiceError::InvalidData(format!("hf-hub returned an invalid snapshot path for {}", path.display()))
     })
 }
 
@@ -254,9 +227,7 @@ fn normalize_safe_relative_path(path: &Path) -> Option<String> {
     if normalized.is_empty()
         || normalized.starts_with('/')
         || normalized.contains(':')
-        || normalized
-            .split('/')
-            .any(|component| component == "." || component == "..")
+        || normalized.split('/').any(|component| component == "." || component == "..")
     {
         return None;
     }
@@ -273,18 +244,13 @@ mod tests {
     };
 
     fn temporary_root(name: &str) -> PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
         std::env::temp_dir().join(format!("omnivoice-model-source-{name}-{nonce}"))
     }
 
     #[test]
     fn missing_windows_path_is_not_treated_as_huggingface_repo() {
-        let error =
-            classify_model_source(Some(r"C:\definitely-missing\omnivoice"), "fallback/repo")
-                .unwrap_err();
+        let error = classify_model_source(Some(r"C:\definitely-missing\omnivoice"), "fallback/repo").unwrap_err();
         assert!(error.to_string().contains("definitely-missing"));
     }
 
@@ -306,13 +272,8 @@ mod tests {
 
         let manifest_path = ensure_local_runtime_manifest(&root).unwrap();
         assert!(manifest_path.is_file());
-        assert!(fs::read_to_string(manifest_path)
-            .unwrap()
-            .contains("\"version\": 1"));
-        assert!(matches!(
-            classify_model_source(root.to_str(), "fallback/repo").unwrap(),
-            ModelSource::LocalPath(_)
-        ));
+        assert!(fs::read_to_string(manifest_path).unwrap().contains("\"version\": 1"));
+        assert!(matches!(classify_model_source(root.to_str(), "fallback/repo").unwrap(), ModelSource::LocalPath(_)));
 
         fs::remove_dir_all(root).unwrap();
     }
