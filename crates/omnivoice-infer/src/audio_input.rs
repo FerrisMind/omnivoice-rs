@@ -5,8 +5,8 @@ use std::{
 };
 
 use symphonia::core::{
-    audio::SampleBuffer, codecs::DecoderOptions, errors::Error as SymphoniaError,
-    formats::FormatOptions, io::MediaSourceStream, meta::MetadataOptions, probe::Hint,
+    audio::SampleBuffer, codecs::DecoderOptions, errors::Error as SymphoniaError, formats::FormatOptions,
+    io::MediaSourceStream, meta::MetadataOptions, probe::Hint,
 };
 
 use crate::{
@@ -31,10 +31,7 @@ pub struct ReferenceAudioProcessor {
 
 impl ReferenceAudioProcessor {
     pub fn new(target_sample_rate: u32, hop_length: usize) -> Self {
-        Self {
-            target_sample_rate,
-            hop_length,
-        }
+        Self { target_sample_rate, hop_length }
     }
 
     pub fn load_input(&self, input: &ReferenceAudioInput) -> Result<WaveformInput> {
@@ -49,9 +46,7 @@ impl ReferenceAudioProcessor {
             ));
         }
         if self.hop_length == 0 {
-            return Err(OmniVoiceError::InvalidRequest(
-                "audio hop length must be greater than zero".to_string(),
-            ));
+            return Err(OmniVoiceError::InvalidRequest("audio hop length must be greater than zero".to_string()));
         }
         Ok(waveform)
     }
@@ -70,9 +65,7 @@ impl ReferenceAudioProcessor {
 
         let ref_rms = root_mean_square(&mono);
         if ref_rms.is_some_and(|rms| !rms.is_finite()) {
-            return Err(OmniVoiceError::InvalidRequest(
-                "reference audio RMS is not finite".to_string(),
-            ));
+            return Err(OmniVoiceError::InvalidRequest("reference audio RMS is not finite".to_string()));
         }
         if let Some(rms) = ref_rms {
             if rms > 0.0 && rms < 0.1 {
@@ -97,23 +90,11 @@ impl ReferenceAudioProcessor {
 
         mono = trim_to_hop_multiple(&mono, self.hop_length);
         if mono.is_empty() {
-            return Err(OmniVoiceError::InvalidRequest(
-                "reference audio is too short after hop alignment".to_string(),
-            ));
+            return Err(OmniVoiceError::InvalidRequest("reference audio is too short after hop alignment".to_string()));
         }
-        let ref_text = ref_text.map(|text| {
-            if preprocess_prompt {
-                add_punctuation(text)
-            } else {
-                text.to_string()
-            }
-        });
+        let ref_text = ref_text.map(|text| if preprocess_prompt { add_punctuation(text) } else { text.to_string() });
 
-        Ok(PreparedReferenceAudio {
-            waveform: mono,
-            ref_rms,
-            ref_text,
-        })
+        Ok(PreparedReferenceAudio { waveform: mono, ref_rms, ref_text })
     }
 }
 
@@ -145,9 +126,7 @@ pub fn load_audio_bytes(bytes: &[u8], extension_hint: Option<&str>) -> Result<Wa
     match load_audio_bytes_symphonia(bytes, extension_hint) {
         Ok(waveform) => Ok(waveform),
         Err(primary) => {
-            let is_wav = extension_hint
-                .map(|value| value.eq_ignore_ascii_case("wav"))
-                .unwrap_or(false);
+            let is_wav = extension_hint.map(|value| value.eq_ignore_ascii_case("wav")).unwrap_or(false);
             if is_wav {
                 load_wave_reader(Cursor::new(bytes.to_vec())).map_err(|fallback| {
                     OmniVoiceError::InvalidData(format!(
@@ -170,17 +149,9 @@ fn load_audio_file_symphonia(path: &Path) -> Result<WaveformInput> {
     }
 
     let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            media_source,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
+        .format(&hint, media_source, &FormatOptions::default(), &MetadataOptions::default())
         .map_err(|error| {
-            OmniVoiceError::InvalidData(format!(
-                "symphonia could not probe {}: {error}",
-                path.display()
-            ))
+            OmniVoiceError::InvalidData(format!("symphonia could not probe {}: {error}", path.display()))
         })?;
     load_audio_from_probed(path.display().to_string(), probed)
 }
@@ -192,28 +163,17 @@ fn load_audio_bytes_symphonia(bytes: &[u8], extension_hint: Option<&str>) -> Res
     if let Some(extension) = extension_hint {
         hint.with_extension(extension);
     }
-    let label = extension_hint
-        .map(|extension| format!("memory.{extension}"))
-        .unwrap_or_else(|| "memory.audio".to_string());
+    let label =
+        extension_hint.map(|extension| format!("memory.{extension}")).unwrap_or_else(|| "memory.audio".to_string());
     let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            media_source,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
+        .format(&hint, media_source, &FormatOptions::default(), &MetadataOptions::default())
         .map_err(|error| {
-            OmniVoiceError::InvalidData(format!(
-                "symphonia could not probe in-memory audio payload {label}: {error}",
-            ))
+            OmniVoiceError::InvalidData(format!("symphonia could not probe in-memory audio payload {label}: {error}",))
         })?;
     load_audio_from_probed(label, probed)
 }
 
-fn load_audio_from_probed(
-    label: String,
-    probed: symphonia::core::probe::ProbeResult,
-) -> Result<WaveformInput> {
+fn load_audio_from_probed(label: String, probed: symphonia::core::probe::ProbeResult) -> Result<WaveformInput> {
     let mut format = probed.format;
     let track = format
         .default_track()
@@ -221,12 +181,9 @@ fn load_audio_from_probed(
     let track_id = track.id;
     let mut sample_rate = track.codec_params.sample_rate;
     let mut channels = track.codec_params.channels.map(|value| value.count());
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|error| {
-            OmniVoiceError::InvalidData(format!(
-                "symphonia could not create decoder for {label}: {error}",
-            ))
+    let mut decoder =
+        symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default()).map_err(|error| {
+            OmniVoiceError::InvalidData(format!("symphonia could not create decoder for {label}: {error}",))
         })?;
     let mut samples = Vec::new();
 
@@ -237,9 +194,7 @@ fn load_audio_from_probed(
                 break;
             }
             Err(SymphoniaError::ResetRequired) => {
-                return Err(OmniVoiceError::Unsupported(format!(
-                    "symphonia stream reset is unsupported for {label}",
-                )));
+                return Err(OmniVoiceError::Unsupported(format!("symphonia stream reset is unsupported for {label}",)));
             }
             Err(error) => {
                 return Err(OmniVoiceError::InvalidData(format!(
@@ -258,19 +213,15 @@ fn load_audio_from_probed(
                 break;
             }
             Err(SymphoniaError::DecodeError(error)) => {
-                return Err(OmniVoiceError::InvalidData(format!(
-                    "symphonia decode error for {label}: {error}",
-                )));
+                return Err(OmniVoiceError::InvalidData(format!("symphonia decode error for {label}: {error}",)));
             }
             Err(SymphoniaError::ResetRequired) => {
-                return Err(OmniVoiceError::Unsupported(format!(
-                    "symphonia decoder reset is unsupported for {label}",
-                )));
+                return Err(OmniVoiceError::Unsupported(
+                    format!("symphonia decoder reset is unsupported for {label}",),
+                ));
             }
             Err(error) => {
-                return Err(OmniVoiceError::InvalidData(format!(
-                    "symphonia failed decoding {label}: {error}",
-                )));
+                return Err(OmniVoiceError::InvalidData(format!("symphonia failed decoding {label}: {error}",)));
             }
         };
 
@@ -281,24 +232,16 @@ fn load_audio_from_probed(
         samples.extend_from_slice(buffer.samples());
     }
 
-    let sample_rate = sample_rate.ok_or_else(|| {
-        OmniVoiceError::InvalidData(format!("missing sample rate metadata in {label}"))
-    })?;
-    let channels = channels.ok_or_else(|| {
-        OmniVoiceError::InvalidData(format!("missing channel metadata in {label}"))
-    })?;
+    let sample_rate =
+        sample_rate.ok_or_else(|| OmniVoiceError::InvalidData(format!("missing sample rate metadata in {label}")))?;
+    let channels =
+        channels.ok_or_else(|| OmniVoiceError::InvalidData(format!("missing channel metadata in {label}")))?;
 
     if samples.is_empty() {
-        return Err(OmniVoiceError::InvalidData(format!(
-            "decoded audio stream is empty in {label}",
-        )));
+        return Err(OmniVoiceError::InvalidData(format!("decoded audio stream is empty in {label}",)));
     }
 
-    let waveform = WaveformInput {
-        samples,
-        sample_rate,
-        channels,
-    };
+    let waveform = WaveformInput { samples, sample_rate, channels };
     validate_waveform(&waveform)?;
     Ok(waveform)
 }
@@ -316,9 +259,7 @@ where
     let mut reader = hound::WavReader::new(reader)?;
     let spec = reader.spec();
     let samples = match spec.sample_format {
-        hound::SampleFormat::Float => reader
-            .samples::<f32>()
-            .collect::<std::result::Result<Vec<_>, _>>()?,
+        hound::SampleFormat::Float => reader.samples::<f32>().collect::<std::result::Result<Vec<_>, _>>()?,
         hound::SampleFormat::Int => match spec.bits_per_sample {
             8 => reader
                 .samples::<i8>()
@@ -336,27 +277,17 @@ where
                 .samples::<i32>()
                 .map(|sample| sample.map(|value| value as f32 / 2_147_483_648.0))
                 .collect::<std::result::Result<Vec<_>, _>>()?,
-            bits => {
-                return Err(OmniVoiceError::Unsupported(format!(
-                    "unsupported WAV integer sample width {bits}"
-                )))
-            }
+            bits => return Err(OmniVoiceError::Unsupported(format!("unsupported WAV integer sample width {bits}"))),
         },
     };
-    let waveform = WaveformInput {
-        samples,
-        sample_rate: spec.sample_rate,
-        channels: spec.channels as usize,
-    };
+    let waveform = WaveformInput { samples, sample_rate: spec.sample_rate, channels: spec.channels as usize };
     validate_waveform(&waveform)?;
     Ok(waveform)
 }
 
 pub fn mono_samples(samples: &[f32], channels: usize) -> Result<Vec<f32>> {
     if channels == 0 {
-        return Err(OmniVoiceError::InvalidRequest(
-            "audio channel count must be greater than zero".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidRequest("audio channel count must be greater than zero".to_string()));
     }
     if channels == 1 {
         return Ok(samples.to_vec());
@@ -393,21 +324,14 @@ pub fn root_mean_square(samples: &[f32]) -> Option<f32> {
     if samples.is_empty() {
         return None;
     }
-    let energy = samples
-        .iter()
-        .map(|sample| f64::from(*sample) * f64::from(*sample))
-        .sum::<f64>()
-        / samples.len() as f64;
+    let energy =
+        samples.iter().map(|sample| f64::from(*sample) * f64::from(*sample)).sum::<f64>() / samples.len() as f64;
     let rms = energy.sqrt();
     Some(rms as f32)
 }
 
 pub fn resample_linear(samples: &[f32], from_sample_rate: u32, to_sample_rate: u32) -> Vec<f32> {
-    if samples.is_empty()
-        || from_sample_rate == 0
-        || to_sample_rate == 0
-        || from_sample_rate == to_sample_rate
-    {
+    if samples.is_empty() || from_sample_rate == 0 || to_sample_rate == 0 || from_sample_rate == to_sample_rate {
         return samples.to_vec();
     }
     let ratio = to_sample_rate as f64 / from_sample_rate as f64;
@@ -418,9 +342,8 @@ pub fn resample_linear(samples: &[f32], from_sample_rate: u32, to_sample_rate: u
     for output_index in 0..output_len {
         let center = output_index as f64 / ratio;
         let first = (center.floor() as isize - radius as isize + 1).max(0) as usize;
-        let last = (center.ceil() as isize + radius as isize)
-            .min(samples.len() as isize - 1)
-            .max(first as isize) as usize;
+        let last =
+            (center.ceil() as isize + radius as isize).min(samples.len() as isize - 1).max(first as isize) as usize;
         let mut value = 0.0_f64;
         let mut weight_sum = 0.0_f64;
         for (offset, sample) in samples[first..=last].iter().enumerate() {
@@ -513,13 +436,8 @@ fn detect_nonsilent_ranges_pcm16(
     silence_threshold_db: f32,
     seek_step_ms: u32,
 ) -> Vec<(u32, u32)> {
-    let silent_ranges = detect_silence_ranges_pcm16(
-        audio,
-        sample_rate,
-        min_silence_len_ms,
-        silence_threshold_db,
-        seek_step_ms,
-    );
+    let silent_ranges =
+        detect_silence_ranges_pcm16(audio, sample_rate, min_silence_len_ms, silence_threshold_db, seek_step_ms);
     let total_ms = millis_from_samples(audio.len(), sample_rate);
     if silent_ranges.is_empty() {
         return vec![(0, total_ms)];
@@ -589,12 +507,7 @@ fn detect_silence_ranges_pcm16(
 
     ranges
         .into_iter()
-        .map(|(start, end)| {
-            (
-                millis_from_samples(start, sample_rate),
-                millis_from_samples(end, sample_rate),
-            )
-        })
+        .map(|(start, end)| (millis_from_samples(start, sample_rate), millis_from_samples(end, sample_rate)))
         .collect()
 }
 
@@ -626,14 +539,10 @@ fn millis_from_samples(sample_count: usize, sample_rate: u32) -> u32 {
 
 fn validate_waveform(waveform: &WaveformInput) -> Result<()> {
     if waveform.sample_rate == 0 {
-        return Err(OmniVoiceError::InvalidRequest(
-            "audio sample rate must be greater than zero".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidRequest("audio sample rate must be greater than zero".to_string()));
     }
     if waveform.channels == 0 {
-        return Err(OmniVoiceError::InvalidRequest(
-            "audio channel count must be greater than zero".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidRequest("audio channel count must be greater than zero".to_string()));
     }
     if !waveform.samples.len().is_multiple_of(waveform.channels) {
         return Err(OmniVoiceError::InvalidRequest(format!(
@@ -642,14 +551,8 @@ fn validate_waveform(waveform: &WaveformInput) -> Result<()> {
             waveform.channels
         )));
     }
-    if let Some(index) = waveform
-        .samples
-        .iter()
-        .position(|sample| !sample.is_finite())
-    {
-        return Err(OmniVoiceError::InvalidRequest(format!(
-            "audio sample at index {index} is not finite"
-        )));
+    if let Some(index) = waveform.samples.iter().position(|sample| !sample.is_finite()) {
+        return Err(OmniVoiceError::InvalidRequest(format!("audio sample at index {index} is not finite")));
     }
     Ok(())
 }

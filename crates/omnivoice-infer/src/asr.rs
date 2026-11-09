@@ -37,21 +37,10 @@ impl WhisperBackend {
         }
     }
 
-    fn decoder_forward(
-        &mut self,
-        tokens: &Tensor,
-        audio_features: &Tensor,
-        flush: bool,
-    ) -> Result<Tensor> {
+    fn decoder_forward(&mut self, tokens: &Tensor, audio_features: &Tensor, flush: bool) -> Result<Tensor> {
         match self {
-            Self::Standard(model) => model
-                .decoder
-                .forward(tokens, audio_features, flush)
-                .map_err(Into::into),
-            Self::Quantized(model) => model
-                .decoder
-                .forward(tokens, audio_features, flush)
-                .map_err(Into::into),
+            Self::Standard(model) => model.decoder.forward(tokens, audio_features, flush).map_err(Into::into),
+            Self::Quantized(model) => model.decoder.forward(tokens, audio_features, flush).map_err(Into::into),
         }
     }
 
@@ -92,24 +81,16 @@ impl WhisperAsr {
         } else {
             model_id_or_path.trim().to_string()
         };
-        let (config_path, tokenizer_path, weights_path, quantized) =
-            resolve_model_files(&requested)?;
+        let (config_path, tokenizer_path, weights_path, quantized) = resolve_model_files(&requested)?;
         let config: Config = serde_json::from_str(&std::fs::read_to_string(config_path)?)?;
         let tokenizer = Tokenizer::from_file(tokenizer_path).map_err(OmniVoiceError::Tokenizer)?;
         let model = if quantized {
-            let vb = candle_transformers::quantized_var_builder::VarBuilder::from_gguf(
-                &weights_path,
-                &device,
-            )
-            .map_err(OmniVoiceError::Candle)?;
-            WhisperBackend::Quantized(
-                QuantizedWhisperModel::load(&vb, config.clone()).map_err(OmniVoiceError::Candle)?,
-            )
+            let vb = candle_transformers::quantized_var_builder::VarBuilder::from_gguf(&weights_path, &device)
+                .map_err(OmniVoiceError::Candle)?;
+            WhisperBackend::Quantized(QuantizedWhisperModel::load(&vb, config.clone()).map_err(OmniVoiceError::Candle)?)
         } else {
             let vb = mmap_var_builder(&weights_path, whisper::DTYPE, &device)?;
-            WhisperBackend::Standard(
-                WhisperModel::load(&vb, config.clone()).map_err(OmniVoiceError::Candle)?,
-            )
+            WhisperBackend::Standard(WhisperModel::load(&vb, config.clone()).map_err(OmniVoiceError::Candle)?)
         };
         let no_timestamps_token = token_id(&tokenizer, whisper::NO_TIMESTAMPS_TOKEN)?;
         let language_tokens = find_language_token_ids(&tokenizer)
@@ -141,32 +122,27 @@ impl WhisperAsr {
     }
 
     pub fn transcribe(&mut self, samples: &[f32], sample_rate: u32) -> Result<String> {
-        if samples.is_empty() {
-            return Err(OmniVoiceError::InvalidRequest(
-                "ASR input audio is empty".to_string(),
-            ));
-        }
-        if let Some(index) = samples.iter().position(|sample| !sample.is_finite()) {
-            return Err(OmniVoiceError::InvalidRequest(format!(
-                "ASR input sample at index {index} is not finite"
-            )));
-        }
-        if sample_rate == 0 {
-            return Err(OmniVoiceError::InvalidRequest(
-                "ASR input sample rate must be greater than zero".to_string(),
-            ));
-        }
-        let pcm = if sample_rate == whisper::SAMPLE_RATE as u32 {
-            samples.to_vec()
-        } else {
-            crate::audio_input::resample_linear(samples, sample_rate, whisper::SAMPLE_RATE as u32)
-        };
-        let mel = whisper::audio::pcm_to_mel(&self.config, &pcm, &self.mel_filters);
-        let mel_len = mel.len() / self.config.num_mel_bins;
-        let mel = Tensor::from_vec(mel, (1, self.config.num_mel_bins, mel_len), &self.device)?;
-        let audio_features = self.model.encoder_forward(&mel, true)?;
+        self.transcribe_with_language(samples, sample_rate, None)
+    }
+
+    /// Transcribes in `language` (a Whisper language code such as `en`, `hi`, `ja`), or in the language Whisper
+    /// detects when it is `None`. Detection can pick the wrong language on short clips, noisy recordings and
+    /// lower-resource languages; Whisper then tends to translate into the wrong language instead of transcribing, which
+    /// gives voice cloning a reference text that doesn't match its audio. A caller that knows the reference's language
+    /// can name it here.
+    pub fn transcribe_with_language(
+        &mut self,
+        samples: &[f32],
+        sample_rate: u32,
+        language: Option<&str>,
+    ) -> Result<String> {
+        let audio_features = self.encode(samples, sample_rate)?;
         let mut tokens = vec![self.sot_token];
-        if let Some(language_token) = self.detect_language(&audio_features)? {
+        let language_token = match language.map(str::trim).filter(|code| !code.is_empty()) {
+            Some(code) => Some(token_id(&self.tokenizer, &format!("<|{}|>", code.to_ascii_lowercase()))?),
+            None => self.detect_language(&audio_features)?,
+        };
+        if let Some(language_token) = language_token {
             tokens.push(language_token);
         }
         tokens.extend([self.transcribe_token, self.no_timestamps_token]);
@@ -174,9 +150,7 @@ impl WhisperAsr {
         let sample_len = self.model.config().max_target_positions / 2;
         for index in 0..sample_len {
             let tokens_t = Tensor::new(tokens.as_slice(), &self.device)?.unsqueeze(0)?;
-            let ys = self
-                .model
-                .decoder_forward(&tokens_t, &audio_features, index == 0)?;
+            let ys = self.model.decoder_forward(&tokens_t, &audio_features, index == 0)?;
             let (_, seq_len, _) = ys.dims3()?;
             let logits = self
                 .model
@@ -191,10 +165,39 @@ impl WhisperAsr {
             tokens.push(next_token);
         }
 
-        self.tokenizer
-            .decode(&tokens, true)
-            .map(|text| text.trim().to_string())
-            .map_err(Into::into)
+        self.tokenizer.decode(&tokens, true).map(|text| text.trim().to_string()).map_err(Into::into)
+    }
+
+    /// The language Whisper detects in the audio, as its code (`en`), or `None` when the model has no language tokens.
+    /// Useful to see why a transcript went wrong, or to confirm a reference's language before cloning from it.
+    pub fn detected_language(&mut self, samples: &[f32], sample_rate: u32) -> Result<Option<String>> {
+        let audio_features = self.encode(samples, sample_rate)?;
+        let Some(token) = self.detect_language(&audio_features)? else {
+            return Ok(None);
+        };
+        Ok(self.tokenizer.id_to_token(token).map(|t| t.trim_start_matches("<|").trim_end_matches("|>").to_string()))
+    }
+
+    /// The encoder's features for the audio, resampled to Whisper's 16 kHz.
+    fn encode(&mut self, samples: &[f32], sample_rate: u32) -> Result<Tensor> {
+        if samples.is_empty() {
+            return Err(OmniVoiceError::InvalidRequest("ASR input audio is empty".to_string()));
+        }
+        if let Some(index) = samples.iter().position(|sample| !sample.is_finite()) {
+            return Err(OmniVoiceError::InvalidRequest(format!("ASR input sample at index {index} is not finite")));
+        }
+        if sample_rate == 0 {
+            return Err(OmniVoiceError::InvalidRequest("ASR input sample rate must be greater than zero".to_string()));
+        }
+        let pcm = if sample_rate == whisper::SAMPLE_RATE as u32 {
+            samples.to_vec()
+        } else {
+            crate::audio_input::resample_linear(samples, sample_rate, whisper::SAMPLE_RATE as u32)
+        };
+        let mel = whisper::audio::pcm_to_mel(&self.config, &pcm, &self.mel_filters);
+        let mel_len = mel.len() / self.config.num_mel_bins;
+        let mel = Tensor::from_vec(mel, (1, self.config.num_mel_bins, mel_len), &self.device)?;
+        self.model.encoder_forward(&mel, true)
     }
 
     fn detect_language(&mut self, audio_features: &Tensor) -> Result<Option<u32>> {
@@ -205,11 +208,7 @@ impl WhisperAsr {
         let tokens = Tensor::new(&[self.sot_token], &self.device)?.unsqueeze(0)?;
         let ys = self.model.decoder_forward(&tokens, audio_features, true)?;
         let (_, sequence_length, _) = ys.dims3()?;
-        let logits = self
-            .model
-            .final_linear(&ys.i((..1, sequence_length - 1..))?)?
-            .i(0)?
-            .i(0)?;
+        let logits = self.model.final_linear(&ys.i((..1, sequence_length - 1..))?)?.i(0)?.i(0)?;
 
         let mut best = None;
         for token_id in &self.language_tokens {
@@ -217,10 +216,7 @@ impl WhisperAsr {
             if !score.is_finite() {
                 continue;
             }
-            if best
-                .as_ref()
-                .is_none_or(|(_, best_score): &(u32, f32)| score > *best_score)
-            {
+            if best.as_ref().is_none_or(|(_, best_score): &(u32, f32)| score > *best_score) {
                 best = Some((*token_id, score));
             }
         }
@@ -273,30 +269,17 @@ fn resolve_model_files(model_id_or_path: &str) -> Result<(PathBuf, PathBuf, Path
         ));
     }
     if looks_like_local_path(model_id_or_path) {
-        return Err(OmniVoiceError::MissingArtifact {
-            path: local_path.to_path_buf(),
-        });
+        return Err(OmniVoiceError::MissingArtifact { path: local_path.to_path_buf() });
     }
     let api = Api::new().map_err(|error| OmniVoiceError::InvalidData(error.to_string()))?;
-    let repo = api.repo(Repo::with_revision(
-        model_id_or_path.to_string(),
-        RepoType::Model,
-        "main".to_string(),
-    ));
-    let repo_info = repo
-        .info()
-        .map_err(|error| OmniVoiceError::InvalidData(error.to_string()))?;
+    let repo = api.repo(Repo::with_revision(model_id_or_path.to_string(), RepoType::Model, "main".to_string()));
+    let repo_info = repo.info().map_err(|error| OmniVoiceError::InvalidData(error.to_string()))?;
     let remote_assets = find_remote_whisper_assets(model_id_or_path, &repo_info.siblings)?;
-    let config = repo
-        .get(&remote_assets.config)
-        .map_err(|error| OmniVoiceError::InvalidData(error.to_string()))?;
-    let tokenizer = repo
-        .get(&remote_assets.tokenizer)
-        .map_err(|error| OmniVoiceError::InvalidData(error.to_string()))?;
-    let weights = repo
-        .get(&remote_assets.weights)
-        .map_err(|error| OmniVoiceError::InvalidData(error.to_string()))?;
-    Ok((config, tokenizer, weights, true))
+    let config = repo.get(&remote_assets.config).map_err(|error| OmniVoiceError::InvalidData(error.to_string()))?;
+    let tokenizer =
+        repo.get(&remote_assets.tokenizer).map_err(|error| OmniVoiceError::InvalidData(error.to_string()))?;
+    let weights = repo.get(&remote_assets.weights).map_err(|error| OmniVoiceError::InvalidData(error.to_string()))?;
+    Ok((config, tokenizer, weights, remote_assets.quantized))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -304,28 +287,37 @@ struct WhisperRemoteAssets {
     config: String,
     tokenizer: String,
     weights: String,
+    /// GGUF weights; else the repo's full-precision `model.safetensors` (for example `openai/whisper-large-v3-turbo`,
+    /// the model the Python reference implementation transcribes with).
+    quantized: bool,
 }
 
-fn find_remote_whisper_assets(
-    model_id_or_path: &str,
-    siblings: &[Siblings],
-) -> Result<WhisperRemoteAssets> {
+fn find_remote_whisper_assets(model_id_or_path: &str, siblings: &[Siblings]) -> Result<WhisperRemoteAssets> {
     if model_id_or_path == DEFAULT_HF_ASR_MODEL {
         return Ok(WhisperRemoteAssets {
             config: find_exact_remote_file(siblings, DEFAULT_WHISPER_CONFIG_FILE)?,
             tokenizer: find_exact_remote_file(siblings, DEFAULT_WHISPER_TOKENIZER_FILE)?,
             weights: find_exact_remote_file(siblings, DEFAULT_WHISPER_Q4_0_FILE)?,
+            quantized: true,
+        });
+    }
+    // A repo with no GGUF but full-precision safetensors (`openai/whisper-large-v3-turbo`): load it unquantized.
+    if !siblings.iter().any(|s| is_supported_whisper_gguf(&s.rfilename))
+        && siblings.iter().any(|s| s.rfilename == "model.safetensors")
+    {
+        return Ok(WhisperRemoteAssets {
+            config: find_exact_remote_file(siblings, DEFAULT_WHISPER_CONFIG_FILE)?,
+            tokenizer: find_exact_remote_file(siblings, DEFAULT_WHISPER_TOKENIZER_FILE)?,
+            weights: "model.safetensors".to_string(),
+            quantized: false,
         });
     }
 
     Ok(WhisperRemoteAssets {
-        config: find_whisper_repo_file(siblings, |path| {
-            path.ends_with(DEFAULT_WHISPER_CONFIG_FILE)
-        })?,
-        tokenizer: find_whisper_repo_file(siblings, |path| {
-            path.ends_with(DEFAULT_WHISPER_TOKENIZER_FILE)
-        })?,
+        config: find_whisper_repo_file(siblings, |path| path.ends_with(DEFAULT_WHISPER_CONFIG_FILE))?,
+        tokenizer: find_whisper_repo_file(siblings, |path| path.ends_with(DEFAULT_WHISPER_TOKENIZER_FILE))?,
         weights: find_remote_whisper_weights(siblings)?,
+        quantized: true,
     })
 }
 
@@ -336,16 +328,11 @@ fn find_exact_remote_file(siblings: &[Siblings], file_name: &str) -> Result<Stri
         .find(|path| path == &file_name)
         .map(str::to_string)
         .ok_or_else(|| {
-            OmniVoiceError::InvalidData(format!(
-                "remote Whisper repo is missing required Candle file `{file_name}`"
-            ))
+            OmniVoiceError::InvalidData(format!("remote Whisper repo is missing required Candle file `{file_name}`"))
         })
 }
 
-fn find_whisper_repo_file(
-    siblings: &[Siblings],
-    predicate: impl Fn(&str) -> bool,
-) -> Result<String> {
+fn find_whisper_repo_file(siblings: &[Siblings], predicate: impl Fn(&str) -> bool) -> Result<String> {
     siblings
         .iter()
         .map(|sibling| sibling.rfilename.as_str())
@@ -353,8 +340,7 @@ fn find_whisper_repo_file(
         .map(str::to_string)
         .ok_or_else(|| {
             OmniVoiceError::InvalidData(
-                "remote Whisper repo is missing the required q4_0/config/tokenizer files"
-                    .to_string(),
+                "remote Whisper repo is missing the required q4_0/config/tokenizer files".to_string(),
             )
         })
 }
@@ -376,16 +362,11 @@ fn find_remote_whisper_weights(siblings: &[Siblings]) -> Result<String> {
         .filter(|path| is_supported_whisper_gguf(path))
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| compare_whisper_weight_names(left, right));
-    candidates
-        .into_iter()
-        .next()
-        .map(str::to_string)
-        .ok_or_else(|| {
-            OmniVoiceError::InvalidData(
-                "remote Whisper repo is missing the required gguf/config/tokenizer files"
-                    .to_string(),
-            )
-        })
+    candidates.into_iter().next().map(str::to_string).ok_or_else(|| {
+        OmniVoiceError::InvalidData(
+            "remote Whisper repo is missing the required gguf/config/tokenizer files".to_string(),
+        )
+    })
 }
 
 fn is_supported_whisper_gguf(path: &str) -> bool {
@@ -395,20 +376,13 @@ fn is_supported_whisper_gguf(path: &str) -> bool {
 
 fn compare_whisper_weight_paths(left: &Path, right: &Path) -> std::cmp::Ordering {
     compare_whisper_weight_names(
-        left.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default(),
-        right
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default(),
+        left.file_name().and_then(|name| name.to_str()).unwrap_or_default(),
+        right.file_name().and_then(|name| name.to_str()).unwrap_or_default(),
     )
 }
 
 fn compare_whisper_weight_names(left: &str, right: &str) -> std::cmp::Ordering {
-    whisper_weight_rank(left)
-        .cmp(&whisper_weight_rank(right))
-        .then_with(|| left.cmp(right))
+    whisper_weight_rank(left).cmp(&whisper_weight_rank(right)).then_with(|| left.cmp(right))
 }
 
 fn whisper_weight_rank(path: &str) -> usize {
@@ -424,11 +398,7 @@ fn load_mel_filters(num_mel_bins: usize) -> Result<Vec<f32>> {
     let bytes = match num_mel_bins {
         80 => MEL_FILTERS_80,
         128 => MEL_FILTERS_128,
-        other => {
-            return Err(OmniVoiceError::Unsupported(format!(
-                "unsupported Whisper mel bin count {other}"
-            )))
-        }
+        other => return Err(OmniVoiceError::Unsupported(format!("unsupported Whisper mel bin count {other}"))),
     };
     let mut filters = Vec::with_capacity(bytes.len() / 4);
     for chunk in bytes.chunks_exact(4) {
@@ -438,9 +408,9 @@ fn load_mel_filters(num_mel_bins: usize) -> Result<Vec<f32>> {
 }
 
 fn token_id(tokenizer: &Tokenizer, token: &str) -> Result<u32> {
-    tokenizer.token_to_id(token).ok_or_else(|| {
-        OmniVoiceError::InvalidData(format!("Whisper tokenizer is missing token {token}"))
-    })
+    tokenizer
+        .token_to_id(token)
+        .ok_or_else(|| OmniVoiceError::InvalidData(format!("Whisper tokenizer is missing token {token}")))
 }
 
 fn find_language_token_ids(tokenizer: &Tokenizer) -> Vec<u32> {
@@ -464,11 +434,7 @@ fn find_language_token_ids(tokenizer: &Tokenizer) -> Vec<u32> {
     language_tokens
 }
 
-fn mmap_var_builder(
-    weights_path: &Path,
-    dtype: DType,
-    device: &Device,
-) -> Result<candle_nn::VarBuilder<'static>> {
+fn mmap_var_builder(weights_path: &Path, dtype: DType, device: &Device) -> Result<candle_nn::VarBuilder<'static>> {
     let paths = [weights_path];
     Ok(unsafe { candle_nn::VarBuilder::from_mmaped_safetensors(&paths, dtype, device)? })
 }
@@ -476,8 +442,8 @@ fn mmap_var_builder(
 #[cfg(test)]
 mod tests {
     use super::{
-        default_asr_model_spec, find_remote_whisper_assets, find_remote_whisper_weights,
-        resolve_model_files, DEFAULT_HF_ASR_MODEL,
+        default_asr_model_spec, find_remote_whisper_assets, find_remote_whisper_weights, resolve_model_files,
+        DEFAULT_HF_ASR_MODEL,
     };
     use hf_hub::api::Siblings;
     use std::{
@@ -487,14 +453,8 @@ mod tests {
     };
 
     fn unique_temp_dir(name: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "omnivoice-asr-tests-{name}-{}-{nanos}",
-            std::process::id()
-        ))
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        std::env::temp_dir().join(format!("omnivoice-asr-tests-{name}-{}-{nanos}", std::process::id()))
     }
 
     #[test]
@@ -549,28 +509,14 @@ mod tests {
     #[test]
     fn remote_whisper_selection_prefers_q4_0_then_other_gguf() {
         let siblings = vec![
-            Siblings {
-                rfilename: "tokenizer.json".to_string(),
-            },
-            Siblings {
-                rfilename: "weights-q8_0.gguf".to_string(),
-            },
-            Siblings {
-                rfilename: "weights-q4_0.gguf".to_string(),
-            },
+            Siblings { rfilename: "tokenizer.json".to_string() },
+            Siblings { rfilename: "weights-q8_0.gguf".to_string() },
+            Siblings { rfilename: "weights-q4_0.gguf".to_string() },
         ];
-        assert_eq!(
-            find_remote_whisper_weights(&siblings).unwrap(),
-            "weights-q4_0.gguf"
-        );
+        assert_eq!(find_remote_whisper_weights(&siblings).unwrap(), "weights-q4_0.gguf");
 
-        let fallback_siblings = vec![Siblings {
-            rfilename: "weights-q8_0.gguf".to_string(),
-        }];
-        assert_eq!(
-            find_remote_whisper_weights(&fallback_siblings).unwrap(),
-            "weights-q8_0.gguf"
-        );
+        let fallback_siblings = vec![Siblings { rfilename: "weights-q8_0.gguf".to_string() }];
+        assert_eq!(find_remote_whisper_weights(&fallback_siblings).unwrap(), "weights-q8_0.gguf");
     }
 
     #[test]
@@ -579,10 +525,7 @@ mod tests {
         let whisper_root = root.join("whisper");
         fs::create_dir_all(&whisper_root).unwrap();
 
-        assert_eq!(
-            default_asr_model_spec(Some(root.as_path())),
-            whisper_root.display().to_string()
-        );
+        assert_eq!(default_asr_model_spec(Some(root.as_path())), whisper_root.display().to_string());
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -592,10 +535,7 @@ mod tests {
         let root = unique_temp_dir("default-remote-whisper");
         fs::create_dir_all(&root).unwrap();
 
-        assert_eq!(
-            default_asr_model_spec(Some(root.as_path())),
-            DEFAULT_HF_ASR_MODEL
-        );
+        assert_eq!(default_asr_model_spec(Some(root.as_path())), DEFAULT_HF_ASR_MODEL);
         assert_eq!(default_asr_model_spec(None), DEFAULT_HF_ASR_MODEL);
 
         fs::remove_dir_all(root).unwrap();
@@ -609,10 +549,7 @@ mod tests {
         fs::create_dir_all(&tts_root).unwrap();
         fs::create_dir_all(&whisper_root).unwrap();
 
-        assert_eq!(
-            default_asr_model_spec(Some(tts_root.as_path())),
-            whisper_root.display().to_string()
-        );
+        assert_eq!(default_asr_model_spec(Some(tts_root.as_path())), whisper_root.display().to_string());
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -620,21 +557,11 @@ mod tests {
     #[test]
     fn default_remote_whisper_repo_requires_exact_candle_files() {
         let siblings = vec![
-            Siblings {
-                rfilename: "config.json".to_string(),
-            },
-            Siblings {
-                rfilename: "tokenizer.json".to_string(),
-            },
-            Siblings {
-                rfilename: "whisper-large-v3-turbo-q4_0.gguf".to_string(),
-            },
-            Siblings {
-                rfilename: "whisper-large-v3-turbo-q8_0.gguf".to_string(),
-            },
-            Siblings {
-                rfilename: "whisper.cpp/whisper-large-v3-turbo-q4_0.gguf".to_string(),
-            },
+            Siblings { rfilename: "config.json".to_string() },
+            Siblings { rfilename: "tokenizer.json".to_string() },
+            Siblings { rfilename: "whisper-large-v3-turbo-q4_0.gguf".to_string() },
+            Siblings { rfilename: "whisper-large-v3-turbo-q8_0.gguf".to_string() },
+            Siblings { rfilename: "whisper.cpp/whisper-large-v3-turbo-q4_0.gguf".to_string() },
         ];
 
         let assets = find_remote_whisper_assets(DEFAULT_HF_ASR_MODEL, &siblings).unwrap();
@@ -647,25 +574,45 @@ mod tests {
     #[test]
     fn default_remote_whisper_repo_rejects_non_q4_0_fallbacks() {
         let siblings = vec![
-            Siblings {
-                rfilename: "config.json".to_string(),
-            },
-            Siblings {
-                rfilename: "tokenizer.json".to_string(),
-            },
-            Siblings {
-                rfilename: "whisper-large-v3-turbo-q4_1.gguf".to_string(),
-            },
-            Siblings {
-                rfilename: "whisper-large-v3-turbo-q8_0.gguf".to_string(),
-            },
+            Siblings { rfilename: "config.json".to_string() },
+            Siblings { rfilename: "tokenizer.json".to_string() },
+            Siblings { rfilename: "whisper-large-v3-turbo-q4_1.gguf".to_string() },
+            Siblings { rfilename: "whisper-large-v3-turbo-q8_0.gguf".to_string() },
         ];
 
         let error = find_remote_whisper_assets(DEFAULT_HF_ASR_MODEL, &siblings).unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("whisper-large-v3-turbo-q4_0.gguf"));
+        assert!(error.to_string().contains("whisper-large-v3-turbo-q4_0.gguf"));
+    }
+
+    #[test]
+    fn safetensors_only_remote_repo_loads_full_precision_weights() {
+        let siblings = vec![
+            Siblings { rfilename: "config.json".to_string() },
+            Siblings { rfilename: "tokenizer.json".to_string() },
+            Siblings { rfilename: "model.safetensors".to_string() },
+            Siblings { rfilename: "generation_config.json".to_string() },
+        ];
+
+        let assets = find_remote_whisper_assets("openai/whisper-large-v3-turbo", &siblings).unwrap();
+
+        assert_eq!(assets.weights, "model.safetensors");
+        assert!(!assets.quantized);
+    }
+
+    #[test]
+    fn gguf_is_preferred_when_a_remote_repo_has_both_formats() {
+        let siblings = vec![
+            Siblings { rfilename: "config.json".to_string() },
+            Siblings { rfilename: "tokenizer.json".to_string() },
+            Siblings { rfilename: "model.safetensors".to_string() },
+            Siblings { rfilename: "whisper-small-q4_0.gguf".to_string() },
+        ];
+
+        let assets = find_remote_whisper_assets("someone/whisper-small", &siblings).unwrap();
+
+        assert!(assets.weights.ends_with(".gguf"));
+        assert!(assets.quantized);
     }
 
     #[test]

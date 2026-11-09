@@ -3,12 +3,7 @@ use std::ops::Range;
 
 const PCM16_SCALE: f32 = 32768.0;
 
-pub fn fade_and_pad_audio(
-    audio: &[f32],
-    sample_rate: u32,
-    pad_duration: f32,
-    fade_duration: f32,
-) -> Vec<f32> {
+pub fn fade_and_pad_audio(audio: &[f32], sample_rate: u32, pad_duration: f32, fade_duration: f32) -> Vec<f32> {
     if audio.is_empty() {
         return Vec::new();
     }
@@ -50,20 +45,14 @@ pub fn peak_normalize_auto_voice(audio: &[f32]) -> Result<Vec<f32>> {
     if audio.is_empty() {
         return Ok(Vec::new());
     }
-    let peak = audio
-        .iter()
-        .fold(0.0_f32, |max, sample| max.max(sample.abs()));
+    let peak = audio.iter().fold(0.0_f32, |max, sample| max.max(sample.abs()));
     if peak <= 1e-6 {
         return Ok(audio.to_vec());
     }
     Ok(audio.iter().map(|sample| sample / peak * 0.5).collect())
 }
 
-pub fn cross_fade_chunks(
-    chunks: &[Vec<f32>],
-    sample_rate: u32,
-    silence_duration: f32,
-) -> Result<Vec<f32>> {
+pub fn cross_fade_chunks(chunks: &[Vec<f32>], sample_rate: u32, silence_duration: f32) -> Result<Vec<f32>> {
     if chunks.is_empty() {
         return Ok(Vec::new());
     }
@@ -94,8 +83,7 @@ pub fn cross_fade_chunks(
             }
         }
 
-        let mut next_merged =
-            Vec::with_capacity(faded_current.len() + silence_samples + faded_next.len());
+        let mut next_merged = Vec::with_capacity(faded_current.len() + silence_samples + faded_next.len());
         next_merged.extend(faded_current);
         next_merged.resize(next_merged.len() + silence_samples, 0.0);
         next_merged.extend(faded_next);
@@ -105,21 +93,11 @@ pub fn cross_fade_chunks(
     Ok(merged)
 }
 
-pub fn remove_silence(
-    audio: &[f32],
-    sample_rate: u32,
-    mid_sil: u32,
-    lead_sil: u32,
-    trail_sil: u32,
-) -> Vec<f32> {
+pub fn remove_silence(audio: &[f32], sample_rate: u32, mid_sil: u32, lead_sil: u32, trail_sil: u32) -> Vec<f32> {
     let mut quantized = quantize_pcm16(audio);
     if mid_sil > 0 {
         let segments = split_on_silence(&quantized, sample_rate, mid_sil, -50.0, mid_sil, 10);
-        quantized = if segments.is_empty() {
-            Vec::new()
-        } else {
-            segments.into_iter().flatten().collect()
-        };
+        quantized = if segments.is_empty() { Vec::new() } else { segments.into_iter().flatten().collect() };
     }
     let trimmed = remove_silence_edges_i16(&quantized, sample_rate, lead_sil, trail_sil, -50.0);
     dequantize_pcm16(&trimmed)
@@ -129,15 +107,8 @@ pub fn trim_edges_by_threshold(audio: &[f32], threshold: f32) -> Vec<f32> {
     if audio.is_empty() {
         return Vec::new();
     }
-    let start = audio
-        .iter()
-        .position(|sample| sample.abs() > threshold)
-        .unwrap_or(audio.len());
-    let end = audio
-        .iter()
-        .rposition(|sample| sample.abs() > threshold)
-        .map(|index| index + 1)
-        .unwrap_or(start);
+    let start = audio.iter().position(|sample| sample.abs() > threshold).unwrap_or(audio.len());
+    let end = audio.iter().rposition(|sample| sample.abs() > threshold).map(|index| index + 1).unwrap_or(start);
     if start >= end {
         Vec::new()
     } else {
@@ -147,9 +118,7 @@ pub fn trim_edges_by_threshold(audio: &[f32], threshold: f32) -> Vec<f32> {
 
 pub fn ensure_non_empty_audio(audio: &[f32]) -> Result<()> {
     if audio.is_empty() {
-        Err(OmniVoiceError::InvalidData(
-            "audio buffer is empty".to_string(),
-        ))
+        Err(OmniVoiceError::InvalidData("audio buffer is empty".to_string()))
     } else {
         Ok(())
     }
@@ -166,10 +135,7 @@ fn quantize_pcm16(audio: &[f32]) -> Vec<i16> {
 }
 
 fn dequantize_pcm16(audio: &[i16]) -> Vec<f32> {
-    audio
-        .iter()
-        .map(|sample| *sample as f32 / PCM16_SCALE)
-        .collect()
+    audio.iter().map(|sample| *sample as f32 / PCM16_SCALE).collect()
 }
 
 fn split_on_silence(
@@ -180,13 +146,7 @@ fn split_on_silence(
     keep_silence_ms: u32,
     seek_step_ms: u32,
 ) -> Vec<Vec<i16>> {
-    let nonsilent_ranges = detect_nonsilent(
-        audio,
-        sample_rate,
-        min_silence_len_ms,
-        silence_threshold_db,
-        seek_step_ms,
-    );
+    let nonsilent_ranges = detect_nonsilent(audio, sample_rate, min_silence_len_ms, silence_threshold_db, seek_step_ms);
     if nonsilent_ranges.is_empty() {
         return Vec::new();
     }
@@ -195,10 +155,7 @@ fn split_on_silence(
     let mut ranges = nonsilent_ranges
         .into_iter()
         .map(|(start_ms, end_ms)| {
-            (
-                start_ms.saturating_sub(keep_silence_ms),
-                total_ms.min(end_ms.saturating_add(keep_silence_ms)),
-            )
+            (start_ms.saturating_sub(keep_silence_ms), total_ms.min(end_ms.saturating_add(keep_silence_ms)))
         })
         .collect::<Vec<_>>();
 
@@ -226,13 +183,7 @@ fn detect_nonsilent(
     silence_threshold_db: f32,
     seek_step_ms: u32,
 ) -> Vec<(u32, u32)> {
-    let silent_ranges = detect_silence(
-        audio,
-        sample_rate,
-        min_silence_len_ms,
-        silence_threshold_db,
-        seek_step_ms,
-    );
+    let silent_ranges = detect_silence(audio, sample_rate, min_silence_len_ms, silence_threshold_db, seek_step_ms);
     let total_ms = millis_from_samples(audio.len(), sample_rate);
     if silent_ranges.is_empty() {
         return vec![(0, total_ms)];
@@ -303,12 +254,7 @@ fn detect_silence(
 
     ranges
         .into_iter()
-        .map(|(start, end)| {
-            (
-                millis_from_samples(start, sample_rate),
-                millis_from_samples(end, sample_rate),
-            )
-        })
+        .map(|(start, end)| (millis_from_samples(start, sample_rate), millis_from_samples(end, sample_rate)))
         .collect()
 }
 
@@ -321,31 +267,20 @@ fn remove_silence_edges_i16(
 ) -> Vec<i16> {
     let mut trimmed = audio.to_vec();
     let leading_ms = detect_leading_silence(&trimmed, sample_rate, silence_threshold_db, 10);
-    let leading_start = clamped_sample_index_from_ms(
-        leading_ms.saturating_sub(lead_sil_ms),
-        sample_rate,
-        trimmed.len(),
-    );
+    let leading_start =
+        clamped_sample_index_from_ms(leading_ms.saturating_sub(lead_sil_ms), sample_rate, trimmed.len());
     trimmed = trimmed[leading_start..].to_vec();
 
     trimmed.reverse();
     let trailing_ms = detect_leading_silence(&trimmed, sample_rate, silence_threshold_db, 10);
-    let trailing_start = clamped_sample_index_from_ms(
-        trailing_ms.saturating_sub(trail_sil_ms),
-        sample_rate,
-        trimmed.len(),
-    );
+    let trailing_start =
+        clamped_sample_index_from_ms(trailing_ms.saturating_sub(trail_sil_ms), sample_rate, trimmed.len());
     trimmed = trimmed[trailing_start..].to_vec();
     trimmed.reverse();
     trimmed
 }
 
-fn detect_leading_silence(
-    audio: &[i16],
-    sample_rate: u32,
-    silence_threshold_db: f32,
-    chunk_ms: u32,
-) -> u32 {
+fn detect_leading_silence(audio: &[i16], sample_rate: u32, silence_threshold_db: f32, chunk_ms: u32) -> u32 {
     let threshold = dbfs_threshold_i16(silence_threshold_db);
     let chunk = sample_count_from_ms(chunk_ms, sample_rate).max(1);
     let mut trim = 0_usize;
@@ -390,12 +325,7 @@ fn clamped_sample_index_from_ms(duration_ms: u32, sample_rate: u32, audio_len: u
     sample_index_from_ms(duration_ms, sample_rate).min(audio_len)
 }
 
-fn clamped_sample_range_from_ms(
-    start_ms: u32,
-    end_ms: u32,
-    sample_rate: u32,
-    audio_len: usize,
-) -> Range<usize> {
+fn clamped_sample_range_from_ms(start_ms: u32, end_ms: u32, sample_rate: u32, audio_len: usize) -> Range<usize> {
     let end = clamped_sample_index_from_ms(end_ms, sample_rate, audio_len);
     let start = clamped_sample_index_from_ms(start_ms, sample_rate, audio_len).min(end);
     start..end

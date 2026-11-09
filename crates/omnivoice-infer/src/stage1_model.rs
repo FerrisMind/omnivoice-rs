@@ -2,9 +2,7 @@ use candle_core::{IndexOp, Result as CandleResult, Tensor};
 use candle_nn::Module;
 
 use crate::{
-    codec_layers::{
-        CodecConv1d, CodecConvTranspose1d, CodecEmbedding, CodecLinear, CodecWeightSource,
-    },
+    codec_layers::{CodecConv1d, CodecConvTranspose1d, CodecEmbedding, CodecLinear, CodecWeightSource},
     contracts::I64Tensor2,
     error::{OmniVoiceError, Result},
 };
@@ -54,18 +52,10 @@ impl Stage1Model {
             "fc2.bias",
         )?;
         let decoder = AcousticDecoder::load(&ws.pp("acoustic_decoder"), config)?;
-        Ok(Self {
-            quantizer,
-            fc2,
-            decoder,
-        })
+        Ok(Self { quantizer, fc2, decoder })
     }
 
-    pub fn decode_tokens(
-        &self,
-        tokens: &I64Tensor2,
-        device: &candle_core::Device,
-    ) -> Result<Tensor> {
+    pub fn decode_tokens(&self, tokens: &I64Tensor2, device: &candle_core::Device) -> Result<Tensor> {
         let tokens = tokens.to_candle(device)?.unsqueeze(0)?;
         self.decode_tensor(&tokens)
     }
@@ -112,8 +102,7 @@ impl Stage1Model {
         let (project_out, quantizer_output) = self.quantizer.decode_codes_with_trace(tokens)?;
         let fc2_output = project_out.apply(&self.fc2)?;
         let decoder_input = fc2_output.transpose(1, 2)?;
-        let (decoder_block_outputs, raw_waveform) =
-            self.decoder.forward_with_trace(&decoder_input)?;
+        let (decoder_block_outputs, raw_waveform) = self.decoder.forward_with_trace(&decoder_input)?;
         Ok(Stage1DecodeTrace {
             project_out,
             quantizer_output,
@@ -132,12 +121,7 @@ struct VectorQuantizer {
 }
 
 impl VectorQuantizer {
-    fn load(
-        ws: &CodecWeightSource,
-        codebook_size: usize,
-        codebook_dim: usize,
-        output_dim: usize,
-    ) -> Result<Self> {
+    fn load(ws: &CodecWeightSource, codebook_size: usize, codebook_dim: usize, output_dim: usize) -> Result<Self> {
         Ok(Self {
             codebook: ws.load_embedding_at(codebook_size, codebook_dim, "codebook.embed")?,
             project_out: ws.pp("project_out").load_linear(codebook_dim, output_dim, true)?,
@@ -172,12 +156,7 @@ impl ResidualVectorQuantizer {
         let quantizers = active_quantizer_indices
             .iter()
             .map(|index| {
-                VectorQuantizer::load(
-                    &ws.pp("quantizers").pp(*index),
-                    codebook_size,
-                    codebook_dim,
-                    output_dim,
-                )
+                VectorQuantizer::load(&ws.pp("quantizers").pp(*index), codebook_size, codebook_dim, output_dim)
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(Self { quantizers })
@@ -203,9 +182,7 @@ impl ResidualVectorQuantizer {
             });
         }
 
-        projected_sum.ok_or_else(|| {
-            OmniVoiceError::InvalidData("stage1 quantizer set must not be empty".to_string())
-        })
+        projected_sum.ok_or_else(|| OmniVoiceError::InvalidData("stage1 quantizer set must not be empty".to_string()))
     }
 
     fn decode_codes_with_trace(&self, codes: &Tensor) -> Result<(Tensor, Tensor)> {
@@ -228,9 +205,8 @@ impl ResidualVectorQuantizer {
             });
         }
 
-        let project_out = projected_sum.ok_or_else(|| {
-            OmniVoiceError::InvalidData("stage1 quantizer set must not be empty".to_string())
-        })?;
+        let project_out = projected_sum
+            .ok_or_else(|| OmniVoiceError::InvalidData("stage1 quantizer set must not be empty".to_string()))?;
         let quantizer_output = project_out.transpose(1, 2)?;
         Ok((project_out, quantizer_output))
     }
@@ -273,28 +249,16 @@ impl ResidualUnit {
     fn load(dim: usize, dilation: usize, ws: &CodecWeightSource) -> Result<Self> {
         Ok(Self {
             snake1: Snake1d::load(dim, &ws.pp("snake1"))?,
-            conv1: ws.pp("conv1").load_conv1d_flexible(
-                dim,
-                dim,
-                7,
-                dilation,
-                ((7 - 1) * dilation) / 2,
-            )?,
+            conv1: ws.pp("conv1").load_conv1d_flexible(dim, dim, 7, dilation, ((7 - 1) * dilation) / 2)?,
             snake2: Snake1d::load(dim, &ws.pp("snake2"))?,
-            conv2: ws
-                .pp("conv2")
-                .load_conv1d_flexible(dim, dim, 1, 1, 0)?,
+            conv2: ws.pp("conv2").load_conv1d_flexible(dim, dim, 1, 1, 0)?,
         })
     }
 }
 
 impl Module for ResidualUnit {
     fn forward(&self, xs: &Tensor) -> CandleResult<Tensor> {
-        let ys = xs
-            .apply(&self.snake1)?
-            .apply(&self.conv1)?
-            .apply(&self.snake2)?
-            .apply(&self.conv2)?;
+        let ys = xs.apply(&self.snake1)?.apply(&self.conv1)?.apply(&self.snake2)?.apply(&self.conv2)?;
         let pad = (xs.dim(candle_core::D::Minus1)? - ys.dim(candle_core::D::Minus1)?) / 2;
         if pad > 0 {
             Ok((&ys + xs.narrow(candle_core::D::Minus1, pad, ys.dim(candle_core::D::Minus1)?)?)?)
@@ -352,22 +316,12 @@ struct AcousticDecoder {
 
 impl AcousticDecoder {
     fn load(ws: &CodecWeightSource, config: &Stage1ModelConfig) -> Result<Self> {
-        let conv1 = ws.pp("conv1").load_conv1d_flexible(
-            config.decoder_input_dim,
-            config.decoder_hidden_dim,
-            7,
-            1,
-            3,
-        )?;
+        let conv1 =
+            ws.pp("conv1").load_conv1d_flexible(config.decoder_input_dim, config.decoder_hidden_dim, 7, 1, 3)?;
         let mut channels = config.decoder_hidden_dim;
         let mut blocks = Vec::with_capacity(config.decoder_strides.len());
         for (index, stride) in config.decoder_strides.iter().enumerate() {
-            let block = DecoderBlock::load(
-                channels,
-                channels / 2,
-                *stride,
-                &ws.pp("block").pp(index),
-            )?;
+            let block = DecoderBlock::load(channels, channels / 2, *stride, &ws.pp("block").pp(index))?;
             channels /= 2;
             blocks.push(block);
         }

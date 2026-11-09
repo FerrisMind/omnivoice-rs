@@ -8,27 +8,22 @@ use std::{
     },
 };
 
-use candle_core::{
-    quantized::QMatMul,
-    DType, Device, IndexOp, Module, Tensor,
-};
+use candle_core::{quantized::QMatMul, DType, Device, IndexOp, Module, Tensor};
 use candle_nn::{Embedding, Linear, VarBuilder};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use safetensors::SafeTensors;
 use serde::Deserialize;
 
+use crate::codec_layers::QuantizedEmbedding;
 use crate::{
     artifacts::{GeneratorArtifacts, GgufBundleArtifacts, RuntimeArtifacts},
-    contracts::{
-        BatchedInputs, F32Tensor3, F32Tensor4, I64Tensor2, I64Tensor3, PreparedInferenceBatch,
-    },
+    contracts::{BatchedInputs, F32Tensor3, F32Tensor4, I64Tensor2, I64Tensor3, PreparedInferenceBatch},
     error::{OmniVoiceError, Result},
     runtime::RuntimeOptions,
     stage0_loop::{build_timesteps, build_unmask_schedules},
     stage0_qwen3::{Stage0ForwardPass, Stage0Qwen3Backbone, Stage0Qwen3Config},
     stage0_qwen3_quantized::{keep_quantized_matmul, Stage0Qwen3QuantizedBackbone},
 };
-use crate::codec_layers::QuantizedEmbedding;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LocalQwen3Config {
@@ -153,9 +148,7 @@ impl LocalQwen3Config {
     pub fn hidden_act(&self) -> Result<candle_nn::Activation> {
         match self.hidden_act.as_str() {
             "silu" => Ok(candle_nn::Activation::Silu),
-            other => Err(OmniVoiceError::Unsupported(format!(
-                "unsupported Qwen3 hidden activation {other}"
-            ))),
+            other => Err(OmniVoiceError::Unsupported(format!("unsupported Qwen3 hidden activation {other}"))),
         }
     }
 
@@ -184,9 +177,7 @@ impl Stage0Config {
     }
 
     pub fn from_artifacts(generator: &GeneratorArtifacts) -> Result<Self> {
-        Ok(serde_json::from_str(&fs::read_to_string(
-            generator.config_path(),
-        )?)?)
+        Ok(serde_json::from_str(&fs::read_to_string(generator.config_path())?)?)
     }
 
     pub fn from_runtime_artifacts(runtime: &RuntimeArtifacts) -> Result<Self> {
@@ -204,9 +195,7 @@ impl Stage0Config {
             .and_then(|value| value.to_vec().ok())
             .map(|tokens| tokens.len())
             .ok_or_else(|| {
-                OmniVoiceError::InvalidData(
-                    "GGUF generator is missing tokenizer.ggml.tokens metadata".to_string(),
-                )
+                OmniVoiceError::InvalidData("GGUF generator is missing tokenizer.ggml.tokens metadata".to_string())
             })?;
         Ok(Self {
             audio_vocab_size: gguf_metadata_usize(&content, "omnivoice.audio_vocab_size")?,
@@ -214,25 +203,13 @@ impl Stage0Config {
             num_audio_codebook: gguf_metadata_usize(&content, "omnivoice.num_audio_codebook")?,
             llm_config: LocalQwen3Config {
                 hidden_size: gguf_metadata_usize(&content, "omnivoice-lm.embedding_length")?,
-                intermediate_size: gguf_metadata_usize(
-                    &content,
-                    "omnivoice-lm.feed_forward_length",
-                )?,
+                intermediate_size: gguf_metadata_usize(&content, "omnivoice-lm.feed_forward_length")?,
                 num_hidden_layers: gguf_metadata_usize(&content, "omnivoice-lm.block_count")?,
-                num_attention_heads: gguf_metadata_usize(
-                    &content,
-                    "omnivoice-lm.attention.head_count",
-                )?,
-                num_key_value_heads: gguf_metadata_usize(
-                    &content,
-                    "omnivoice-lm.attention.head_count_kv",
-                )?,
+                num_attention_heads: gguf_metadata_usize(&content, "omnivoice-lm.attention.head_count")?,
+                num_key_value_heads: gguf_metadata_usize(&content, "omnivoice-lm.attention.head_count_kv")?,
                 head_dim: gguf_metadata_usize(&content, "omnivoice-lm.attention.key_length")?,
                 max_position_embeddings: 4096,
-                rms_norm_eps: gguf_metadata_f64(
-                    &content,
-                    "omnivoice-lm.attention.layer_norm_rms_epsilon",
-                )?,
+                rms_norm_eps: gguf_metadata_f64(&content, "omnivoice-lm.attention.layer_norm_rms_epsilon")?,
                 attention_bias: false,
                 hidden_act: default_hidden_act(),
                 rope_parameters: RopeParameters {
@@ -290,11 +267,7 @@ impl Stage0WeightLayout {
                 accepted_prefixes, required_prefixes
             )));
         }
-        Ok(Self {
-            weights_path: path,
-            accepted_prefixes,
-            ignored_keys: found_ignored_keys,
-        })
+        Ok(Self { weights_path: path, accepted_prefixes, ignored_keys: found_ignored_keys })
     }
 
     pub fn from_runtime_artifacts(runtime: &RuntimeArtifacts) -> Result<Self> {
@@ -412,10 +385,7 @@ impl Stage0RuntimePlan {
         Self::from_runtime_artifacts(options, &runtime)
     }
 
-    pub fn from_runtime_artifacts(
-        options: RuntimeOptions,
-        runtime: &RuntimeArtifacts,
-    ) -> Result<Self> {
+    pub fn from_runtime_artifacts(options: RuntimeOptions, runtime: &RuntimeArtifacts) -> Result<Self> {
         let device = options.resolve_device()?;
         Self::from_runtime_artifacts_with_device(options, runtime, device)
     }
@@ -469,11 +439,7 @@ impl Stage0RuntimePlan {
             cond_lens: cond_lens.to_vec(),
             runtime_dtype: self.runtime_dtype,
         };
-        validate_prepared_batch(
-            &prepared,
-            self.config.num_audio_codebook,
-            self.config.audio_mask_id,
-        )?;
+        validate_prepared_batch(&prepared, self.config.num_audio_codebook, self.config.audio_mask_id)?;
         Ok(prepared)
     }
 
@@ -495,10 +461,7 @@ impl Stage0RuntimePlan {
     }
 
     pub fn set_seed(&self, seed: u64) -> Result<()> {
-        *self
-            .cpu_seed
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = Some(seed);
+        *self.cpu_seed.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(seed);
         if self.device.is_cpu() {
             return Ok(());
         }
@@ -507,10 +470,7 @@ impl Stage0RuntimePlan {
     }
 
     pub fn set_cancellation_flag(&self, flag: Option<Arc<AtomicBool>>) {
-        *self
-            .cancellation
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = flag;
+        *self.cancellation.lock().unwrap_or_else(|poison| poison.into_inner()) = flag;
     }
 
     pub fn cancellation_requested(&self) -> bool {
@@ -526,13 +486,9 @@ impl Stage0RuntimePlan {
         prepared: &PreparedInferenceBatch,
         config: &Stage0DeterministicConfig,
     ) -> Result<Stage0DebugCapture> {
-        self.generate_deterministic(prepared, config, &config.capture_steps)?
-            .debug_capture
-            .ok_or_else(|| {
-                OmniVoiceError::InvalidData(
-                    "stage0 deterministic debug run did not capture debug tensors".to_string(),
-                )
-            })
+        self.generate_deterministic(prepared, config, &config.capture_steps)?.debug_capture.ok_or_else(|| {
+            OmniVoiceError::InvalidData("stage0 deterministic debug run did not capture debug tensors".to_string())
+        })
     }
 
     pub fn config(&self) -> &Stage0Config {
@@ -561,13 +517,8 @@ impl Stage0RuntimePlan {
 
     fn model(&self) -> Result<&Stage0Model> {
         let result = self.model.get_or_init(|| {
-            Stage0Model::load(
-                &self.config,
-                self.weight_layout.weights_path(),
-                &self.device,
-                self.runtime_dtype,
-            )
-            .map_err(|error| error.to_string())
+            Stage0Model::load(&self.config, self.weight_layout.weights_path(), &self.device, self.runtime_dtype)
+                .map_err(|error| error.to_string())
         });
         match result {
             Ok(model) => Ok(model),
@@ -583,11 +534,7 @@ impl Stage0RuntimePlan {
     ) -> Result<Stage0GenerationOutput> {
         let output = self.run_loop_device(prepared, config, capture_steps)?;
         Ok(Stage0GenerationOutput {
-            tokens: output
-                .tokens
-                .iter()
-                .map(tensor_to_i64_tensor2)
-                .collect::<Result<Vec<_>>>()?,
+            tokens: output.tokens.iter().map(tensor_to_i64_tensor2).collect::<Result<Vec<_>>>()?,
             debug_capture: output.debug_capture,
         })
     }
@@ -599,20 +546,11 @@ impl Stage0RuntimePlan {
         capture_steps: &[usize],
     ) -> Result<Stage0DeviceGenerationOutput> {
         validate_deterministic_config(config)?;
-        validate_prepared_batch(
-            prepared,
-            self.config.num_audio_codebook,
-            self.config.audio_mask_id,
-        )?;
+        validate_prepared_batch(prepared, self.config.num_audio_codebook, self.config.audio_mask_id)?;
         if self.cancellation_requested() {
-            return Err(OmniVoiceError::InvalidRequest(
-                "inference cancelled".to_string(),
-            ));
+            return Err(OmniVoiceError::InvalidRequest("inference cancelled".to_string()));
         }
-        let seed = *self
-            .cpu_seed
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let seed = *self.cpu_seed.lock().unwrap_or_else(|poison| poison.into_inner());
         if let Some(seed) = seed {
             if !self.device.is_cpu() {
                 // Still seed the device for any remaining on-device rand uses
@@ -648,19 +586,11 @@ impl Stage0RuntimePlan {
         let num_codebooks = self.config.num_audio_codebook;
         let capture_layers: BTreeSet<usize> = config.capture_layers.iter().copied().collect();
         let capture_steps: BTreeSet<usize> = capture_steps.iter().copied().collect();
-        let attention_mask =
-            model.prepare_attention_mask(&prepared.attention_mask, self.runtime_dtype)?;
+        let attention_mask = model.prepare_attention_mask(&prepared.attention_mask, self.runtime_dtype)?;
         let timesteps = build_timesteps(0.0, 1.0, config.num_step, config.t_shift)?;
-        let schedules = build_unmask_schedules(
-            &prepared.target_lens,
-            num_codebooks,
-            &timesteps,
-            config.num_step,
-        )?;
+        let schedules = build_unmask_schedules(&prepared.target_lens, num_codebooks, &timesteps, config.num_step)?;
         let layer_penalties = Tensor::from_vec(
-            (0..num_codebooks)
-                .map(|layer| layer as f32 * config.layer_penalty_factor)
-                .collect::<Vec<_>>(),
+            (0..num_codebooks).map(|layer| layer as f32 * config.layer_penalty_factor).collect::<Vec<_>>(),
             (1, num_codebooks, 1),
             &self.device,
         )?;
@@ -670,12 +600,8 @@ impl Stage0RuntimePlan {
         let cached_text_embeds = model.cache_text_embeds(&batch_input_ids)?;
         let empty_capture_layers = BTreeSet::new();
         // Per-row active lengths for flash-attn: cond rows then uncond rows.
-        let flash_seqlens: Vec<usize> = prepared
-            .cond_lens
-            .iter()
-            .copied()
-            .chain(prepared.target_lens.iter().copied())
-            .collect();
+        let flash_seqlens: Vec<usize> =
+            prepared.cond_lens.iter().copied().chain(prepared.target_lens.iter().copied()).collect();
         let max_target_len = prepared.target_lens.iter().copied().max().unwrap_or(0);
         // One host Gumbel draw + one H2D for the whole denoise loop (not per step).
         let mut gumbel_step_idx = 0usize;
@@ -708,9 +634,7 @@ impl Stage0RuntimePlan {
         let mut step_captures = Vec::new();
         for step in 0..config.num_step {
             if self.cancellation_requested() {
-                return Err(OmniVoiceError::InvalidRequest(
-                    "inference cancelled".to_string(),
-                ));
+                return Err(OmniVoiceError::InvalidRequest("inference cancelled".to_string()));
             }
             let forward = model.forward_with_text_cache(
                 &batch_input_ids,
@@ -723,10 +647,7 @@ impl Stage0RuntimePlan {
             // Keep full logits in runtime dtype; only cast the (small) target
             // slices to f32 for scoring — avoids a full (2B,C,S,V) materialization.
             let batch_logits = &forward.logits;
-            let step_needs_noise = schedules
-                .iter()
-                .take(batch_size)
-                .any(|s| s.get(step).copied().unwrap_or(0) > 0);
+            let step_needs_noise = schedules.iter().take(batch_size).any(|s| s.get(step).copied().unwrap_or(0) > 0);
             let shared_step_noise = if step_needs_noise {
                 if let Some(bank) = gumbel_bank.as_ref() {
                     let noise = bank.i(gumbel_step_idx..gumbel_step_idx + 1)?;
@@ -749,38 +670,22 @@ impl Stage0RuntimePlan {
                 let target_len = prepared.target_lens[batch_index];
                 let cond_len = prepared.cond_lens[batch_index];
                 let c_logits = batch_logits
-                    .i((
-                        batch_index..batch_index + 1,
-                        ..,
-                        (cond_len - target_len)..cond_len,
-                        ..,
-                    ))?
+                    .i((batch_index..batch_index + 1, .., (cond_len - target_len)..cond_len, ..))?
                     .to_dtype(DType::F32)?;
                 let u_logits = batch_logits
-                    .i((
-                        batch_size + batch_index..batch_size + batch_index + 1,
-                        ..,
-                        0..target_len,
-                        ..,
-                    ))?
+                    .i((batch_size + batch_index..batch_size + batch_index + 1, .., 0..target_len, ..))?
                     .to_dtype(DType::F32)?;
                 let batch_input_ids_before_update =
-                    if debug_enabled && capture_steps.contains(&step) {
-                        Some(batch_input_ids.clone())
-                    } else {
-                        None
-                    };
-                let (pred_tokens_tensor, confidence_scores_tensor) =
-                    predict_tokens_with_scoring_from_tensors(
-                        &c_logits,
-                        &u_logits,
-                        config.guidance_scale,
-                        config.class_temperature,
-                        self.config.audio_mask_id as usize,
-                        host_rng.as_mut(),
-                    )?;
-                let current_tokens_view =
-                    tokens.i((batch_index..batch_index + 1, .., 0..target_len))?;
+                    if debug_enabled && capture_steps.contains(&step) { Some(batch_input_ids.clone()) } else { None };
+                let (pred_tokens_tensor, confidence_scores_tensor) = predict_tokens_with_scoring_from_tensors(
+                    &c_logits,
+                    &u_logits,
+                    config.guidance_scale,
+                    config.class_temperature,
+                    self.config.audio_mask_id as usize,
+                    host_rng.as_mut(),
+                )?;
+                let current_tokens_view = tokens.i((batch_index..batch_index + 1, .., 0..target_len))?;
                 let step_noise = if let Some(noise) = shared_step_noise.as_ref() {
                     // bank row: (1,1,C,Tmax) → (1,C,T) to match confidence scores
                     let noise = noise.i((0, .., .., 0..target_len))?; // (1,C,T)
@@ -799,28 +704,14 @@ impl Stage0RuntimePlan {
                     host_rng.as_mut(),
                     step_noise.as_ref(),
                 )?;
-                tokens = tokens.slice_assign(
-                    &[
-                        batch_index..batch_index + 1,
-                        0..num_codebooks,
-                        0..target_len,
-                    ],
+                tokens = tokens
+                    .slice_assign(&[batch_index..batch_index + 1, 0..num_codebooks, 0..target_len], &updated_tokens)?;
+                batch_input_ids = batch_input_ids.slice_assign(
+                    &[batch_index..batch_index + 1, 0..num_codebooks, (cond_len - target_len)..cond_len],
                     &updated_tokens,
                 )?;
                 batch_input_ids = batch_input_ids.slice_assign(
-                    &[
-                        batch_index..batch_index + 1,
-                        0..num_codebooks,
-                        (cond_len - target_len)..cond_len,
-                    ],
-                    &updated_tokens,
-                )?;
-                batch_input_ids = batch_input_ids.slice_assign(
-                    &[
-                        batch_size + batch_index..batch_size + batch_index + 1,
-                        0..num_codebooks,
-                        0..target_len,
-                    ],
+                    &[batch_size + batch_index..batch_size + batch_index + 1, 0..num_codebooks, 0..target_len],
                     &updated_tokens,
                 )?;
 
@@ -832,9 +723,7 @@ impl Stage0RuntimePlan {
                         pred_tokens: tensor_to_i64_tensor3(&pred_tokens_tensor)?,
                         confidence_scores: tensor_to_f32_tensor3(&confidence_scores_tensor)?,
                         batch_input_ids_before_update: tensor_to_i64_tensor3(
-                            batch_input_ids_before_update
-                                .as_ref()
-                                .expect("capture gate checked"),
+                            batch_input_ids_before_update.as_ref().expect("capture gate checked"),
                         )?,
                         tokens_after_step: tensor_to_i64_tensor3(&updated_tokens)?,
                         batch_input_ids_before_step: tensor_to_i64_tensor3(&batch_input_ids)?,
@@ -861,18 +750,11 @@ impl Stage0RuntimePlan {
                 hidden_layers,
                 final_hidden: tensor_to_f32_tensor3(&initial_forward.backbone.final_hidden)?,
                 steps: step_captures,
-                final_tokens: tensor_to_i64_tensor2(
-                    final_tokens
-                        .first()
-                        .expect("debug capture requires one prompt"),
-                )?,
+                final_tokens: tensor_to_i64_tensor2(final_tokens.first().expect("debug capture requires one prompt"))?,
             })
         };
 
-        Ok(Stage0DeviceGenerationOutput {
-            tokens: final_tokens,
-            debug_capture,
-        })
+        Ok(Stage0DeviceGenerationOutput { tokens: final_tokens, debug_capture })
     }
 }
 
@@ -884,17 +766,8 @@ pub struct Stage0ForwardOutputs {
 }
 
 impl Stage0Model {
-    fn load(
-        config: &Stage0Config,
-        weights_path: &Path,
-        device: &Device,
-        dtype: DType,
-    ) -> Result<Self> {
-        if weights_path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
-        {
+    fn load(config: &Stage0Config, weights_path: &Path, device: &Device, dtype: DType) -> Result<Self> {
+        if weights_path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("gguf")) {
             return Self::load_from_gguf(config, weights_path, device, dtype);
         }
         let vb = mmap_var_builder(weights_path, dtype, device)?;
@@ -905,32 +778,21 @@ impl Stage0Model {
                 format!("llm.{name}")
             }
         });
-        let backbone = Stage0BackboneKind::Dense(Stage0Qwen3Backbone::load(
-            &config.llm_config.to_stage0_qwen3_config()?,
-            llm_vb,
-        )?);
+        let backbone =
+            Stage0BackboneKind::Dense(Stage0Qwen3Backbone::load(&config.llm_config.to_stage0_qwen3_config()?, llm_vb)?);
         let audio_embeddings_weight = vb.get(
-            (
-                config.num_audio_codebook * config.audio_vocab_size,
-                config.llm_config.hidden_size,
-            ),
+            (config.num_audio_codebook * config.audio_vocab_size, config.llm_config.hidden_size),
             "audio_embeddings.weight",
         )?;
-        let audio_embeddings = Stage0AudioEmbeddings::Dense(Embedding::new(
-            audio_embeddings_weight,
-            config.llm_config.hidden_size,
-        ));
+        let audio_embeddings =
+            Stage0AudioEmbeddings::Dense(Embedding::new(audio_embeddings_weight, config.llm_config.hidden_size));
         let audio_heads_weight = vb.get(
-            (
-                config.num_audio_codebook * config.audio_vocab_size,
-                config.llm_config.hidden_size,
-            ),
+            (config.num_audio_codebook * config.audio_vocab_size, config.llm_config.hidden_size),
             "audio_heads.weight",
         )?;
         let audio_heads = Stage0HeadProjection::Dense(Linear::new(audio_heads_weight, None));
         let codebook_layer_offsets = Tensor::from_vec(
-            AudioEmbeddingMixer::new(config.num_audio_codebook, config.audio_vocab_size)
-                .layer_offsets(),
+            AudioEmbeddingMixer::new(config.num_audio_codebook, config.audio_vocab_size).layer_offsets(),
             (1, config.num_audio_codebook, 1),
             device,
         )?;
@@ -945,16 +807,8 @@ impl Stage0Model {
         })
     }
 
-    fn load_from_gguf(
-        config: &Stage0Config,
-        weights_path: &Path,
-        device: &Device,
-        dtype: DType,
-    ) -> Result<Self> {
-        let qvb = candle_transformers::quantized_var_builder::VarBuilder::from_gguf(
-            weights_path,
-            device,
-        )?;
+    fn load_from_gguf(config: &Stage0Config, weights_path: &Path, device: &Device, dtype: DType) -> Result<Self> {
+        let qvb = candle_transformers::quantized_var_builder::VarBuilder::from_gguf(weights_path, device)?;
         let backbone = Stage0BackboneKind::Quantized(Stage0Qwen3QuantizedBackbone::load(
             &config.llm_config.to_stage0_qwen3_config()?,
             qvb.clone(),
@@ -963,10 +817,7 @@ impl Stage0Model {
         // Candle 0.11+: gather rows from packed Q4 without materializing the full table.
         let audio_embeddings = Stage0AudioEmbeddings::Quantized(QuantizedEmbedding::new(
             qvb.get(
-                (
-                    config.num_audio_codebook * config.audio_vocab_size,
-                    config.llm_config.hidden_size,
-                ),
+                (config.num_audio_codebook * config.audio_vocab_size, config.llm_config.hidden_size),
                 "audio_embeddings.weight",
             )?,
             dtype,
@@ -976,15 +827,11 @@ impl Stage0Model {
         // files) `audio_heads.weight` is not packed-quant, and a raw
         // `QMatMul::QTensor(...)` would hit candle's cuda dequantize_f16 bail.
         let audio_heads = Stage0HeadProjection::Quantized(keep_quantized_matmul(qvb.get(
-            (
-                config.num_audio_codebook * config.audio_vocab_size,
-                config.llm_config.hidden_size,
-            ),
+            (config.num_audio_codebook * config.audio_vocab_size, config.llm_config.hidden_size),
             "audio_heads.weight",
         )?)?);
         let codebook_layer_offsets = Tensor::from_vec(
-            AudioEmbeddingMixer::new(config.num_audio_codebook, config.audio_vocab_size)
-                .layer_offsets(),
+            AudioEmbeddingMixer::new(config.num_audio_codebook, config.audio_vocab_size).layer_offsets(),
             (1, config.num_audio_codebook, 1),
             device,
         )?;
@@ -1009,10 +856,8 @@ impl Stage0Model {
             });
         }
         let on_true = Tensor::zeros(mask.shape(), dtype, mask.device())?;
-        let on_false =
-            Tensor::new(f32::NEG_INFINITY, mask.device())?.broadcast_as(mask.shape().dims())?;
-        mask.where_cond(&on_true, &on_false.to_dtype(dtype)?)
-            .map_err(Into::into)
+        let on_false = Tensor::new(f32::NEG_INFINITY, mask.device())?.broadcast_as(mask.shape().dims())?;
+        mask.where_cond(&on_true, &on_false.to_dtype(dtype)?).map_err(Into::into)
     }
 
     fn cache_text_embeds(&self, input_ids: &Tensor) -> Result<Tensor> {
@@ -1032,19 +877,11 @@ impl Stage0Model {
             Some(embeds) => embeds.clone(),
             None => self.cache_text_embeds(input_ids)?,
         };
-        let shifted_ids = (input_ids
-            .broadcast_mul(&audio_mask.unsqueeze(1)?.to_dtype(DType::I64)?)?
-            + self
-                .codebook_layer_offsets
-                .broadcast_as(input_ids.shape().dims())?)?;
+        let shifted_ids = (input_ids.broadcast_mul(&audio_mask.unsqueeze(1)?.to_dtype(DType::I64)?)?
+            + self.codebook_layer_offsets.broadcast_as(input_ids.shape().dims())?)?;
         let audio_embeds = self.audio_embeddings.forward(&shifted_ids)?.sum(1)?;
-        let selection_mask = audio_mask
-            .unsqueeze(candle_core::D::Minus1)?
-            .broadcast_as(audio_embeds.shape().dims())?;
-        selection_mask
-            .where_cond(&audio_embeds, &text_embeds)?
-            .to_dtype(self.activation_dtype)
-            .map_err(Into::into)
+        let selection_mask = audio_mask.unsqueeze(candle_core::D::Minus1)?.broadcast_as(audio_embeds.shape().dims())?;
+        selection_mask.where_cond(&audio_embeds, &text_embeds)?.to_dtype(self.activation_dtype).map_err(Into::into)
     }
 
     fn forward_with_text_cache(
@@ -1056,8 +893,7 @@ impl Stage0Model {
         cached_text_embeds: Option<&Tensor>,
         flash_seqlens: Option<&[usize]>,
     ) -> Result<Stage0ForwardOutputs> {
-        let inputs_embeds =
-            self.prepare_embed_inputs(input_ids, audio_mask, cached_text_embeds)?;
+        let inputs_embeds = self.prepare_embed_inputs(input_ids, audio_mask, cached_text_embeds)?;
         let backbone = self.backbone.forward_embeds_with_flash(
             &inputs_embeds,
             Some(attention_mask),
@@ -1069,18 +905,9 @@ impl Stage0Model {
         let logits = self
             .audio_heads
             .forward(&final_hidden)?
-            .reshape((
-                batch_size,
-                seq_len,
-                self.num_audio_codebook,
-                self.audio_vocab_size,
-            ))?
+            .reshape((batch_size, seq_len, self.num_audio_codebook, self.audio_vocab_size))?
             .permute((0, 2, 1, 3))?;
-        Ok(Stage0ForwardOutputs {
-            inputs_embeds,
-            backbone,
-            logits,
-        })
+        Ok(Stage0ForwardOutputs { inputs_embeds, backbone, logits })
     }
 }
 
@@ -1092,16 +919,11 @@ pub struct AudioEmbeddingMixer {
 
 impl AudioEmbeddingMixer {
     pub fn new(num_audio_codebook: usize, audio_vocab_size: usize) -> Self {
-        Self {
-            num_audio_codebook,
-            audio_vocab_size,
-        }
+        Self { num_audio_codebook, audio_vocab_size }
     }
 
     pub fn layer_offsets(&self) -> Vec<i64> {
-        (0..self.num_audio_codebook)
-            .map(|index| (index * self.audio_vocab_size) as i64)
-            .collect()
+        (0..self.num_audio_codebook).map(|index| (index * self.audio_vocab_size) as i64).collect()
     }
 
     pub fn shifted_audio_id(&self, layer: usize, token_id: i64) -> Result<i64> {
@@ -1111,18 +933,17 @@ impl AudioEmbeddingMixer {
                 self.num_audio_codebook
             )));
         };
-        let vocab_size = i64::try_from(self.audio_vocab_size).map_err(|_| {
-            OmniVoiceError::InvalidRequest("audio vocabulary size does not fit i64".to_string())
-        })?;
+        let vocab_size = i64::try_from(self.audio_vocab_size)
+            .map_err(|_| OmniVoiceError::InvalidRequest("audio vocabulary size does not fit i64".to_string()))?;
         if token_id < 0 || token_id >= vocab_size {
             return Err(OmniVoiceError::InvalidRequest(format!(
                 "audio token {token_id} is outside vocabulary size {}",
                 self.audio_vocab_size
             )));
         }
-        token_id.checked_add(offset).ok_or_else(|| {
-            OmniVoiceError::InvalidRequest("shifted audio token id overflowed i64".to_string())
-        })
+        token_id
+            .checked_add(offset)
+            .ok_or_else(|| OmniVoiceError::InvalidRequest("shifted audio token id overflowed i64".to_string()))
     }
 }
 
@@ -1183,11 +1004,7 @@ fn mask_audio_token(log_probs: &Tensor, audio_mask_id: usize) -> Result<Tensor> 
     if audio_mask_id + 1 == vocab_size {
         Tensor::cat(&[&prefix, &mask_fill], candle_core::D::Minus1).map_err(Into::into)
     } else {
-        let suffix = log_probs.narrow(
-            candle_core::D::Minus1,
-            audio_mask_id + 1,
-            vocab_size - audio_mask_id - 1,
-        )?;
+        let suffix = log_probs.narrow(candle_core::D::Minus1, audio_mask_id + 1, vocab_size - audio_mask_id - 1)?;
         Tensor::cat(&[&prefix, &mask_fill, &suffix], candle_core::D::Minus1).map_err(Into::into)
     }
 }
@@ -1197,22 +1014,13 @@ fn filter_top_k(logits: &Tensor, ratio: f32) -> Result<Tensor> {
     let vocab_size = logits.dim(candle_core::D::Minus1)?;
     let top_k = ((ratio * vocab_size as f32).ceil() as usize).clamp(1, vocab_size);
     let sorted_indices = logits.arg_sort_last_dim(false)?.contiguous()?;
-    let top_indices = sorted_indices
-        .narrow(candle_core::D::Minus1, 0, top_k)?
-        .contiguous()?;
-    let top_values = logits
-        .gather(&top_indices, candle_core::D::Minus1)?
-        .contiguous()?;
+    let top_indices = sorted_indices.narrow(candle_core::D::Minus1, 0, top_k)?.contiguous()?;
+    let top_values = logits.gather(&top_indices, candle_core::D::Minus1)?.contiguous()?;
     let masked = Tensor::full(f32::NEG_INFINITY, logits.shape().dims(), logits.device())?;
-    masked
-        .scatter(&top_indices, &top_values, candle_core::D::Minus1)
-        .map_err(Into::into)
+    masked.scatter(&top_indices, &top_values, candle_core::D::Minus1).map_err(Into::into)
 }
 
-fn with_rng<T>(
-    cpu_rng: Option<&mut StdRng>,
-    f: impl FnOnce(&mut StdRng) -> Result<T>,
-) -> Result<T> {
+fn with_rng<T>(cpu_rng: Option<&mut StdRng>, f: impl FnOnce(&mut StdRng) -> Result<T>) -> Result<T> {
     match cpu_rng {
         Some(rng) => f(rng),
         None => {
@@ -1228,21 +1036,13 @@ fn sample_gumbel<R: Rng + ?Sized>(rng: &mut R) -> f32 {
     -(-uniform.ln() + 1.0e-10).ln()
 }
 
-fn gumbel_argmax_cpu(
-    logits: &Tensor,
-    temperature: f32,
-    cpu_rng: Option<&mut StdRng>,
-) -> Result<Tensor> {
+fn gumbel_argmax_cpu(logits: &Tensor, temperature: f32, cpu_rng: Option<&mut StdRng>) -> Result<Tensor> {
     if temperature <= 0.0 {
         return logits.argmax(candle_core::D::Minus1).map_err(Into::into);
     }
     let (batch, layers, steps, vocab) = logits.dims4()?;
     let device = logits.device().clone();
-    let logits = logits
-        .to_dtype(DType::F32)?
-        .flatten_all()?
-        .to_vec1::<f32>()
-        .map_err(OmniVoiceError::from)?;
+    let logits = logits.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>().map_err(OmniVoiceError::from)?;
     let mut pred_tokens = Vec::with_capacity(batch * layers * steps);
     with_rng(cpu_rng, |rng| {
         for row in logits.chunks_exact(vocab) {
@@ -1267,9 +1067,7 @@ fn gumbel_argmax(logits: &Tensor, temperature: f32) -> Result<Tensor> {
         return logits.argmax(candle_core::D::Minus1).map_err(Into::into);
     }
     let scores = apply_gumbel_noise(logits, temperature)?;
-    scores
-        .argmax(candle_core::D::Minus1)
-        .map_err(Into::into)
+    scores.argmax(candle_core::D::Minus1).map_err(Into::into)
 }
 
 /// Device-side Gumbel noise matching PyTorch OmniVoice `_gumbel_sample`.
@@ -1293,21 +1091,13 @@ fn apply_gumbel_noise(logits: &Tensor, temperature: f32) -> Result<Tensor> {
     (scaled + gumbel_noise).map_err(Into::into)
 }
 
-fn apply_position_temperature_cpu(
-    logits: &Tensor,
-    temperature: f32,
-    cpu_rng: Option<&mut StdRng>,
-) -> Result<Tensor> {
+fn apply_position_temperature_cpu(logits: &Tensor, temperature: f32, cpu_rng: Option<&mut StdRng>) -> Result<Tensor> {
     if temperature <= 0.0 {
         return Ok(logits.clone());
     }
     let shape = logits.shape().dims().to_vec();
     let device = logits.device().clone();
-    let logits = logits
-        .to_dtype(DType::F32)?
-        .flatten_all()?
-        .to_vec1::<f32>()
-        .map_err(OmniVoiceError::from)?;
+    let logits = logits.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>().map_err(OmniVoiceError::from)?;
     let mut values = Vec::with_capacity(logits.len());
     with_rng(cpu_rng, |rng| {
         for value in logits {
@@ -1378,11 +1168,7 @@ fn build_position_gumbel_bank(
         return Ok(None);
     }
     let steps_with_noise = values.len() / flat;
-    Ok(Some(Tensor::from_vec(
-        values,
-        (steps_with_noise, 1, num_codebooks, max_target_len),
-        device,
-    )?))
+    Ok(Some(Tensor::from_vec(values, (steps_with_noise, 1, num_codebooks, max_target_len), device)?))
 }
 
 fn validate_batched_inputs(
@@ -1394,15 +1180,12 @@ fn validate_batched_inputs(
 ) -> Result<()> {
     let (input_batch, input_codebooks, input_len) = batched.batch_input_ids.dims();
     let (mask_batch, mask_len) = batched.batch_audio_mask.dims();
-    let (attention_batch, attention_heads, query_len, key_len) =
-        batched.batch_attention_mask.dims();
+    let (attention_batch, attention_heads, query_len, key_len) = batched.batch_attention_mask.dims();
     let (token_batch, token_codebooks, token_len) = batched.tokens_init.dims();
     let batch_size = cond_lens.len();
 
     if batch_size == 0 {
-        return Err(OmniVoiceError::InvalidRequest(
-            "prepared batch must contain at least one item".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidRequest("prepared batch must contain at least one item".to_string()));
     }
     if input_batch != batch_size.saturating_mul(2)
         || input_codebooks != expected_codebooks
@@ -1439,15 +1222,8 @@ fn validate_batched_inputs(
             )));
         }
     }
-    if batched
-        .tokens_init
-        .data
-        .iter()
-        .any(|token| *token != audio_mask_id)
-    {
-        return Err(OmniVoiceError::InvalidData(
-            "tokens_init must be filled with the audio mask token".to_string(),
-        ));
+    if batched.tokens_init.data.iter().any(|token| *token != audio_mask_id) {
+        return Err(OmniVoiceError::InvalidData("tokens_init must be filled with the audio mask token".to_string()));
     }
     Ok(())
 }
@@ -1464,9 +1240,7 @@ fn validate_prepared_batch(
     let batch_size = prepared.target_lens.len();
 
     if batch_size == 0 || prepared.cond_lens.len() != batch_size {
-        return Err(OmniVoiceError::InvalidRequest(
-            "prepared batch lengths are inconsistent".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidRequest("prepared batch lengths are inconsistent".to_string()));
     }
     if input_batch != batch_size.saturating_mul(2)
         || input_codebooks != expected_codebooks
@@ -1491,12 +1265,7 @@ fn validate_prepared_batch(
         });
     }
 
-    for (index, (&cond_len, &target_len)) in prepared
-        .cond_lens
-        .iter()
-        .zip(&prepared.target_lens)
-        .enumerate()
-    {
+    for (index, (&cond_len, &target_len)) in prepared.cond_lens.iter().zip(&prepared.target_lens).enumerate() {
         if cond_len == 0 || cond_len > input_len {
             return Err(OmniVoiceError::InvalidRequest(format!(
                 "conditional length at index {index} must be in 1..={input_len}"
@@ -1522,29 +1291,19 @@ fn validate_deterministic_config(config: &Stage0DeterministicConfig) -> Result<(
         )));
     }
     if !config.guidance_scale.is_finite() {
-        return Err(OmniVoiceError::InvalidRequest(
-            "guidance_scale must be finite".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidRequest("guidance_scale must be finite".to_string()));
     }
     if !config.t_shift.is_finite() || config.t_shift <= 0.0 {
-        return Err(OmniVoiceError::InvalidRequest(
-            "t_shift must be finite and greater than zero".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidRequest("t_shift must be finite and greater than zero".to_string()));
     }
     if !config.layer_penalty_factor.is_finite() {
-        return Err(OmniVoiceError::InvalidRequest(
-            "layer_penalty_factor must be finite".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidRequest("layer_penalty_factor must be finite".to_string()));
     }
     if !config.position_temperature.is_finite() || config.position_temperature < 0.0 {
-        return Err(OmniVoiceError::InvalidRequest(
-            "position_temperature must be finite and non-negative".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidRequest("position_temperature must be finite and non-negative".to_string()));
     }
     if !config.class_temperature.is_finite() || config.class_temperature < 0.0 {
-        return Err(OmniVoiceError::InvalidRequest(
-            "class_temperature must be finite and non-negative".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidRequest("class_temperature must be finite and non-negative".to_string()));
     }
     Ok(())
 }
@@ -1564,37 +1323,26 @@ fn apply_step_updates_device(
     if update_count == 0 {
         return Ok(current_tokens.clone());
     }
-    let selection_scores = confidence_scores
-        .broadcast_sub(&layer_penalties.broadcast_as(confidence_scores.shape().dims())?)?;
+    let selection_scores =
+        confidence_scores.broadcast_sub(&layer_penalties.broadcast_as(confidence_scores.shape().dims())?)?;
     // Host StdRng for Gumbel draws (quality); apply noise on-device to avoid
     // per-step D2H of confidence scores that serializes the CUDA pipeline.
     let selection_scores = if position_temperature > 0.0 {
         if selection_scores.device().is_cpu() {
             apply_position_temperature_cpu(&selection_scores, position_temperature, cpu_rng)?
         } else {
-            apply_position_temperature_host_noise(
-                &selection_scores,
-                position_temperature,
-                cpu_rng,
-                precomputed_noise,
-            )?
+            apply_position_temperature_host_noise(&selection_scores, position_temperature, cpu_rng, precomputed_noise)?
         }
     } else {
         selection_scores
     };
     let available_mask = current_tokens.eq(mask_id)?;
-    let neg_inf = Tensor::full(
-        f32::NEG_INFINITY,
-        selection_scores.shape().dims(),
-        current_tokens.device(),
-    )?;
+    let neg_inf = Tensor::full(f32::NEG_INFINITY, selection_scores.shape().dims(), current_tokens.device())?;
     let masked_scores = available_mask.where_cond(&selection_scores, &neg_inf)?;
     let flat_scores = masked_scores.flatten_all()?;
     let flat_len = flat_scores.elem_count();
     let top_k = update_count.min(flat_len);
-    let sorted_indices = flat_scores
-        .reshape((1, flat_len))?
-        .arg_sort_last_dim(false)?;
+    let sorted_indices = flat_scores.reshape((1, flat_len))?.arg_sort_last_dim(false)?;
     let top_indices = sorted_indices.i((0, 0..top_k))?;
     let flat_predicted = predicted_tokens.flatten_all()?;
     let update_values = flat_predicted.gather(&top_indices, 0)?;
@@ -1602,15 +1350,11 @@ fn apply_step_updates_device(
     let updated = if current_tokens.device().is_metal() && current_tokens.dtype() == DType::I64 {
         let flat_current = flat_current.to_dtype(DType::U32)?;
         let update_values = update_values.to_dtype(DType::U32)?;
-        flat_current
-            .scatter(&top_indices, &update_values, 0)?
-            .to_dtype(DType::I64)?
+        flat_current.scatter(&top_indices, &update_values, 0)?.to_dtype(DType::I64)?
     } else {
         flat_current.scatter(&top_indices, &update_values, 0)?
     };
-    updated
-        .reshape(current_tokens.shape().dims())
-        .map_err(Into::into)
+    updated.reshape(current_tokens.shape().dims()).map_err(Into::into)
 }
 
 fn tensor_parity_metric(actual: &[f32], expected: &[f32]) -> Result<Stage0ParityMetric> {
@@ -1646,21 +1390,9 @@ fn tensor_parity_metric(actual: &[f32], expected: &[f32]) -> Result<Stage0Parity
 fn exact_i64_parity_metric(actual: &[i64], expected: &[i64]) -> Stage0ParityMetric {
     Stage0ParityMetric {
         exact_match: actual == expected,
-        max_abs: if actual == expected {
-            0.0
-        } else {
-            f32::INFINITY
-        },
-        mae: if actual == expected {
-            0.0
-        } else {
-            f32::INFINITY
-        },
-        rmse: if actual == expected {
-            0.0
-        } else {
-            f32::INFINITY
-        },
+        max_abs: if actual == expected { 0.0 } else { f32::INFINITY },
+        mae: if actual == expected { 0.0 } else { f32::INFINITY },
+        rmse: if actual == expected { 0.0 } else { f32::INFINITY },
     }
 }
 
@@ -1674,17 +1406,11 @@ impl Stage0ParityMetrics {
         let mut metrics = BTreeMap::new();
         metrics.insert(
             "inputs_embeds".to_string(),
-            tensor_parity_metric(
-                &actual.inputs_embeds.data,
-                &reference_forward.inputs_embeds.data,
-            )?,
+            tensor_parity_metric(&actual.inputs_embeds.data, &reference_forward.inputs_embeds.data)?,
         );
         for (layer, reference_hidden) in &reference_forward.hidden_layers {
             let actual_hidden = actual.hidden_layers.get(layer).ok_or_else(|| {
-                OmniVoiceError::InvalidData(format!(
-                    "missing actual hidden layer {:02} capture",
-                    layer
-                ))
+                OmniVoiceError::InvalidData(format!("missing actual hidden layer {:02} capture", layer))
             })?;
             metrics.insert(
                 format!("hidden_layer_{layer:02}"),
@@ -1693,25 +1419,16 @@ impl Stage0ParityMetrics {
         }
         metrics.insert(
             "final_hidden".to_string(),
-            tensor_parity_metric(
-                &actual.final_hidden.data,
-                &reference_forward.final_hidden.data,
-            )?,
+            tensor_parity_metric(&actual.final_hidden.data, &reference_forward.final_hidden.data)?,
         );
         metrics.insert(
             "final_tokens".to_string(),
             exact_i64_parity_metric(&actual.final_tokens.data, &reference_final_tokens.data),
         );
         for (step, reference) in reference_steps {
-            let actual_step = actual
-                .steps
-                .iter()
-                .find(|capture| capture.step == *step)
-                .ok_or_else(|| {
-                    OmniVoiceError::InvalidData(format!(
-                        "missing actual stage0 debug capture for step {step}"
-                    ))
-                })?;
+            let actual_step = actual.steps.iter().find(|capture| capture.step == *step).ok_or_else(|| {
+                OmniVoiceError::InvalidData(format!("missing actual stage0 debug capture for step {step}"))
+            })?;
             metrics.insert(
                 format!("step_{step:02}_c_logits"),
                 tensor_parity_metric(&actual_step.c_logits.data, &reference.c_logits.data)?,
@@ -1726,10 +1443,7 @@ impl Stage0ParityMetrics {
             );
             metrics.insert(
                 format!("step_{step:02}_confidence_scores"),
-                tensor_parity_metric(
-                    &actual_step.confidence_scores.data,
-                    &reference.confidence_scores.data,
-                )?,
+                tensor_parity_metric(&actual_step.confidence_scores.data, &reference.confidence_scores.data)?,
             );
             metrics.insert(
                 format!("step_{step:02}_batch_input_ids_before_step"),
@@ -1740,31 +1454,18 @@ impl Stage0ParityMetrics {
             );
             metrics.insert(
                 format!("step_{step:02}_tokens_after_step"),
-                exact_i64_parity_metric(
-                    &actual_step.tokens_after_step.data,
-                    &reference.tokens_after_step.data,
-                ),
+                exact_i64_parity_metric(&actual_step.tokens_after_step.data, &reference.tokens_after_step.data),
             );
         }
         Ok(Self { metrics })
     }
 
-    pub fn insert_exact_i64_metric(
-        &mut self,
-        name: impl Into<String>,
-        actual: &[i64],
-        expected: &[i64],
-    ) {
-        self.metrics
-            .insert(name.into(), exact_i64_parity_metric(actual, expected));
+    pub fn insert_exact_i64_metric(&mut self, name: impl Into<String>, actual: &[i64], expected: &[i64]) {
+        self.metrics.insert(name.into(), exact_i64_parity_metric(actual, expected));
     }
 }
 
-fn mmap_var_builder(
-    weights_path: &Path,
-    dtype: DType,
-    device: &Device,
-) -> Result<VarBuilder<'static>> {
+fn mmap_var_builder(weights_path: &Path, dtype: DType, device: &Device) -> Result<VarBuilder<'static>> {
     let paths = [weights_path];
     // SAFETY: Candle exposes mmap loading behind an unsafe API because it wraps OS-backed
     // read-only memory maps. We map immutable safetensors files and only hand the backend to
@@ -1780,20 +1481,16 @@ fn gguf_metadata_usize(content: &candle_core::quantized::gguf_file::Content, key
         Some(candle_core::quantized::gguf_file::Value::I16(v)) if *v >= 0 => Ok(*v as usize),
         Some(candle_core::quantized::gguf_file::Value::U32(v)) => Ok(*v as usize),
         Some(candle_core::quantized::gguf_file::Value::I32(v)) if *v >= 0 => Ok(*v as usize),
-        Some(candle_core::quantized::gguf_file::Value::U64(v)) => usize::try_from(*v).map_err(|_| {
-            OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` exceeds usize"))
-        }),
-        Some(candle_core::quantized::gguf_file::Value::I64(v)) if *v >= 0 => {
-            usize::try_from(*v).map_err(|_| {
-                OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` exceeds usize"))
-            })
+        Some(candle_core::quantized::gguf_file::Value::U64(v)) => {
+            usize::try_from(*v).map_err(|_| OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` exceeds usize")))
         }
-        Some(other) => Err(OmniVoiceError::InvalidData(format!(
-            "GGUF metadata `{key}` is not a non-negative integer: {other:?}"
-        ))),
-        None => Err(OmniVoiceError::InvalidData(format!(
-            "missing GGUF metadata key `{key}`"
-        ))),
+        Some(candle_core::quantized::gguf_file::Value::I64(v)) if *v >= 0 => {
+            usize::try_from(*v).map_err(|_| OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` exceeds usize")))
+        }
+        Some(other) => {
+            Err(OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` is not a non-negative integer: {other:?}")))
+        }
+        None => Err(OmniVoiceError::InvalidData(format!("missing GGUF metadata key `{key}`"))),
     }
 }
 
@@ -1801,51 +1498,31 @@ fn gguf_metadata_f64(content: &candle_core::quantized::gguf_file::Content, key: 
     match content.metadata.get(key) {
         Some(candle_core::quantized::gguf_file::Value::F32(v)) => Ok((*v).into()),
         Some(candle_core::quantized::gguf_file::Value::F64(v)) => Ok(*v),
-        Some(other) => Err(OmniVoiceError::InvalidData(format!(
-            "GGUF metadata `{key}` is not a float: {other:?}"
-        ))),
-        None => Err(OmniVoiceError::InvalidData(format!(
-            "missing GGUF metadata key `{key}`"
-        ))),
+        Some(other) => Err(OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` is not a float: {other:?}"))),
+        None => Err(OmniVoiceError::InvalidData(format!("missing GGUF metadata key `{key}`"))),
     }
 }
 
 fn tensor_to_f32_tensor3(tensor: &Tensor) -> Result<F32Tensor3> {
     let dims = tensor.dims3()?;
-    let data = tensor
-        .to_device(&Device::Cpu)?
-        .to_dtype(DType::F32)?
-        .flatten_all()?
-        .to_vec1::<f32>()?;
+    let data = tensor.to_device(&Device::Cpu)?.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
     F32Tensor3::new(dims, data)
 }
 
 fn tensor_to_f32_tensor4(tensor: &Tensor) -> Result<F32Tensor4> {
     let dims = tensor.dims4()?;
-    let data = tensor
-        .to_device(&Device::Cpu)?
-        .to_dtype(DType::F32)?
-        .flatten_all()?
-        .to_vec1::<f32>()?;
+    let data = tensor.to_device(&Device::Cpu)?.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
     F32Tensor4::new(dims, data)
 }
 
 fn tensor_to_i64_tensor3(tensor: &Tensor) -> Result<I64Tensor3> {
     let dims = tensor.dims3()?;
-    let data = tensor
-        .to_device(&Device::Cpu)?
-        .to_dtype(DType::I64)?
-        .flatten_all()?
-        .to_vec1::<i64>()?;
+    let data = tensor.to_device(&Device::Cpu)?.to_dtype(DType::I64)?.flatten_all()?.to_vec1::<i64>()?;
     I64Tensor3::new(dims, data)
 }
 
 pub(crate) fn tensor_to_i64_tensor2(tensor: &Tensor) -> Result<I64Tensor2> {
     let dims = tensor.dims2()?;
-    let data = tensor
-        .to_device(&Device::Cpu)?
-        .to_dtype(DType::I64)?
-        .flatten_all()?
-        .to_vec1::<i64>()?;
+    let data = tensor.to_device(&Device::Cpu)?.to_dtype(DType::I64)?.flatten_all()?.to_vec1::<i64>()?;
     I64Tensor2::new(dims, data)
 }

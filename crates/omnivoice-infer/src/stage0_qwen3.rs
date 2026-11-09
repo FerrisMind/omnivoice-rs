@@ -3,9 +3,9 @@ use std::{
     sync::Arc,
 };
 
-use candle_core::{DType, Module, Tensor};
 #[cfg(feature = "cuda")]
 use candle_core::IndexOp;
+use candle_core::{DType, Module, Tensor};
 use candle_nn::{Activation, Embedding, VarBuilder};
 use candle_transformers::models::with_tracing::{linear_b, Linear, RmsNorm};
 
@@ -46,21 +46,14 @@ impl Stage0Qwen3RotaryEmbedding {
     fn new(dtype: DType, cfg: &Stage0Qwen3BackboneConfig, vb: &VarBuilder<'_>) -> Result<Self> {
         let dim = cfg.head_dim;
         let max_seq_len = cfg.max_position_embeddings;
-        let inv_freq: Vec<_> = (0..dim)
-            .step_by(2)
-            .map(|index| 1f32 / cfg.rope_theta.powf(index as f64 / dim as f64) as f32)
-            .collect();
+        let inv_freq: Vec<_> =
+            (0..dim).step_by(2).map(|index| 1f32 / cfg.rope_theta.powf(index as f64 / dim as f64) as f32).collect();
         let inv_freq_len = inv_freq.len();
-        let inv_freq =
-            Tensor::from_vec(inv_freq, (1, inv_freq_len), vb.device())?.to_dtype(DType::F32)?;
-        let t = Tensor::arange(0u32, max_seq_len as u32, vb.device())?
-            .to_dtype(DType::F32)?
-            .reshape((max_seq_len, 1))?;
+        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), vb.device())?.to_dtype(DType::F32)?;
+        let t =
+            Tensor::arange(0u32, max_seq_len as u32, vb.device())?.to_dtype(DType::F32)?.reshape((max_seq_len, 1))?;
         let freqs = t.matmul(&inv_freq)?;
-        Ok(Self {
-            sin: freqs.sin()?.to_dtype(dtype)?,
-            cos: freqs.cos()?.to_dtype(dtype)?,
-        })
+        Ok(Self { sin: freqs.sin()?.to_dtype(dtype)?, cos: freqs.cos()?.to_dtype(dtype)? })
     }
 
     fn apply(&self, q: &Tensor, k: &Tensor, offset: usize) -> Result<(Tensor, Tensor)> {
@@ -137,30 +130,10 @@ impl Stage0Qwen3Attention {
         let num_heads = cfg.num_attention_heads;
         let num_kv_heads = cfg.num_key_value_heads;
         Ok(Self {
-            q_proj: linear_b(
-                cfg.hidden_size,
-                num_heads * head_dim,
-                cfg.attention_bias,
-                vb.pp("q_proj"),
-            )?,
-            k_proj: linear_b(
-                cfg.hidden_size,
-                num_kv_heads * head_dim,
-                cfg.attention_bias,
-                vb.pp("k_proj"),
-            )?,
-            v_proj: linear_b(
-                cfg.hidden_size,
-                num_kv_heads * head_dim,
-                cfg.attention_bias,
-                vb.pp("v_proj"),
-            )?,
-            o_proj: linear_b(
-                num_heads * head_dim,
-                cfg.hidden_size,
-                cfg.attention_bias,
-                vb.pp("o_proj"),
-            )?,
+            q_proj: linear_b(cfg.hidden_size, num_heads * head_dim, cfg.attention_bias, vb.pp("q_proj"))?,
+            k_proj: linear_b(cfg.hidden_size, num_kv_heads * head_dim, cfg.attention_bias, vb.pp("k_proj"))?,
+            v_proj: linear_b(cfg.hidden_size, num_kv_heads * head_dim, cfg.attention_bias, vb.pp("v_proj"))?,
+            o_proj: linear_b(num_heads * head_dim, cfg.hidden_size, cfg.attention_bias, vb.pp("o_proj"))?,
             q_norm: RmsNorm::new(head_dim, cfg.rms_norm_eps, vb.pp("q_norm"))?,
             k_norm: RmsNorm::new(head_dim, cfg.rms_norm_eps, vb.pp("k_norm"))?,
             num_heads,
@@ -171,26 +144,15 @@ impl Stage0Qwen3Attention {
         })
     }
 
-    fn forward(
-        &self,
-        xs: &Tensor,
-        attention_mask: Option<&Tensor>,
-        flash_seqlens: Option<&[usize]>,
-    ) -> Result<Tensor> {
+    fn forward(&self, xs: &Tensor, attention_mask: Option<&Tensor>, flash_seqlens: Option<&[usize]>) -> Result<Tensor> {
         let (batch, seq_len, _) = xs.dims3()?;
         let q = self.q_proj.forward(xs)?;
         let k = self.k_proj.forward(xs)?;
         let v = self.v_proj.forward(xs)?;
 
-        let q = q
-            .reshape((batch, seq_len, self.num_heads, self.head_dim))?
-            .transpose(1, 2)?;
-        let k = k
-            .reshape((batch, seq_len, self.num_kv_heads, self.head_dim))?
-            .transpose(1, 2)?;
-        let v = v
-            .reshape((batch, seq_len, self.num_kv_heads, self.head_dim))?
-            .transpose(1, 2)?;
+        let q = q.reshape((batch, seq_len, self.num_heads, self.head_dim))?.transpose(1, 2)?;
+        let k = k.reshape((batch, seq_len, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?;
+        let v = v.reshape((batch, seq_len, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?;
 
         let q_flat = q.flatten(0, 2)?;
         let k_flat = k.flatten(0, 2)?;
@@ -209,13 +171,8 @@ impl Stage0Qwen3Attention {
 
         let (q, k) = self.rotary_emb.apply(&q, &k, 0)?;
         let scale_f32 = 1.0f32 / (self.head_dim as f32).sqrt();
-        let context =
-            self.attention_context(q, k, v, attention_mask, flash_seqlens, scale_f32)?;
-        Ok(context
-            .transpose(1, 2)?
-            .contiguous()?
-            .reshape((batch, seq_len, self.hidden_size))?
-            .apply(&self.o_proj)?)
+        let context = self.attention_context(q, k, v, attention_mask, flash_seqlens, scale_f32)?;
+        Ok(context.transpose(1, 2)?.contiguous()?.reshape((batch, seq_len, self.hidden_size))?.apply(&self.o_proj)?)
     }
 
     fn attention_context(
@@ -233,9 +190,7 @@ impl Stage0Qwen3Attention {
             // the unpadded prefix so CFG padding never enters the softmax.
             if matches!(q.dtype(), DType::F16 | DType::BF16) && q.device().is_cuda() {
                 if let Some(seqlens) = flash_seqlens {
-                    if let Some(ctx) =
-                        try_flash_attention_per_row(&q, &k, &v, seqlens, scale_f32)?
-                    {
+                    if let Some(ctx) = try_flash_attention_per_row(&q, &k, &v, seqlens, scale_f32)? {
                         return Ok(ctx);
                     }
                 }
@@ -273,11 +228,7 @@ impl Stage0Qwen3DecoderLayer {
         Ok(Self {
             self_attn: Stage0Qwen3Attention::load(cfg, rotary, vb.pp("self_attn"))?,
             mlp: Stage0Qwen3Mlp::load(cfg, vb.pp("mlp"))?,
-            input_layernorm: RmsNorm::new(
-                cfg.hidden_size,
-                cfg.rms_norm_eps,
-                vb.pp("input_layernorm"),
-            )?,
+            input_layernorm: RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?,
             post_attention_layernorm: RmsNorm::new(
                 cfg.hidden_size,
                 cfg.rms_norm_eps,
@@ -286,17 +237,10 @@ impl Stage0Qwen3DecoderLayer {
         })
     }
 
-    fn forward(
-        &self,
-        xs: &Tensor,
-        attention_mask: Option<&Tensor>,
-        flash_seqlens: Option<&[usize]>,
-    ) -> Result<Tensor> {
+    fn forward(&self, xs: &Tensor, attention_mask: Option<&Tensor>, flash_seqlens: Option<&[usize]>) -> Result<Tensor> {
         let residual = xs;
         let hidden = apply_hf_compatible_rms_norm(&self.input_layernorm, xs)?;
-        let hidden = self
-            .self_attn
-            .forward(&hidden, attention_mask, flash_seqlens)?;
+        let hidden = self.self_attn.forward(&hidden, attention_mask, flash_seqlens)?;
         let hidden = (hidden + residual)?;
         let residual = &hidden;
         let post_attention = apply_hf_compatible_rms_norm(&self.post_attention_layernorm, &hidden)?;
@@ -314,24 +258,15 @@ pub struct Stage0Qwen3Backbone {
 
 impl Stage0Qwen3Backbone {
     pub fn load(cfg: &Stage0Qwen3BackboneConfig, vb: VarBuilder<'_>) -> Result<Self> {
-        let embed_tokens =
-            candle_nn::embedding(cfg.vocab_size, cfg.hidden_size, vb.pp("model.embed_tokens"))?;
+        let embed_tokens = candle_nn::embedding(cfg.vocab_size, cfg.hidden_size, vb.pp("model.embed_tokens"))?;
         let rotary = Arc::new(Stage0Qwen3RotaryEmbedding::new(vb.dtype(), cfg, &vb)?);
         let layer_vb = vb.pp("model.layers");
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         for index in 0..cfg.num_hidden_layers {
-            layers.push(Stage0Qwen3DecoderLayer::load(
-                cfg,
-                rotary.clone(),
-                layer_vb.pp(index),
-            )?);
+            layers.push(Stage0Qwen3DecoderLayer::load(cfg, rotary.clone(), layer_vb.pp(index))?);
         }
         let norm = RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("model.norm"))?;
-        Ok(Self {
-            embed_tokens,
-            layers,
-            norm,
-        })
+        Ok(Self { embed_tokens, layers, norm })
     }
 
     pub fn text_embeddings(&self, input_ids: &Tensor) -> Result<Tensor> {
@@ -371,10 +306,7 @@ impl Stage0Qwen3Backbone {
             }
         }
         let final_hidden = apply_hf_compatible_rms_norm(&self.norm, &hidden)?;
-        Ok(Stage0BackboneOutput {
-            final_hidden,
-            captured_hidden_layers: captures,
-        })
+        Ok(Stage0BackboneOutput { final_hidden, captured_hidden_layers: captures })
     }
 }
 
@@ -429,27 +361,13 @@ fn try_flash_attention_per_row(
     let repeats = n_heads / n_kv_heads;
     let mut row_outs = Vec::with_capacity(batch);
     for (batch_index, &active) in seqlens.iter().enumerate() {
-        let q_row = q
-            .i((batch_index..batch_index + 1, .., 0..active, ..))?
-            .transpose(1, 2)?
-            .contiguous()?;
-        let k_row = k
-            .i((batch_index..batch_index + 1, .., 0..active, ..))?
-            .transpose(1, 2)?
-            .contiguous()?;
-        let v_row = v
-            .i((batch_index..batch_index + 1, .., 0..active, ..))?
-            .transpose(1, 2)?
-            .contiguous()?;
-        let ctx = candle_flash_attn::flash_attn(&q_row, &k_row, &v_row, scale, false)?
-            .transpose(1, 2)?;
+        let q_row = q.i((batch_index..batch_index + 1, .., 0..active, ..))?.transpose(1, 2)?.contiguous()?;
+        let k_row = k.i((batch_index..batch_index + 1, .., 0..active, ..))?.transpose(1, 2)?.contiguous()?;
+        let v_row = v.i((batch_index..batch_index + 1, .., 0..active, ..))?.transpose(1, 2)?.contiguous()?;
+        let ctx = candle_flash_attn::flash_attn(&q_row, &k_row, &v_row, scale, false)?.transpose(1, 2)?;
         let ctx = if active < seq_len {
             let v_pad = v.i((batch_index..batch_index + 1, .., active..seq_len, ..))?;
-            let v_pad = if repeats > 1 {
-                candle_transformers::utils::repeat_kv(v_pad, repeats)?
-            } else {
-                v_pad
-            };
+            let v_pad = if repeats > 1 { candle_transformers::utils::repeat_kv(v_pad, repeats)? } else { v_pad };
             Tensor::cat(&[&ctx, &v_pad], 2)?
         } else {
             ctx

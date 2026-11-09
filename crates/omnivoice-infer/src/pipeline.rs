@@ -9,20 +9,15 @@ use crate::{
     audio_tokenizer::AudioTokenizerRuntimePlan,
     contracts::{
         DecodedAudio, GeneratedAudioResult, GeneratedTokens, GenerationRequest, GenerationUsage,
-        PreparedInferenceBatch, PreparedPrompt, PreparedPromptSequence, ReferenceAudioInput,
-        VoiceClonePrompt, WaveformInput,
+        PreparedInferenceBatch, PreparedPrompt, PreparedPromptSequence, ReferenceAudioInput, VoiceClonePrompt,
+        WaveformInput,
     },
     error::{OmniVoiceError, Result},
-    frontend::{
-        add_punctuation, DeviceGenerationTask, DeviceVoiceClonePrompt, Frontend,
-        PreparedPromptDevice,
-    },
+    frontend::{add_punctuation, DeviceGenerationTask, DeviceVoiceClonePrompt, Frontend, PreparedPromptDevice},
     reference_prompt::{ReferencePromptBuilder, ReferencePromptOptions},
     runtime::RuntimeOptions,
     stage0_loop::pack_cfg_batch,
-    stage0_model::{
-        tensor_to_i64_tensor2, Stage0DebugRun, Stage0DeterministicConfig, Stage0RuntimePlan,
-    },
+    stage0_model::{tensor_to_i64_tensor2, Stage0DebugRun, Stage0DeterministicConfig, Stage0RuntimePlan},
     stage1_decoder::{PreparedStage1Decode, Stage1DebugRun, Stage1RuntimePlan},
 };
 
@@ -39,9 +34,7 @@ static STAGE_TIME_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new(
 static STAGE_TIMINGS: Mutex<Vec<(&'static str, f64)>> = Mutex::new(Vec::new());
 
 fn stage_time_enabled() -> bool {
-    *STAGE_TIME_ENABLED.get_or_init(|| {
-        std::env::var("OMNIVOICE_STAGE_TIME").is_ok_and(|value| value == "1")
-    })
+    *STAGE_TIME_ENABLED.get_or_init(|| std::env::var("OMNIVOICE_STAGE_TIME").is_ok_and(|value| value == "1"))
 }
 
 fn record_stage(name: &'static str, started: &std::time::Instant) {
@@ -58,10 +51,7 @@ fn record_stage(name: &'static str, started: &std::time::Instant) {
 /// Used by the CLI `--bench-json` reporting so each iteration row holds only
 /// its own stages.
 pub fn drain_stage_timings() -> Vec<(&'static str, f64)> {
-    STAGE_TIMINGS
-        .lock()
-        .map(|mut timings| std::mem::take(&mut *timings))
-        .unwrap_or_default()
+    STAGE_TIMINGS.lock().map(|mut timings| std::mem::take(&mut *timings)).unwrap_or_default()
 }
 
 #[derive(Debug)]
@@ -96,30 +86,17 @@ impl Phase3Pipeline {
             shared_device,
         )?;
 
-        Ok(Self {
-            runtime_artifacts,
-            frontend,
-            asr: Mutex::new(None),
-            audio_tokenizer,
-            stage0,
-            stage1,
-        })
+        Ok(Self { runtime_artifacts, frontend, asr: Mutex::new(None), audio_tokenizer, stage0, stage1 })
     }
 
     pub fn load_asr_model(&self, model_name: Option<&str>) -> Result<()> {
-        let requested = model_name.map(str::to_string).unwrap_or_else(|| {
-            crate::asr::default_asr_model_spec(Some(self.runtime_artifacts.model_root()))
-        });
+        let requested = model_name
+            .map(str::to_string)
+            .unwrap_or_else(|| crate::asr::default_asr_model_spec(Some(self.runtime_artifacts.model_root())));
         let mut guard = self.asr.lock().unwrap_or_else(|poison| poison.into_inner());
-        let needs_reload = guard
-            .as_ref()
-            .map(|(loaded, _)| loaded != &requested)
-            .unwrap_or(true);
+        let needs_reload = guard.as_ref().map(|(loaded, _)| loaded != &requested).unwrap_or(true);
         if needs_reload {
-            *guard = Some((
-                requested.clone(),
-                WhisperAsr::load(&requested, self.stage0.device().clone())?,
-            ));
+            *guard = Some((requested.clone(), WhisperAsr::load(&requested, self.stage0.device().clone())?));
         }
         Ok(())
     }
@@ -132,17 +109,11 @@ impl Phase3Pipeline {
 
     fn audio_tokenizer(&self) -> Result<&AudioTokenizerRuntimePlan> {
         self.audio_tokenizer.as_ref().ok_or_else(|| {
-            OmniVoiceError::Unsupported(
-                "reference-audio encoding is not available for this runtime".to_string(),
-            )
+            OmniVoiceError::Unsupported("reference-audio encoding is not available for this runtime".to_string())
         })
     }
 
-    pub fn transcribe(
-        &self,
-        ref_audio: &ReferenceAudioInput,
-        model_name: Option<&str>,
-    ) -> Result<String> {
+    pub fn transcribe(&self, ref_audio: &ReferenceAudioInput, model_name: Option<&str>) -> Result<String> {
         let processor = ReferenceAudioProcessor::new(
             self.runtime_artifacts.contracts().sample_rate,
             self.runtime_artifacts.contracts().hop_length,
@@ -151,23 +122,61 @@ impl Phase3Pipeline {
         let samples = crate::audio_input::mono_samples(&waveform.samples, waveform.channels)?;
         self.load_asr_model(model_name)?;
         let mut guard = self.asr.lock().unwrap_or_else(|poison| poison.into_inner());
-        let (_, asr) = guard.as_mut().ok_or_else(|| {
-            crate::error::OmniVoiceError::InvalidData("ASR model is not loaded".to_string())
-        })?;
+        let (_, asr) = guard
+            .as_mut()
+            .ok_or_else(|| crate::error::OmniVoiceError::InvalidData("ASR model is not loaded".to_string()))?;
         asr.transcribe(&samples, waveform.sample_rate)
     }
 
-    fn transcribe_waveform(
+    /// As [`Phase3Pipeline::transcribe`], in a given Whisper language code (`en`, `hi`, `ja`, …), or detected when it
+    /// is `None`: for references whose language the caller knows, where detection can pick the wrong one.
+    pub fn transcribe_with_language(
         &self,
-        waveform: &WaveformInput,
+        ref_audio: &ReferenceAudioInput,
         model_name: Option<&str>,
+        language: Option<&str>,
     ) -> Result<String> {
+        let (samples, sample_rate) = self.reference_samples(ref_audio)?;
+        self.load_asr_model(model_name)?;
+        let mut guard = self.asr.lock().unwrap_or_else(|poison| poison.into_inner());
+        let (_, asr) = guard
+            .as_mut()
+            .ok_or_else(|| crate::error::OmniVoiceError::InvalidData("ASR model is not loaded".to_string()))?;
+        asr.transcribe_with_language(&samples, sample_rate, language)
+    }
+
+    /// The language Whisper detects in a reference recording, as its code (`en`).
+    pub fn detected_language(
+        &self,
+        ref_audio: &ReferenceAudioInput,
+        model_name: Option<&str>,
+    ) -> Result<Option<String>> {
+        let (samples, sample_rate) = self.reference_samples(ref_audio)?;
+        self.load_asr_model(model_name)?;
+        let mut guard = self.asr.lock().unwrap_or_else(|poison| poison.into_inner());
+        let (_, asr) = guard
+            .as_mut()
+            .ok_or_else(|| crate::error::OmniVoiceError::InvalidData("ASR model is not loaded".to_string()))?;
+        asr.detected_language(&samples, sample_rate)
+    }
+
+    fn reference_samples(&self, ref_audio: &ReferenceAudioInput) -> Result<(Vec<f32>, u32)> {
+        let processor = ReferenceAudioProcessor::new(
+            self.runtime_artifacts.contracts().sample_rate,
+            self.runtime_artifacts.contracts().hop_length,
+        );
+        let waveform = processor.load_input(ref_audio)?;
+        let samples = crate::audio_input::mono_samples(&waveform.samples, waveform.channels)?;
+        Ok((samples, waveform.sample_rate))
+    }
+
+    fn transcribe_waveform(&self, waveform: &WaveformInput, model_name: Option<&str>) -> Result<String> {
         let samples = crate::audio_input::mono_samples(&waveform.samples, waveform.channels)?;
         self.load_asr_model(model_name)?;
         let mut guard = self.asr.lock().unwrap_or_else(|poison| poison.into_inner());
-        let (_, asr) = guard.as_mut().ok_or_else(|| {
-            crate::error::OmniVoiceError::InvalidData("ASR model is not loaded".to_string())
-        })?;
+        let (_, asr) = guard
+            .as_mut()
+            .ok_or_else(|| crate::error::OmniVoiceError::InvalidData("ASR model is not loaded".to_string()))?;
         asr.transcribe(&samples, waveform.sample_rate)
     }
 
@@ -187,10 +196,7 @@ impl Phase3Pipeline {
             Some(ref_text) => ref_text,
             None => {
                 let resolved_ref_text = self.transcribe_waveform(
-                    &WaveformInput::mono(
-                        prepared.waveform.clone(),
-                        self.runtime_artifacts.contracts().sample_rate,
-                    ),
+                    &WaveformInput::mono(prepared.waveform.clone(), self.runtime_artifacts.contracts().sample_rate),
                     asr_model,
                 )?;
                 if preprocess_prompt {
@@ -200,10 +206,9 @@ impl Phase3Pipeline {
                 }
             }
         };
-        let tokens = self.audio_tokenizer()?.encode_waveform(
-            &prepared.waveform,
-            self.runtime_artifacts.contracts().sample_rate,
-        )?;
+        let tokens = self
+            .audio_tokenizer()?
+            .encode_waveform(&prepared.waveform, self.runtime_artifacts.contracts().sample_rate)?;
 
         let prompt = ReferencePromptBuilder::new(ReferencePromptOptions {
             sample_rate: self.runtime_artifacts.contracts().sample_rate,
@@ -227,8 +232,7 @@ impl Phase3Pipeline {
             prepared.push(prompt);
         }
         let batched = pack_cfg_batch(&prepared, task.target_lens())?;
-        self.stage0
-            .prepare_batch(&batched, &cond_lens, task.target_lens())
+        self.stage0.prepare_batch(&batched, &cond_lens, task.target_lens())
     }
 
     pub fn generate_tokens(&self, request: &GenerationRequest) -> Result<Vec<GeneratedTokens>> {
@@ -241,17 +245,10 @@ impl Phase3Pipeline {
     }
 
     pub fn generate(&self, request: &GenerationRequest) -> Result<Vec<DecodedAudio>> {
-        Ok(self
-            .generate_with_usage(request)?
-            .into_iter()
-            .map(|result| result.audio)
-            .collect())
+        Ok(self.generate_with_usage(request)?.into_iter().map(|result| result.audio).collect())
     }
 
-    pub fn generate_with_usage(
-        &self,
-        request: &GenerationRequest,
-    ) -> Result<Vec<GeneratedAudioResult>> {
+    pub fn generate_with_usage(&self, request: &GenerationRequest) -> Result<Vec<GeneratedAudioResult>> {
         self.ensure_not_cancelled()?;
         let t_stage = std::time::Instant::now();
         let materialized = self.materialize_device_request(request)?;
@@ -261,10 +258,9 @@ impl Phase3Pipeline {
         // reserved for the rest of the process (hurts long-form / multi-scenario).
         self.unload_asr_model();
         let t_stage = std::time::Instant::now();
-        let task = self.frontend.build_task_with_device_prompts(
-            &materialized.request,
-            &materialized.device_voice_clone_prompts,
-        )?;
+        let task = self
+            .frontend
+            .build_task_with_device_prompts(&materialized.request, &materialized.device_voice_clone_prompts)?;
         record_stage("stage_frontend_build", &t_stage);
         let usage = self.estimate_generation_usage(&materialized.request, &task)?;
         let audio = self.generate_audio_from_device_task(&task)?;
@@ -277,11 +273,7 @@ impl Phase3Pipeline {
             )));
         }
 
-        Ok(audio
-            .into_iter()
-            .zip(usage)
-            .map(|(audio, usage)| GeneratedAudioResult { audio, usage })
-            .collect())
+        Ok(audio.into_iter().zip(usage).map(|(audio, usage)| GeneratedAudioResult { audio, usage }).collect())
     }
 
     pub fn set_cancellation_flag(&self, flag: Option<Arc<AtomicBool>>) {
@@ -294,9 +286,7 @@ impl Phase3Pipeline {
 
     fn ensure_not_cancelled(&self) -> Result<()> {
         if self.cancellation_requested() {
-            return Err(OmniVoiceError::InvalidRequest(
-                "inference cancelled".to_string(),
-            ));
+            return Err(OmniVoiceError::InvalidRequest("inference cancelled".to_string()));
         }
         Ok(())
     }
@@ -319,13 +309,9 @@ impl Phase3Pipeline {
         let case = bundle.case_by_id(case_id)?;
         let prepared = match case.load_prepared_prompts()? {
             PreparedPromptSequence::Single(prompt) => prompt,
-            PreparedPromptSequence::Chunked(chunked) => {
-                chunked.prompts.last().cloned().ok_or_else(|| {
-                    crate::error::OmniVoiceError::InvalidData(
-                        "chunked debug case does not contain any prompts".to_string(),
-                    )
-                })?
-            }
+            PreparedPromptSequence::Chunked(chunked) => chunked.prompts.last().cloned().ok_or_else(|| {
+                crate::error::OmniVoiceError::InvalidData("chunked debug case does not contain any prompts".to_string())
+            })?,
         };
         let reference_config = case.load_stage0_debug_config()?;
         let batch = self.prepare_stage0_prompt(&prepared)?;
@@ -424,8 +410,7 @@ impl Phase3Pipeline {
         let case = bundle.case_by_id(case_id)?;
         let metadata = case.load_prepared_metadata()?;
         let tokens = case.load_generated_tokens()?;
-        self.stage1
-            .decode_final(&tokens, metadata.ref_rms, metadata.postprocess_output)
+        self.stage1.decode_final(&tokens, metadata.ref_rms, metadata.postprocess_output)
     }
 
     pub fn debug_stage1_from_reference_case(
@@ -438,19 +423,11 @@ impl Phase3Pipeline {
         let metadata = case.load_prepared_metadata()?;
         let tokens = case.load_generated_tokens()?;
         let reference = case.load_stage1_debug_capture()?;
-        let actual =
-            self.stage1
-                .debug_decode(&tokens, metadata.ref_rms, metadata.postprocess_output)?;
-        let tensor_metrics =
-            crate::stage1_decoder::stage1_tensor_metrics(&actual.tensors, &reference.tensors)?;
+        let actual = self.stage1.debug_decode(&tokens, metadata.ref_rms, metadata.postprocess_output)?;
+        let tensor_metrics = crate::stage1_decoder::stage1_tensor_metrics(&actual.tensors, &reference.tensors)?;
         let raw_audio_metrics = actual.raw_audio.parity_metrics(&reference.raw_audio)?;
         let final_audio_metrics = actual.final_audio.parity_metrics(&reference.final_audio)?;
-        Ok(Stage1DebugRun {
-            tensor_metrics,
-            raw_audio_metrics,
-            final_audio_metrics,
-            debug_capture: actual,
-        })
+        Ok(Stage1DebugRun { tensor_metrics, raw_audio_metrics, final_audio_metrics, debug_capture: actual })
     }
 
     pub fn runtime_artifacts(&self) -> &RuntimeArtifacts {
@@ -469,11 +446,7 @@ impl Phase3Pipeline {
         &self.stage1
     }
 
-    fn validate_ref_audio_tokens(
-        &self,
-        tokens: &crate::contracts::I64Tensor2,
-        context: &str,
-    ) -> Result<()> {
+    fn validate_ref_audio_tokens(&self, tokens: &crate::contracts::I64Tensor2, context: &str) -> Result<()> {
         let (rows, cols) = tokens.dims();
         self.validate_ref_audio_token_shape(rows, cols, context)?;
         self.validate_ref_audio_token_values(tokens.data.iter().copied(), context)
@@ -482,9 +455,7 @@ impl Phase3Pipeline {
     fn validate_ref_rms(&self, ref_rms: Option<f32>, context: &str) -> Result<()> {
         if let Some(value) = ref_rms {
             if !value.is_finite() || value < 0.0 {
-                return Err(OmniVoiceError::InvalidData(format!(
-                    "{context}: ref_rms must be finite and non-negative"
-                )));
+                return Err(OmniVoiceError::InvalidData(format!("{context}: ref_rms must be finite and non-negative")));
             }
         }
         Ok(())
@@ -493,19 +464,11 @@ impl Phase3Pipeline {
     fn validate_device_ref_audio_tokens(&self, tokens: &Tensor, context: &str) -> Result<()> {
         let (rows, cols) = tokens.dims2()?;
         self.validate_ref_audio_token_shape(rows, cols, context)?;
-        let flat = tokens
-            .to_device(&Device::Cpu)?
-            .flatten_all()?
-            .to_vec1::<i64>()?;
+        let flat = tokens.to_device(&Device::Cpu)?.flatten_all()?.to_vec1::<i64>()?;
         self.validate_ref_audio_token_values(flat, context)
     }
 
-    fn validate_ref_audio_token_shape(
-        &self,
-        rows: usize,
-        cols: usize,
-        context: &str,
-    ) -> Result<()> {
+    fn validate_ref_audio_token_shape(&self, rows: usize, cols: usize, context: &str) -> Result<()> {
         let expected_codebooks = self.stage0.config().num_audio_codebook;
         if rows != expected_codebooks {
             return Err(OmniVoiceError::InvalidData(format!(
@@ -527,10 +490,8 @@ impl Phase3Pipeline {
         let contracts = self.runtime_artifacts.contracts();
         let token_min = contracts.token_id_min;
         let token_max = contracts.token_id_max;
-        if let Some((flat_index, token)) = tokens
-            .into_iter()
-            .enumerate()
-            .find(|(_, token)| *token < token_min || *token > token_max)
+        if let Some((flat_index, token)) =
+            tokens.into_iter().enumerate().find(|(_, token)| *token < token_min || *token > token_max)
         {
             return Err(OmniVoiceError::InvalidData(format!(
                 "{context}: ref_audio_tokens[{flat_index}]={token} is outside valid range {token_min}..={token_max}"
@@ -544,16 +505,12 @@ impl Phase3Pipeline {
         let mut request = request.clone();
         request.ref_audios = normalize_option_ref_audio(&request.ref_audios, batch_size)?;
         request.ref_texts = normalize_option_strings(&request.ref_texts, batch_size, "ref_texts")?;
-        request.voice_clone_prompts =
-            normalize_option_prompts(&request.voice_clone_prompts, batch_size)?;
+        request.voice_clone_prompts = normalize_option_prompts(&request.voice_clone_prompts, batch_size)?;
 
         for index in 0..batch_size {
             if let Some(prompt) = request.voice_clone_prompts[index].as_ref() {
                 self.validate_ref_rms(prompt.ref_rms, &format!("request item {index}"))?;
-                self.validate_ref_audio_tokens(
-                    &prompt.ref_audio_tokens,
-                    &format!("request item {index}"),
-                )?;
+                self.validate_ref_audio_tokens(&prompt.ref_audio_tokens, &format!("request item {index}"))?;
                 continue;
             }
             if let Some(ref_audio) = request.ref_audios[index].clone() {
@@ -572,26 +529,19 @@ impl Phase3Pipeline {
         Ok(request)
     }
 
-    fn materialize_device_request(
-        &self,
-        request: &GenerationRequest,
-    ) -> Result<MaterializedDeviceRequest> {
+    fn materialize_device_request(&self, request: &GenerationRequest) -> Result<MaterializedDeviceRequest> {
         let batch_size = request.texts.len();
         let mut request = request.clone();
         request.ref_audios = normalize_option_ref_audio(&request.ref_audios, batch_size)?;
         request.ref_texts = normalize_option_strings(&request.ref_texts, batch_size, "ref_texts")?;
-        request.voice_clone_prompts =
-            normalize_option_prompts(&request.voice_clone_prompts, batch_size)?;
+        request.voice_clone_prompts = normalize_option_prompts(&request.voice_clone_prompts, batch_size)?;
 
         let mut device_voice_clone_prompts = Vec::with_capacity(batch_size);
         for index in 0..batch_size {
             self.ensure_not_cancelled()?;
             if let Some(prompt) = request.voice_clone_prompts[index].clone() {
                 self.validate_ref_rms(prompt.ref_rms, &format!("request item {index}"))?;
-                self.validate_ref_audio_tokens(
-                    &prompt.ref_audio_tokens,
-                    &format!("request item {index}"),
-                )?;
+                self.validate_ref_audio_tokens(&prompt.ref_audio_tokens, &format!("request item {index}"))?;
                 device_voice_clone_prompts.push(Some(DeviceVoiceClonePrompt {
                     ref_audio_tokens: prompt.ref_audio_tokens.to_candle(self.stage0.device())?,
                     ref_text: prompt.ref_text,
@@ -613,10 +563,7 @@ impl Phase3Pipeline {
             device_voice_clone_prompts.push(None);
         }
         request.ref_audios = vec![None; batch_size];
-        Ok(MaterializedDeviceRequest {
-            request,
-            device_voice_clone_prompts,
-        })
+        Ok(MaterializedDeviceRequest { request, device_voice_clone_prompts })
     }
 
     fn create_device_voice_clone_prompt_from_audio(
@@ -636,10 +583,7 @@ impl Phase3Pipeline {
             Some(ref_text) => ref_text,
             None => {
                 let resolved_ref_text = self.transcribe_waveform(
-                    &WaveformInput::mono(
-                        prepared.waveform.clone(),
-                        self.runtime_artifacts.contracts().sample_rate,
-                    ),
+                    &WaveformInput::mono(prepared.waveform.clone(), self.runtime_artifacts.contracts().sample_rate),
                     asr_model,
                 )?;
                 self.ensure_not_cancelled()?;
@@ -650,23 +594,15 @@ impl Phase3Pipeline {
                 }
             }
         };
-        let ref_audio_tokens = self.audio_tokenizer()?.encode_waveform_device(
-            &prepared.waveform,
-            self.runtime_artifacts.contracts().sample_rate,
-        )?;
+        let ref_audio_tokens = self
+            .audio_tokenizer()?
+            .encode_waveform_device(&prepared.waveform, self.runtime_artifacts.contracts().sample_rate)?;
         self.ensure_not_cancelled()?;
 
-        Ok(DeviceVoiceClonePrompt {
-            ref_audio_tokens,
-            ref_text: resolved_ref_text,
-            ref_rms: prepared.ref_rms,
-        })
+        Ok(DeviceVoiceClonePrompt { ref_audio_tokens, ref_text: resolved_ref_text, ref_rms: prepared.ref_rms })
     }
 
-    fn generate_tokens_from_task(
-        &self,
-        task: &crate::contracts::GenerationTask,
-    ) -> Result<Vec<GeneratedTokens>> {
+    fn generate_tokens_from_task(&self, task: &crate::contracts::GenerationTask) -> Result<Vec<GeneratedTokens>> {
         let mut results = vec![None; task.batch_size()];
         let (short_idx, long_idx) = task.get_indices(self.frontend.frame_rate());
         if !short_idx.is_empty() {
@@ -695,10 +631,7 @@ impl Phase3Pipeline {
             .collect()
     }
 
-    fn generate_audio_from_device_task(
-        &self,
-        task: &DeviceGenerationTask,
-    ) -> Result<Vec<DecodedAudio>> {
+    fn generate_audio_from_device_task(&self, task: &DeviceGenerationTask) -> Result<Vec<DecodedAudio>> {
         let mut results = vec![None; task.batch_size()];
         let (short_idx, long_idx) = task.get_indices(self.frontend.frame_rate());
         if !short_idx.is_empty() {
@@ -731,12 +664,8 @@ impl Phase3Pipeline {
             record_stage("stage0_chunk_generate", &t_stage);
             for (slot, generated) in long_idx.into_iter().zip(long_results) {
                 self.ensure_not_cancelled()?;
-                let generated = GeneratedTokens::Chunked(
-                    generated
-                        .iter()
-                        .map(tensor_to_i64_tensor2)
-                        .collect::<Result<Vec<_>>>()?,
-                );
+                let generated =
+                    GeneratedTokens::Chunked(generated.iter().map(tensor_to_i64_tensor2).collect::<Result<Vec<_>>>()?);
                 let t_stage = std::time::Instant::now();
                 let audio = self.stage1.decode_final(
                     &generated,
@@ -772,9 +701,7 @@ impl Phase3Pipeline {
             prepared.push(prompt);
         }
         let batched = pack_cfg_batch(&prepared, task.target_lens())?;
-        let batch = self
-            .stage0
-            .prepare_batch(&batched, &cond_lens, task.target_lens())?;
+        let batch = self.stage0.prepare_batch(&batched, &cond_lens, task.target_lens())?;
         let generation = self.stage0.generate_deterministic(
             &batch,
             &Stage0DeterministicConfig {
@@ -798,9 +725,7 @@ impl Phase3Pipeline {
         let mut prepared = Vec::with_capacity(task.batch_size());
         for index in 0..task.batch_size() {
             self.ensure_not_cancelled()?;
-            let prompt = self
-                .frontend
-                .prepare_prompt_device(task, index, self.stage0.device())?;
+            let prompt = self.frontend.prepare_prompt_device(task, index, self.stage0.device())?;
             prepared.push(prompt);
         }
         let batch = pack_cfg_batch_device(
@@ -839,15 +764,10 @@ impl Phase3Pipeline {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        let has_ref = task
-            .ref_audio_tokens
-            .iter()
-            .map(Option::is_some)
-            .collect::<Vec<_>>();
+        let has_ref = task.ref_audio_tokens.iter().map(Option::is_some).collect::<Vec<_>>();
         if has_ref.iter().any(|value| *value) && has_ref.iter().any(|value| !*value) {
             return Err(crate::error::OmniVoiceError::InvalidRequest(
-                "chunked inference requires all items to either have or not have reference audio"
-                    .to_string(),
+                "chunked inference requires all items to either have or not have reference audio".to_string(),
             ));
         }
         let max_chunks = all_chunks.iter().map(Vec::len).max().unwrap_or(0);
@@ -865,27 +785,17 @@ impl Phase3Pipeline {
                     task,
                     chunk_index,
                     &indices,
-                    indices
-                        .iter()
-                        .map(|index| all_chunks[*index][chunk_index].clone())
-                        .collect(),
-                    indices
-                        .iter()
-                        .map(|index| task.ref_audio_tokens[*index].clone())
-                        .collect(),
-                    indices
-                        .iter()
-                        .map(|index| task.ref_texts[*index].clone())
-                        .collect(),
+                    indices.iter().map(|index| all_chunks[*index][chunk_index].clone()).collect(),
+                    indices.iter().map(|index| task.ref_audio_tokens[*index].clone()).collect(),
+                    indices.iter().map(|index| task.ref_texts[*index].clone()).collect(),
                 )?;
                 for (item_index, generated) in indices.iter().copied().zip(generated) {
                     chunk_results[item_index].push(generated);
                 }
             }
         } else {
-            let first_indices = (0..task.batch_size())
-                .filter(|item_index| !all_chunks[*item_index].is_empty())
-                .collect::<Vec<_>>();
+            let first_indices =
+                (0..task.batch_size()).filter(|item_index| !all_chunks[*item_index].is_empty()).collect::<Vec<_>>();
             let mut first_chunk_refs = vec![None; task.batch_size()];
             let mut first_chunk_texts = vec![None; task.batch_size()];
             if !first_indices.is_empty() {
@@ -893,10 +803,7 @@ impl Phase3Pipeline {
                     task,
                     0,
                     &first_indices,
-                    first_indices
-                        .iter()
-                        .map(|index| all_chunks[*index][0].clone())
-                        .collect(),
+                    first_indices.iter().map(|index| all_chunks[*index][0].clone()).collect(),
                     vec![None; first_indices.len()],
                     vec![None; first_indices.len()],
                 )?;
@@ -926,23 +833,18 @@ impl Phase3Pipeline {
                 let ref_texts = indices
                     .iter()
                     .map(|index| {
-                        Ok(Some(first_chunk_texts[*index].clone().ok_or_else(
-                            || {
-                                crate::error::OmniVoiceError::InvalidData(
-                                    "missing cached first chunk reference text".to_string(),
-                                )
-                            },
-                        )?))
+                        Ok(Some(first_chunk_texts[*index].clone().ok_or_else(|| {
+                            crate::error::OmniVoiceError::InvalidData(
+                                "missing cached first chunk reference text".to_string(),
+                            )
+                        })?))
                     })
                     .collect::<Result<Vec<_>>>()?;
                 let generated = self.run_chunk_batch(
                     task,
                     chunk_index,
                     &indices,
-                    indices
-                        .iter()
-                        .map(|index| all_chunks[*index][chunk_index].clone())
-                        .collect(),
+                    indices.iter().map(|index| all_chunks[*index][chunk_index].clone()).collect(),
                     ref_audio_tokens,
                     ref_texts,
                 )?;
@@ -967,10 +869,7 @@ impl Phase3Pipeline {
             if let Some(tokens) = maybe_tokens {
                 self.validate_ref_audio_tokens(
                     tokens,
-                    &format!(
-                        "chunked CPU item {} chunk {}",
-                        indices[local_index], chunk_index
-                    ),
+                    &format!("chunked CPU item {} chunk {}", indices[local_index], chunk_index),
                 )?;
             }
         }
@@ -981,9 +880,7 @@ impl Phase3Pipeline {
                 self.frontend.estimate_target_tokens(
                     &texts[local_index],
                     ref_texts[local_index].as_deref(),
-                    ref_audio_tokens[local_index]
-                        .as_ref()
-                        .map(|tokens| tokens.dims().1),
+                    ref_audio_tokens[local_index].as_ref().map(|tokens| tokens.dims().1),
                     task.speed[*item_index],
                 )
             })
@@ -991,14 +888,8 @@ impl Phase3Pipeline {
         let sub_task = crate::contracts::GenerationTask {
             texts,
             target_lens,
-            langs: indices
-                .iter()
-                .map(|index| task.langs[*index].clone())
-                .collect(),
-            instructs: indices
-                .iter()
-                .map(|index| task.instructs[*index].clone())
-                .collect(),
+            langs: indices.iter().map(|index| task.langs[*index].clone()).collect(),
+            instructs: indices.iter().map(|index| task.instructs[*index].clone()).collect(),
             ref_texts,
             ref_audio_tokens,
             ref_rms: indices.iter().map(|index| task.ref_rms[*index]).collect(),
@@ -1008,10 +899,7 @@ impl Phase3Pipeline {
         self.generate_iterative_task(&sub_task)
     }
 
-    fn generate_chunked_task_device(
-        &self,
-        task: &DeviceGenerationTask,
-    ) -> Result<Vec<Vec<Tensor>>> {
+    fn generate_chunked_task_device(&self, task: &DeviceGenerationTask) -> Result<Vec<Vec<Tensor>>> {
         self.ensure_not_cancelled()?;
         let all_chunks = (0..task.batch_size())
             .map(|index| {
@@ -1022,21 +910,14 @@ impl Phase3Pipeline {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        let has_ref = task
-            .ref_audio_tokens
-            .iter()
-            .map(Option::is_some)
-            .collect::<Vec<_>>();
+        let has_ref = task.ref_audio_tokens.iter().map(Option::is_some).collect::<Vec<_>>();
         if has_ref.iter().any(|value| *value) && has_ref.iter().any(|value| !*value) {
             return Err(crate::error::OmniVoiceError::InvalidRequest(
-                "chunked inference requires all items to either have or not have reference audio"
-                    .to_string(),
+                "chunked inference requires all items to either have or not have reference audio".to_string(),
             ));
         }
         let max_chunks = all_chunks.iter().map(Vec::len).max().unwrap_or(0);
-        let mut chunk_results = (0..task.batch_size())
-            .map(|_| Vec::new())
-            .collect::<Vec<Vec<Tensor>>>();
+        let mut chunk_results = (0..task.batch_size()).map(|_| Vec::new()).collect::<Vec<Vec<Tensor>>>();
 
         if has_ref.iter().all(|value| *value) {
             for chunk_index in 0..max_chunks {
@@ -1051,27 +932,17 @@ impl Phase3Pipeline {
                     task,
                     chunk_index,
                     &indices,
-                    indices
-                        .iter()
-                        .map(|index| all_chunks[*index][chunk_index].clone())
-                        .collect(),
-                    indices
-                        .iter()
-                        .map(|index| task.ref_audio_tokens[*index].clone())
-                        .collect(),
-                    indices
-                        .iter()
-                        .map(|index| task.ref_texts[*index].clone())
-                        .collect(),
+                    indices.iter().map(|index| all_chunks[*index][chunk_index].clone()).collect(),
+                    indices.iter().map(|index| task.ref_audio_tokens[*index].clone()).collect(),
+                    indices.iter().map(|index| task.ref_texts[*index].clone()).collect(),
                 )?;
                 for (item_index, generated) in indices.iter().copied().zip(generated) {
                     chunk_results[item_index].push(generated);
                 }
             }
         } else {
-            let first_indices = (0..task.batch_size())
-                .filter(|item_index| !all_chunks[*item_index].is_empty())
-                .collect::<Vec<_>>();
+            let first_indices =
+                (0..task.batch_size()).filter(|item_index| !all_chunks[*item_index].is_empty()).collect::<Vec<_>>();
             let mut first_chunk_refs = vec![None; task.batch_size()];
             let mut first_chunk_texts = vec![None; task.batch_size()];
             if !first_indices.is_empty() {
@@ -1079,10 +950,7 @@ impl Phase3Pipeline {
                     task,
                     0,
                     &first_indices,
-                    first_indices
-                        .iter()
-                        .map(|index| all_chunks[*index][0].clone())
-                        .collect(),
+                    first_indices.iter().map(|index| all_chunks[*index][0].clone()).collect(),
                     vec![None; first_indices.len()],
                     vec![None; first_indices.len()],
                 )?;
@@ -1113,23 +981,18 @@ impl Phase3Pipeline {
                 let ref_texts = indices
                     .iter()
                     .map(|index| {
-                        Ok(Some(first_chunk_texts[*index].clone().ok_or_else(
-                            || {
-                                crate::error::OmniVoiceError::InvalidData(
-                                    "missing cached first chunk reference text".to_string(),
-                                )
-                            },
-                        )?))
+                        Ok(Some(first_chunk_texts[*index].clone().ok_or_else(|| {
+                            crate::error::OmniVoiceError::InvalidData(
+                                "missing cached first chunk reference text".to_string(),
+                            )
+                        })?))
                     })
                     .collect::<Result<Vec<_>>>()?;
                 let generated = self.run_chunk_batch_device(
                     task,
                     chunk_index,
                     &indices,
-                    indices
-                        .iter()
-                        .map(|index| all_chunks[*index][chunk_index].clone())
-                        .collect(),
+                    indices.iter().map(|index| all_chunks[*index][chunk_index].clone()).collect(),
                     ref_audio_tokens,
                     ref_texts,
                 )?;
@@ -1155,10 +1018,7 @@ impl Phase3Pipeline {
             if let Some(tokens) = maybe_tokens {
                 self.validate_device_ref_audio_tokens(
                     tokens,
-                    &format!(
-                        "chunked device item {} chunk {}",
-                        indices[local_index], chunk_index
-                    ),
+                    &format!("chunked device item {} chunk {}", indices[local_index], chunk_index),
                 )?;
             }
         }
@@ -1181,14 +1041,8 @@ impl Phase3Pipeline {
         let sub_task = DeviceGenerationTask {
             texts,
             target_lens,
-            langs: indices
-                .iter()
-                .map(|index| task.langs[*index].clone())
-                .collect(),
-            instructs: indices
-                .iter()
-                .map(|index| task.instructs[*index].clone())
-                .collect(),
+            langs: indices.iter().map(|index| task.langs[*index].clone()).collect(),
+            instructs: indices.iter().map(|index| task.instructs[*index].clone()).collect(),
             ref_texts,
             ref_audio_tokens,
             ref_rms: indices.iter().map(|index| task.ref_rms[*index]).collect(),
@@ -1198,35 +1052,24 @@ impl Phase3Pipeline {
         self.generate_iterative_task_device(&sub_task)
     }
 
-    fn generate_stage0_from_prepared_prompts(
-        &self,
-        prepared: &PreparedPromptSequence,
-    ) -> Result<GeneratedTokens> {
+    fn generate_stage0_from_prepared_prompts(&self, prepared: &PreparedPromptSequence) -> Result<GeneratedTokens> {
         match prepared {
             PreparedPromptSequence::Single(prompt) => {
                 let batch = self.prepare_stage0_prompt(prompt)?;
-                let generation = self.stage0.generate_deterministic(
-                    &batch,
-                    &Stage0DeterministicConfig::default(),
-                    &[],
-                )?;
-                Ok(GeneratedTokens::Single(
-                    generation.tokens.into_iter().next().ok_or_else(|| {
-                        crate::error::OmniVoiceError::InvalidData(
-                            "stage0 generation did not return any token tensors".to_string(),
-                        )
-                    })?,
-                ))
+                let generation =
+                    self.stage0.generate_deterministic(&batch, &Stage0DeterministicConfig::default(), &[])?;
+                Ok(GeneratedTokens::Single(generation.tokens.into_iter().next().ok_or_else(|| {
+                    crate::error::OmniVoiceError::InvalidData(
+                        "stage0 generation did not return any token tensors".to_string(),
+                    )
+                })?))
             }
             PreparedPromptSequence::Chunked(chunked) => {
                 let mut chunks = Vec::with_capacity(chunked.prompts.len());
                 for prompt in &chunked.prompts {
                     let batch = self.prepare_stage0_prompt(prompt)?;
-                    let generation = self.stage0.generate_deterministic(
-                        &batch,
-                        &Stage0DeterministicConfig::default(),
-                        &[],
-                    )?;
+                    let generation =
+                        self.stage0.generate_deterministic(&batch, &Stage0DeterministicConfig::default(), &[])?;
                     chunks.push(generation.tokens.into_iter().next().ok_or_else(|| {
                         crate::error::OmniVoiceError::InvalidData(
                             "chunked stage0 generation did not return a token tensor".to_string(),
@@ -1242,8 +1085,7 @@ impl Phase3Pipeline {
         let cond_lens = vec![prompt.total_length];
         let target_lens = vec![prompt.target_length];
         let batched = pack_cfg_batch(std::slice::from_ref(prompt), &target_lens)?;
-        self.stage0
-            .prepare_batch(&batched, &cond_lens, &target_lens)
+        self.stage0.prepare_batch(&batched, &cond_lens, &target_lens)
     }
 
     fn estimate_generation_usage(
@@ -1278,9 +1120,7 @@ fn pack_cfg_batch_device(
     runtime_dtype: DType,
 ) -> Result<PreparedInferenceBatch> {
     if prepared.is_empty() {
-        return Err(crate::error::OmniVoiceError::InvalidRequest(
-            "prepared prompts cannot be empty".to_string(),
-        ));
+        return Err(crate::error::OmniVoiceError::InvalidRequest("prepared prompts cannot be empty".to_string()));
     }
     if prepared.len() != target_lens.len() {
         return Err(crate::error::OmniVoiceError::InvalidRequest(format!(
@@ -1295,11 +1135,7 @@ fn pack_cfg_batch_device(
         ));
     }
 
-    let max_c_len = prepared
-        .iter()
-        .map(|prompt| prompt.total_length)
-        .max()
-        .unwrap_or_default();
+    let max_c_len = prepared.iter().map(|prompt| prompt.total_length).max().unwrap_or_default();
     let max_target_len = target_lens.iter().copied().max().unwrap_or(0);
     let audio_mask_id = prepared[0].audio_mask_id;
 
@@ -1311,9 +1147,7 @@ fn pack_cfg_batch_device(
     let mut uncond_attention_masks = Vec::with_capacity(prepared.len());
     let mut cond_lens = Vec::with_capacity(prepared.len());
 
-    for (index, (prompt, target_len)) in
-        prepared.iter().zip(target_lens.iter().copied()).enumerate()
-    {
+    for (index, (prompt, target_len)) in prepared.iter().zip(target_lens.iter().copied()).enumerate() {
         let (batch, codebooks, current_len) = prompt.input_ids.dims3()?;
         let (mask_batch, mask_len) = prompt.audio_mask.dims2()?;
         if batch != 1
@@ -1341,61 +1175,26 @@ fn pack_cfg_batch_device(
             device,
         )?);
         cond_audio_masks.push(pad_mask_tensor(&prompt.audio_mask, max_c_len, device)?);
-        cond_attention_masks.push(build_attention_mask_tensor(
-            prompt.total_length,
-            max_c_len,
-            None,
-            device,
-        )?);
+        cond_attention_masks.push(build_attention_mask_tensor(prompt.total_length, max_c_len, None, device)?);
 
-        let uncond_source = prompt.input_ids.narrow(
-            candle_core::D::Minus1,
-            prompt.total_length - target_len,
-            target_len,
-        )?;
-        let uncond_mask_source = prompt.audio_mask.narrow(
-            candle_core::D::Minus1,
-            prompt.total_length - target_len,
-            target_len,
-        )?;
-        uncond_inputs.push(pad_input_ids_tensor(
-            &uncond_source,
-            max_c_len,
-            audio_mask_id,
-            num_audio_codebook,
-            device,
-        )?);
+        let uncond_source =
+            prompt.input_ids.narrow(candle_core::D::Minus1, prompt.total_length - target_len, target_len)?;
+        let uncond_mask_source =
+            prompt.audio_mask.narrow(candle_core::D::Minus1, prompt.total_length - target_len, target_len)?;
+        uncond_inputs.push(pad_input_ids_tensor(&uncond_source, max_c_len, audio_mask_id, num_audio_codebook, device)?);
         uncond_audio_masks.push(pad_mask_tensor(&uncond_mask_source, max_c_len, device)?);
-        uncond_attention_masks.push(build_attention_mask_tensor(
-            target_len,
-            max_c_len,
-            Some(target_len),
-            device,
-        )?);
+        uncond_attention_masks.push(build_attention_mask_tensor(target_len, max_c_len, Some(target_len), device)?);
     }
 
-    let input_tensor_refs = cond_inputs
-        .iter()
-        .chain(uncond_inputs.iter())
-        .collect::<Vec<_>>();
-    let audio_mask_refs = cond_audio_masks
-        .iter()
-        .chain(uncond_audio_masks.iter())
-        .collect::<Vec<_>>();
-    let attention_mask_refs = cond_attention_masks
-        .iter()
-        .chain(uncond_attention_masks.iter())
-        .collect::<Vec<_>>();
+    let input_tensor_refs = cond_inputs.iter().chain(uncond_inputs.iter()).collect::<Vec<_>>();
+    let audio_mask_refs = cond_audio_masks.iter().chain(uncond_audio_masks.iter()).collect::<Vec<_>>();
+    let attention_mask_refs = cond_attention_masks.iter().chain(uncond_attention_masks.iter()).collect::<Vec<_>>();
 
     Ok(PreparedInferenceBatch {
         input_ids: Tensor::cat(&input_tensor_refs, 0)?,
         audio_mask: Tensor::cat(&audio_mask_refs, 0)?,
         attention_mask: Tensor::cat(&attention_mask_refs, 0)?,
-        tokens_init: Tensor::full(
-            audio_mask_id,
-            (prepared.len(), num_audio_codebook, max_target_len),
-            device,
-        )?,
+        tokens_init: Tensor::full(audio_mask_id, (prepared.len(), num_audio_codebook, max_target_len), device)?,
         target_lens: target_lens.to_vec(),
         cond_lens,
         runtime_dtype,
@@ -1413,11 +1212,7 @@ fn pad_input_ids_tensor(
     if current_len >= max_c_len {
         return Ok(input_ids.clone());
     }
-    let padding = Tensor::full(
-        audio_mask_id,
-        (1, num_audio_codebook, max_c_len - current_len),
-        device,
-    )?;
+    let padding = Tensor::full(audio_mask_id, (1, num_audio_codebook, max_c_len - current_len), device)?;
     Tensor::cat(&[input_ids, &padding], 2).map_err(Into::into)
 }
 
@@ -1448,18 +1243,10 @@ fn build_attention_mask_tensor(
             values[index * max_c_len + index] = 1;
         }
     }
-    Ok(Tensor::from_vec(
-        values,
-        (1, 1, max_c_len, max_c_len),
-        device,
-    )?)
+    Ok(Tensor::from_vec(values, (1, 1, max_c_len, max_c_len), device)?)
 }
 
-fn normalize_option_strings(
-    values: &[Option<String>],
-    batch_size: usize,
-    name: &str,
-) -> Result<Vec<Option<String>>> {
+fn normalize_option_strings(values: &[Option<String>], batch_size: usize, name: &str) -> Result<Vec<Option<String>>> {
     if values.len() == batch_size {
         Ok(values.to_vec())
     } else if values.len() == 1 {
@@ -1518,12 +1305,7 @@ mod tests {
     };
 
     fn repo_root() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_path_buf()
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap().to_path_buf()
     }
 
     fn model_root() -> std::path::PathBuf {
@@ -1531,9 +1313,7 @@ mod tests {
     }
 
     fn deterministic_reference_root() -> std::path::PathBuf {
-        repo_root()
-            .join("artifacts")
-            .join("python_reference_stage7_cuda_f32_dense")
+        repo_root().join("artifacts").join("python_reference_stage7_cuda_f32_dense")
     }
 
     fn model_fixture_available() -> bool {
@@ -1545,16 +1325,11 @@ mod tests {
                 && root.join("tokenizer_config.json").is_file()
                 && root.join("audio_tokenizer/config.json").is_file()
                 && root.join("audio_tokenizer/model.safetensors").is_file()
-                && root
-                    .join("audio_tokenizer/preprocessor_config.json")
-                    .is_file())
+                && root.join("audio_tokenizer/preprocessor_config.json").is_file())
     }
 
     fn deterministic_fixture_available(case_id: &str) -> bool {
-        deterministic_reference_root()
-            .join(case_id)
-            .join("case.json")
-            .is_file()
+        deterministic_reference_root().join(case_id).join("case.json").is_file()
     }
 
     fn cpu_frontend_and_stage0() -> (Frontend, Stage0RuntimePlan) {
@@ -1562,17 +1337,13 @@ mod tests {
     }
 
     fn cpu_frontend_and_stage0_with_seed(seed: Option<u64>) -> (Frontend, Stage0RuntimePlan) {
-        let mut options = RuntimeOptions::new(model_root())
-            .with_device(DeviceSpec::Cpu)
-            .with_dtype(DTypeSpec::F32);
+        let mut options = RuntimeOptions::new(model_root()).with_device(DeviceSpec::Cpu).with_dtype(DTypeSpec::F32);
         if let Some(seed) = seed {
             options = options.with_seed(seed);
         }
         let runtime = RuntimeArtifacts::from_model_root(model_root()).unwrap();
         let frontend = Frontend::from_runtime_artifacts(&runtime).unwrap();
-        let stage0 =
-            Stage0RuntimePlan::from_runtime_artifacts_with_device(options, &runtime, Device::Cpu)
-                .unwrap();
+        let stage0 = Stage0RuntimePlan::from_runtime_artifacts_with_device(options, &runtime, Device::Cpu).unwrap();
         (frontend, stage0)
     }
 
@@ -1590,9 +1361,7 @@ mod tests {
             prepared.push(prompt);
         }
         let batched = pack_cfg_batch(&prepared, task.target_lens()).unwrap();
-        let prepared = stage0
-            .prepare_batch(&batched, &cond_lens, task.target_lens())
-            .unwrap();
+        let prepared = stage0.prepare_batch(&batched, &cond_lens, task.target_lens()).unwrap();
         (stage0, prepared)
     }
 
@@ -1612,11 +1381,7 @@ mod tests {
 
     fn auto_request_for_seed_test() -> GenerationRequest {
         let bundle = ReferenceArtifactBundle::from_root(deterministic_reference_root()).unwrap();
-        bundle
-            .case_by_id("det_auto_en_short")
-            .unwrap()
-            .build_generation_request()
-            .unwrap()
+        bundle.case_by_id("det_auto_en_short").unwrap().build_generation_request().unwrap()
     }
 
     #[test]
@@ -1627,12 +1392,8 @@ mod tests {
         let request = auto_request_for_seed_test();
         let config = stochastic_stage0_config();
         let (stage0, prepared) = prepare_cpu_stage0_batch(&request, Some(42));
-        let first = stage0
-            .generate_deterministic(&prepared, &config, &[])
-            .unwrap();
-        let second = stage0
-            .generate_deterministic(&prepared, &config, &[])
-            .unwrap();
+        let first = stage0.generate_deterministic(&prepared, &config, &[]).unwrap();
+        let second = stage0.generate_deterministic(&prepared, &config, &[]).unwrap();
 
         assert_eq!(first.tokens, second.tokens);
     }
@@ -1646,12 +1407,8 @@ mod tests {
         let config = stochastic_stage0_config();
         let (stage0, prepared) = prepare_cpu_stage0_batch(&request, None);
         stage0.set_seed(42).unwrap();
-        let first = stage0
-            .generate_deterministic(&prepared, &config, &[])
-            .unwrap();
-        let second = stage0
-            .generate_deterministic(&prepared, &config, &[])
-            .unwrap();
+        let first = stage0.generate_deterministic(&prepared, &config, &[]).unwrap();
+        let second = stage0.generate_deterministic(&prepared, &config, &[]).unwrap();
 
         assert_eq!(first.tokens, second.tokens);
     }
@@ -1661,13 +1418,9 @@ mod tests {
         if !model_fixture_available() {
             return;
         }
-        let options = RuntimeOptions::new(model_root())
-            .with_device(DeviceSpec::Cpu)
-            .with_dtype(DTypeSpec::F32);
+        let options = RuntimeOptions::new(model_root()).with_device(DeviceSpec::Cpu).with_dtype(DTypeSpec::F32);
         let runtime = RuntimeArtifacts::from_model_root(model_root()).unwrap();
-        let stage0 =
-            Stage0RuntimePlan::from_runtime_artifacts_with_device(options, &runtime, Device::Cpu)
-                .unwrap();
+        let stage0 = Stage0RuntimePlan::from_runtime_artifacts_with_device(options, &runtime, Device::Cpu).unwrap();
         stage0.set_seed(1).unwrap();
         stage0.set_seed(2).unwrap();
     }
@@ -1683,9 +1436,7 @@ mod tests {
             prepared.push(prompt);
         }
         let canonical_inputs = pack_cfg_batch(&prepared, task.target_lens()).unwrap();
-        let canonical = stage0
-            .prepare_batch(&canonical_inputs, &cond_lens, task.target_lens())
-            .unwrap();
+        let canonical = stage0.prepare_batch(&canonical_inputs, &cond_lens, task.target_lens()).unwrap();
 
         let device_prompts = request
             .voice_clone_prompts
@@ -1704,16 +1455,10 @@ mod tests {
             })
             .collect::<Result<Vec<_>>>()
             .unwrap();
-        let device_task = frontend
-            .build_task_with_device_prompts(request, &device_prompts)
-            .unwrap();
+        let device_task = frontend.build_task_with_device_prompts(request, &device_prompts).unwrap();
         let mut prepared_device = Vec::with_capacity(device_task.batch_size());
         for index in 0..device_task.batch_size() {
-            prepared_device.push(
-                frontend
-                    .prepare_prompt_device(&device_task, index, stage0.device())
-                    .unwrap(),
-            );
+            prepared_device.push(frontend.prepare_prompt_device(&device_task, index, stage0.device()).unwrap());
         }
         let device_prepared = pack_cfg_batch_device(
             &prepared_device,
@@ -1728,53 +1473,16 @@ mod tests {
         assert_eq!(device_prepared.cond_lens, canonical.cond_lens);
         assert_eq!(device_prepared.runtime_dtype, canonical.runtime_dtype);
         assert_eq!(device_prepared.input_ids.dims(), canonical.input_ids.dims());
+        assert_eq!(device_prepared.audio_mask.dims(), canonical.audio_mask.dims());
+        assert_eq!(device_prepared.attention_mask.dims(), canonical.attention_mask.dims());
+        assert_eq!(device_prepared.tokens_init.dims(), canonical.tokens_init.dims());
         assert_eq!(
-            device_prepared.audio_mask.dims(),
-            canonical.audio_mask.dims()
+            device_prepared.input_ids.to_device(&Device::Cpu).unwrap().flatten_all().unwrap().to_vec1::<i64>().unwrap(),
+            canonical.input_ids.to_device(&Device::Cpu).unwrap().flatten_all().unwrap().to_vec1::<i64>().unwrap(),
         );
         assert_eq!(
-            device_prepared.attention_mask.dims(),
-            canonical.attention_mask.dims()
-        );
-        assert_eq!(
-            device_prepared.tokens_init.dims(),
-            canonical.tokens_init.dims()
-        );
-        assert_eq!(
-            device_prepared
-                .input_ids
-                .to_device(&Device::Cpu)
-                .unwrap()
-                .flatten_all()
-                .unwrap()
-                .to_vec1::<i64>()
-                .unwrap(),
-            canonical
-                .input_ids
-                .to_device(&Device::Cpu)
-                .unwrap()
-                .flatten_all()
-                .unwrap()
-                .to_vec1::<i64>()
-                .unwrap(),
-        );
-        assert_eq!(
-            device_prepared
-                .audio_mask
-                .to_device(&Device::Cpu)
-                .unwrap()
-                .flatten_all()
-                .unwrap()
-                .to_vec1::<u8>()
-                .unwrap(),
-            canonical
-                .audio_mask
-                .to_device(&Device::Cpu)
-                .unwrap()
-                .flatten_all()
-                .unwrap()
-                .to_vec1::<u8>()
-                .unwrap(),
+            device_prepared.audio_mask.to_device(&Device::Cpu).unwrap().flatten_all().unwrap().to_vec1::<u8>().unwrap(),
+            canonical.audio_mask.to_device(&Device::Cpu).unwrap().flatten_all().unwrap().to_vec1::<u8>().unwrap(),
         );
         assert_eq!(
             device_prepared
@@ -1785,14 +1493,7 @@ mod tests {
                 .unwrap()
                 .to_vec1::<u8>()
                 .unwrap(),
-            canonical
-                .attention_mask
-                .to_device(&Device::Cpu)
-                .unwrap()
-                .flatten_all()
-                .unwrap()
-                .to_vec1::<u8>()
-                .unwrap(),
+            canonical.attention_mask.to_device(&Device::Cpu).unwrap().flatten_all().unwrap().to_vec1::<u8>().unwrap(),
         );
         assert_eq!(
             device_prepared
@@ -1803,14 +1504,7 @@ mod tests {
                 .unwrap()
                 .to_vec1::<i64>()
                 .unwrap(),
-            canonical
-                .tokens_init
-                .to_device(&Device::Cpu)
-                .unwrap()
-                .flatten_all()
-                .unwrap()
-                .to_vec1::<i64>()
-                .unwrap(),
+            canonical.tokens_init.to_device(&Device::Cpu).unwrap().flatten_all().unwrap().to_vec1::<i64>().unwrap(),
         );
     }
 
@@ -1820,11 +1514,7 @@ mod tests {
             return;
         }
         let bundle = ReferenceArtifactBundle::from_root(deterministic_reference_root()).unwrap();
-        let request = bundle
-            .case_by_id("det_design_en_british")
-            .unwrap()
-            .build_generation_request()
-            .unwrap();
+        let request = bundle.case_by_id("det_design_en_british").unwrap().build_generation_request().unwrap();
         assert_batch_matches_canonical(&request);
     }
 
@@ -1841,14 +1531,8 @@ mod tests {
 
         let mut request = GenerationRequest::new_text_only(auto_request.texts[0].clone());
         request.texts = vec![auto_request.texts[0].clone(), long_request.texts[0].clone()];
-        request.languages = vec![
-            auto_request.languages[0].clone(),
-            long_request.languages[0].clone(),
-        ];
-        request.instructs = vec![
-            auto_request.instructs[0].clone(),
-            long_request.instructs[0].clone(),
-        ];
+        request.languages = vec![auto_request.languages[0].clone(), long_request.languages[0].clone()];
+        request.instructs = vec![auto_request.instructs[0].clone(), long_request.instructs[0].clone()];
         request.ref_texts = vec![None, None];
         request.ref_audios = vec![None, None];
         request.voice_clone_prompts = vec![None, None];
@@ -1874,20 +1558,18 @@ mod tests {
             }
         }
 
-        let request = GenerationRequest::new_text_only("FerrisMind clone prompt check")
-            .with_voice_clone_prompt(VoiceClonePrompt {
+        let request = GenerationRequest::new_text_only("FerrisMind clone prompt check").with_voice_clone_prompt(
+            VoiceClonePrompt {
                 ref_audio_tokens: I64Tensor2::new((num_codebooks, ref_len), prompt_tokens).unwrap(),
                 ref_text: "reference text".to_string(),
                 ref_rms: Some(0.1),
-            });
+            },
+        );
 
         assert_batch_matches_canonical(&request);
         let task = frontend.build_task(&request).unwrap();
         let prompt = frontend.prepare_prompt(&task, 0).unwrap();
-        assert_eq!(
-            prompt.target_start_idx,
-            prompt.prompt.input_ids_dims().2 - prompt.target_length
-        );
+        assert_eq!(prompt.target_start_idx, prompt.prompt.input_ids_dims().2 - prompt.target_length);
     }
 
     #[cfg(feature = "cuda")]
@@ -1900,22 +1582,14 @@ mod tests {
         long_request.durations = vec![Some(31.0)];
 
         let pipeline = Phase3Pipeline::from_options(
-            RuntimeOptions::new(model_root())
-                .with_device(DeviceSpec::Cuda(0))
-                .with_dtype(DTypeSpec::F32),
+            RuntimeOptions::new(model_root()).with_device(DeviceSpec::Cuda(0)).with_dtype(DTypeSpec::F32),
         )
         .unwrap();
 
         let mut request = GenerationRequest::new_text_only(auto_request.texts[0].clone());
         request.texts = vec![auto_request.texts[0].clone(), long_request.texts[0].clone()];
-        request.languages = vec![
-            auto_request.languages[0].clone(),
-            long_request.languages[0].clone(),
-        ];
-        request.instructs = vec![
-            auto_request.instructs[0].clone(),
-            long_request.instructs[0].clone(),
-        ];
+        request.languages = vec![auto_request.languages[0].clone(), long_request.languages[0].clone()];
+        request.instructs = vec![auto_request.instructs[0].clone(), long_request.instructs[0].clone()];
         request.ref_texts = vec![None, None];
         request.ref_audios = vec![None, None];
         request.voice_clone_prompts = vec![None, None];

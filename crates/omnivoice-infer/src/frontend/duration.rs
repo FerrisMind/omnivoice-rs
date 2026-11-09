@@ -163,9 +163,9 @@ fn char_weight(ch: char) -> f32 {
     }
 
     match get_general_category(ch) {
-        GeneralCategory::NonspacingMark
-        | GeneralCategory::SpacingMark
-        | GeneralCategory::EnclosingMark => return MARK_WEIGHT,
+        GeneralCategory::NonspacingMark | GeneralCategory::SpacingMark | GeneralCategory::EnclosingMark => {
+            return MARK_WEIGHT
+        }
         GeneralCategory::ConnectorPunctuation
         | GeneralCategory::DashPunctuation
         | GeneralCategory::OpenPunctuation
@@ -177,12 +177,12 @@ fn char_weight(ch: char) -> f32 {
         | GeneralCategory::CurrencySymbol
         | GeneralCategory::ModifierSymbol
         | GeneralCategory::OtherSymbol => return PUNCTUATION_WEIGHT,
-        GeneralCategory::SpaceSeparator
-        | GeneralCategory::LineSeparator
-        | GeneralCategory::ParagraphSeparator => return SPACE_WEIGHT,
-        GeneralCategory::DecimalNumber
-        | GeneralCategory::LetterNumber
-        | GeneralCategory::OtherNumber => return DIGIT_WEIGHT,
+        GeneralCategory::SpaceSeparator | GeneralCategory::LineSeparator | GeneralCategory::ParagraphSeparator => {
+            return SPACE_WEIGHT
+        }
+        GeneralCategory::DecimalNumber | GeneralCategory::LetterNumber | GeneralCategory::OtherNumber => {
+            return DIGIT_WEIGHT
+        }
         _ => {}
     }
 

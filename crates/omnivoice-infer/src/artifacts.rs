@@ -13,9 +13,9 @@ use serde::Deserialize;
 
 use crate::{
     contracts::{
-        BoolTensor2, BoolTensor4, ChunkedPreparedPrompts, DecodedAudio, F32Tensor3, F32Tensor4,
-        GeneratedTokens, GenerationConfig, GenerationMode, GenerationRequest, I64Tensor2,
-        I64Tensor3, PreparedPrompt, PreparedPromptSequence, PromptTensorBundle, VoiceClonePrompt,
+        BoolTensor2, BoolTensor4, ChunkedPreparedPrompts, DecodedAudio, F32Tensor3, F32Tensor4, GeneratedTokens,
+        GenerationConfig, GenerationMode, GenerationRequest, I64Tensor2, I64Tensor3, PreparedPrompt,
+        PreparedPromptSequence, PromptTensorBundle, VoiceClonePrompt,
     },
     error::{OmniVoiceError, Result},
 };
@@ -147,10 +147,8 @@ impl RuntimeArtifacts {
         if manifest_path.exists() {
             let manifest = RuntimeArtifactManifest::from_model_root(&model_root)?;
             let generator = GeneratorArtifacts::resolve(&model_root, &manifest.generator)?;
-            let text_tokenizer =
-                TextTokenizerArtifacts::resolve(&model_root, &manifest.text_tokenizer)?;
-            let audio_tokenizer =
-                AudioTokenizerArtifacts::resolve(&model_root, &manifest.audio_tokenizer)?;
+            let text_tokenizer = TextTokenizerArtifacts::resolve(&model_root, &manifest.text_tokenizer)?;
+            let audio_tokenizer = AudioTokenizerArtifacts::resolve(&model_root, &manifest.audio_tokenizer)?;
             validate_runtime_contracts(&generator, &audio_tokenizer, &manifest.contracts)?;
 
             return Ok(Self {
@@ -168,10 +166,8 @@ impl RuntimeArtifacts {
         if let Ok(manifest_path) = crate::model_source::ensure_local_runtime_manifest(&model_root) {
             let manifest = RuntimeArtifactManifest::from_model_root(&model_root)?;
             let generator = GeneratorArtifacts::resolve(&model_root, &manifest.generator)?;
-            let text_tokenizer =
-                TextTokenizerArtifacts::resolve(&model_root, &manifest.text_tokenizer)?;
-            let audio_tokenizer =
-                AudioTokenizerArtifacts::resolve(&model_root, &manifest.audio_tokenizer)?;
+            let text_tokenizer = TextTokenizerArtifacts::resolve(&model_root, &manifest.text_tokenizer)?;
+            let audio_tokenizer = AudioTokenizerArtifacts::resolve(&model_root, &manifest.audio_tokenizer)?;
             validate_runtime_contracts(&generator, &audio_tokenizer, &manifest.contracts)?;
 
             return Ok(Self {
@@ -237,17 +233,14 @@ impl RuntimeArtifacts {
 
     pub fn text_tokenizer(&self) -> Result<&TextTokenizerArtifacts> {
         self.text_tokenizer.as_ref().ok_or_else(|| {
-            OmniVoiceError::Unsupported(
-                "text tokenizer json artifacts are unavailable for a GGUF runtime".to_string(),
-            )
+            OmniVoiceError::Unsupported("text tokenizer json artifacts are unavailable for a GGUF runtime".to_string())
         })
     }
 
     pub fn audio_tokenizer(&self) -> Result<&AudioTokenizerArtifacts> {
         self.audio_tokenizer.as_ref().ok_or_else(|| {
             OmniVoiceError::Unsupported(
-                "audio tokenizer safetensors artifacts are unavailable for a GGUF runtime"
-                    .to_string(),
+                "audio tokenizer safetensors artifacts are unavailable for a GGUF runtime".to_string(),
             )
         })
     }
@@ -259,9 +252,7 @@ impl RuntimeArtifacts {
     pub fn native_weight_dtype(&self) -> Result<ModelWeightDType> {
         if let Some(bundle) = self.gguf_bundle() {
             let content = bundle.open_generator_content()?;
-            return Ok(classify_gguf_weight_dtype(
-                content.tensor_infos.values().map(|info| info.ggml_dtype),
-            ));
+            return Ok(classify_gguf_weight_dtype(content.tensor_infos.values().map(|info| info.ggml_dtype)));
         }
         native_weight_dtype_from_safetensors(self.generator()?.weights_path())
     }
@@ -269,20 +260,13 @@ impl RuntimeArtifacts {
 
 impl GgufBundleArtifacts {
     fn resolve(model_root: &Path) -> Result<Self> {
-        let generator_path = resolve_gguf_candidate(
-            model_root,
-            &["omnivoice-base-", "base"],
-            DEFAULT_GGUF_LM_FILE,
-        )?;
+        let generator_path = resolve_gguf_candidate(model_root, &["omnivoice-base-", "base"], DEFAULT_GGUF_LM_FILE)?;
         let audio_tokenizer_path = resolve_gguf_candidate(
             model_root,
             &["omnivoice-tokenizer-", "tokenizer", "codec"],
             DEFAULT_GGUF_CODEC_FILE,
         )?;
-        Ok(Self {
-            generator_path,
-            audio_tokenizer_path,
-        })
+        Ok(Self { generator_path, audio_tokenizer_path })
     }
 
     pub fn generator_path(&self) -> &Path {
@@ -416,38 +400,37 @@ fn read_gguf_content(path: &Path) -> Result<gguf_file::Content> {
 }
 
 pub(crate) fn gguf_u32(content: &gguf_file::Content, key: &str) -> Result<u32> {
-    let value = content.metadata.get(key).ok_or_else(|| {
-        OmniVoiceError::InvalidData(format!("missing GGUF metadata key `{key}`"))
-    })?;
+    let value = content
+        .metadata
+        .get(key)
+        .ok_or_else(|| OmniVoiceError::InvalidData(format!("missing GGUF metadata key `{key}`")))?;
     gguf_value_u32(value, key)
 }
 
 pub(crate) fn gguf_f64(content: &gguf_file::Content, key: &str) -> Result<f64> {
-    let value = content.metadata.get(key).ok_or_else(|| {
-        OmniVoiceError::InvalidData(format!("missing GGUF metadata key `{key}`"))
-    })?;
+    let value = content
+        .metadata
+        .get(key)
+        .ok_or_else(|| OmniVoiceError::InvalidData(format!("missing GGUF metadata key `{key}`")))?;
     match value {
         gguf_file::Value::F32(v) => Ok((*v).into()),
         gguf_file::Value::F64(v) => Ok(*v),
-        other => Err(OmniVoiceError::InvalidData(format!(
-            "GGUF metadata `{key}` is not a float: {other:?}"
-        ))),
+        other => Err(OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` is not a float: {other:?}"))),
     }
 }
 
 pub(crate) fn gguf_array_usize(content: &gguf_file::Content, key: &str) -> Result<Vec<usize>> {
-    let value = content.metadata.get(key).ok_or_else(|| {
-        OmniVoiceError::InvalidData(format!("missing GGUF metadata key `{key}`"))
-    })?;
-    let items = value.to_vec().map_err(|_| {
-        OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` is not an array"))
-    })?;
+    let value = content
+        .metadata
+        .get(key)
+        .ok_or_else(|| OmniVoiceError::InvalidData(format!("missing GGUF metadata key `{key}`")))?;
+    let items =
+        value.to_vec().map_err(|_| OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` is not an array")))?;
     items
         .iter()
         .map(|item| {
-            usize::try_from(gguf_value_u32(item, key)?).map_err(|_| {
-                OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` exceeds usize"))
-            })
+            usize::try_from(gguf_value_u32(item, key)?)
+                .map_err(|_| OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` exceeds usize")))
         })
         .collect()
 }
@@ -460,14 +443,15 @@ fn gguf_value_u32(value: &gguf_file::Value, key: &str) -> Result<u32> {
         gguf_file::Value::I16(v) if *v >= 0 => Ok(*v as u32),
         gguf_file::Value::U32(v) => Ok(*v),
         gguf_file::Value::I32(v) if *v >= 0 => Ok(*v as u32),
-        gguf_file::Value::U64(v) => u32::try_from(*v)
-            .map_err(|_| OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` exceeds u32"))),
-        gguf_file::Value::I64(v) if *v >= 0 => u32::try_from(*v).map_err(|_| {
-            OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` exceeds u32"))
-        }),
-        other => Err(OmniVoiceError::InvalidData(format!(
-            "GGUF metadata `{key}` is not a non-negative integer: {other:?}"
-        ))),
+        gguf_file::Value::U64(v) => {
+            u32::try_from(*v).map_err(|_| OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` exceeds u32")))
+        }
+        gguf_file::Value::I64(v) if *v >= 0 => {
+            u32::try_from(*v).map_err(|_| OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` exceeds u32")))
+        }
+        other => {
+            Err(OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` is not a non-negative integer: {other:?}")))
+        }
     }
 }
 
@@ -486,18 +470,11 @@ impl GeneratorArtifacts {
         let weights_path = resolve_required_path(model_root, &manifest.weights)?;
         let required_prefixes = manifest.required_prefixes.iter().cloned().collect();
         let ignored_keys = manifest.ignored_keys.iter().cloned().collect();
-        let observed_prefixes =
-            inspect_safetensor_prefixes(&weights_path, &ignored_keys, "generator")?;
+        let observed_prefixes = inspect_safetensor_prefixes(&weights_path, &ignored_keys, "generator")?;
 
         validate_generator_prefixes(&observed_prefixes, &required_prefixes)?;
 
-        Ok(Self {
-            config_path,
-            weights_path,
-            required_prefixes,
-            ignored_keys,
-            observed_prefixes,
-        })
+        Ok(Self { config_path, weights_path, required_prefixes, ignored_keys, observed_prefixes })
     }
 
     pub fn config_path(&self) -> &Path {
@@ -532,14 +509,9 @@ impl TextTokenizerArtifacts {
     fn resolve(model_root: &Path, manifest: &TextTokenizerArtifactManifest) -> Result<Self> {
         let tokenizer_path = resolve_required_path(model_root, &manifest.tokenizer)?;
         let tokenizer_config_path = resolve_required_path(model_root, &manifest.tokenizer_config)?;
-        let chat_template_path =
-            resolve_optional_path(model_root, manifest.metadata.chat_template.as_ref())?;
+        let chat_template_path = resolve_optional_path(model_root, manifest.metadata.chat_template.as_ref())?;
 
-        Ok(Self {
-            tokenizer_path,
-            tokenizer_config_path,
-            chat_template_path,
-        })
+        Ok(Self { tokenizer_path, tokenizer_config_path, chat_template_path })
     }
 
     pub fn tokenizer_path(&self) -> &Path {
@@ -569,11 +541,9 @@ impl AudioTokenizerArtifacts {
     fn resolve(model_root: &Path, manifest: &AudioTokenizerArtifactManifest) -> Result<Self> {
         let config_path = resolve_required_path(model_root, &manifest.config)?;
         let weights_path = resolve_required_path(model_root, &manifest.weights)?;
-        let preprocessor_config_path =
-            resolve_required_path(model_root, &manifest.preprocessor_config)?;
+        let preprocessor_config_path = resolve_required_path(model_root, &manifest.preprocessor_config)?;
         let required_prefixes = manifest.required_prefixes.iter().cloned().collect();
-        let observed_prefixes =
-            inspect_safetensor_prefixes(&weights_path, &BTreeSet::new(), "audio_tokenizer")?;
+        let observed_prefixes = inspect_safetensor_prefixes(&weights_path, &BTreeSet::new(), "audio_tokenizer")?;
         validate_minimum_prefixes(&observed_prefixes, &required_prefixes, "audio_tokenizer")?;
         let license_path = resolve_optional_path(model_root, manifest.metadata.license.as_ref())?;
 
@@ -991,10 +961,8 @@ impl ReferenceCaseHandle {
         with_safetensors(self.case_dir.join("inputs.safetensors"), |tensors| {
             let contracts = prepared_prompt_contracts(&prepared)?;
 
-            let prompts = contracts
-                .iter()
-                .map(|contract| load_prompt_contract(contract, tensors))
-                .collect::<Result<Vec<_>>>()?;
+            let prompts =
+                contracts.iter().map(|contract| load_prompt_contract(contract, tensors)).collect::<Result<Vec<_>>>()?;
 
             if let Some(chunk_plan) = prepared.chunk_plan.clone() {
                 if chunk_plan.kind == "chunked" {
@@ -1034,24 +1002,14 @@ impl ReferenceCaseHandle {
         let prepared = self.load_prepared_json()?;
         let contracts = prepared_prompt_contracts(&prepared)?;
         let contract = contracts.first().ok_or_else(|| {
-            OmniVoiceError::InvalidData(
-                "prepared.json does not contain any prompt contract".to_string(),
-            )
+            OmniVoiceError::InvalidData("prepared.json does not contain any prompt contract".to_string())
         })?;
-        let text = prepared
-            .texts
-            .first()
-            .cloned()
-            .unwrap_or_else(|| contract.full_text.clone());
+        let text = prepared.texts.first().cloned().unwrap_or_else(|| contract.full_text.clone());
         let lang = prepared.langs.first().cloned().map(Some).unwrap_or(None);
         let instruct = prepared.instructs.first().cloned().unwrap_or(None);
         let ref_text = prepared.ref_texts.first().cloned().unwrap_or(None);
         let ref_rms = prepared.ref_rms.first().copied().unwrap_or(None);
-        let denoise = prepared
-            .generation_config
-            .as_ref()
-            .map(|config| config.denoise)
-            .unwrap_or(true);
+        let denoise = prepared.generation_config.as_ref().map(|config| config.denoise).unwrap_or(true);
 
         Ok(ReferencePreparedMetadata {
             text,
@@ -1059,10 +1017,7 @@ impl ReferenceCaseHandle {
             instruct,
             ref_text,
             ref_rms,
-            mode: resolve_generation_mode(
-                contract.mode.as_deref(),
-                contract.segments.ref_audio_length,
-            )?,
+            mode: resolve_generation_mode(contract.mode.as_deref(), contract.segments.ref_audio_length)?,
             denoise,
             postprocess_output: prepared
                 .generation_config
@@ -1080,8 +1035,7 @@ impl ReferenceCaseHandle {
 
     pub fn load_stage0_debug_config(&self) -> Result<ReferenceStage0DebugConfig> {
         let debug = self.load_debug_json()?;
-        let case: ReferenceCaseJson =
-            serde_json::from_str(&fs::read_to_string(self.case_dir.join("case.json"))?)?;
+        let case: ReferenceCaseJson = serde_json::from_str(&fs::read_to_string(self.case_dir.join("case.json"))?)?;
         let mut capture_hidden_layers = Vec::new();
         let mut capture_final_hidden = false;
         for layer in debug.capture_layers {
@@ -1091,9 +1045,7 @@ impl ReferenceCaseHandle {
                     capture_final_hidden = true;
                 }
                 DebugCaptureLayer::Name(name) => {
-                    return Err(OmniVoiceError::InvalidData(format!(
-                        "unsupported debug capture layer {name}"
-                    )));
+                    return Err(OmniVoiceError::InvalidData(format!("unsupported debug capture layer {name}")));
                 }
             }
         }
@@ -1111,8 +1063,7 @@ impl ReferenceCaseHandle {
     }
 
     pub fn load_case_definition(&self) -> Result<ReferenceCaseDefinition> {
-        let case: ReferenceCaseJson =
-            serde_json::from_str(&fs::read_to_string(self.case_dir.join("case.json"))?)?;
+        let case: ReferenceCaseJson = serde_json::from_str(&fs::read_to_string(self.case_dir.join("case.json"))?)?;
 
         let mut request = GenerationRequest::new_text_only(case.text);
         request.languages = vec![case.language];
@@ -1138,29 +1089,15 @@ impl ReferenceCaseHandle {
             let metadata = self.load_prepared_metadata()?;
             let prepared = self.load_prepared_prompt()?;
             let audio_start = metadata.style_length + metadata.text_length;
-            let mut tokens = I64Tensor2::zeros((
-                prepared.prompt.input_ids.dims().1,
-                metadata.ref_audio_length,
-            ));
+            let mut tokens = I64Tensor2::zeros((prepared.prompt.input_ids.dims().1, metadata.ref_audio_length));
             for codebook in 0..prepared.prompt.input_ids.dims().1 {
                 for index in 0..metadata.ref_audio_length {
-                    tokens.set(
-                        codebook,
-                        index,
-                        prepared
-                            .prompt
-                            .input_ids
-                            .get(0, codebook, audio_start + index),
-                    );
+                    tokens.set(codebook, index, prepared.prompt.input_ids.get(0, codebook, audio_start + index));
                 }
             }
             request.voice_clone_prompts = vec![Some(VoiceClonePrompt {
                 ref_audio_tokens: tokens,
-                ref_text: metadata
-                    .ref_text
-                    .clone()
-                    .or(case.ref_text.clone())
-                    .unwrap_or_default(),
+                ref_text: metadata.ref_text.clone().or(case.ref_text.clone()).unwrap_or_default(),
                 ref_rms: metadata.ref_rms,
             })];
             request.ref_texts = vec![None];
@@ -1190,77 +1127,55 @@ impl ReferenceCaseHandle {
     }
 
     pub fn load_forward_step_zero(&self) -> Result<ForwardStepZero> {
-        with_safetensors(
-            self.case_dir.join("forward_step_00.safetensors"),
-            |tensors| {
-                let mut hidden_layers = BTreeMap::new();
-                for name in tensors.names() {
-                    let Some(index_text) = name.strip_prefix("hidden_layer_") else {
-                        continue;
-                    };
-                    let index = index_text.parse::<usize>().map_err(|error| {
-                        OmniVoiceError::InvalidData(format!(
-                            "invalid hidden layer name {name}: {error}"
-                        ))
-                    })?;
-                    hidden_layers.insert(index, load_f32_tensor3(tensors, name)?);
-                }
-                Ok(ForwardStepZero {
-                    inputs_embeds: load_f32_tensor3(tensors, "inputs_embeds")?,
-                    hidden_layers,
-                    final_hidden: load_f32_tensor3(tensors, "final_hidden")?,
-                })
-            },
-        )
+        with_safetensors(self.case_dir.join("forward_step_00.safetensors"), |tensors| {
+            let mut hidden_layers = BTreeMap::new();
+            for name in tensors.names() {
+                let Some(index_text) = name.strip_prefix("hidden_layer_") else {
+                    continue;
+                };
+                let index = index_text.parse::<usize>().map_err(|error| {
+                    OmniVoiceError::InvalidData(format!("invalid hidden layer name {name}: {error}"))
+                })?;
+                hidden_layers.insert(index, load_f32_tensor3(tensors, name)?);
+            }
+            Ok(ForwardStepZero {
+                inputs_embeds: load_f32_tensor3(tensors, "inputs_embeds")?,
+                hidden_layers,
+                final_hidden: load_f32_tensor3(tensors, "final_hidden")?,
+            })
+        })
     }
 
     pub fn load_step_capture(&self, step: usize) -> Result<StepCapture> {
-        with_safetensors(
-            self.case_dir
-                .join("steps")
-                .join(format!("step_{step:02}.safetensors")),
-            |tensors| {
-                Ok(StepCapture {
-                    c_logits: load_f32_tensor4(tensors, "c_logits")?,
-                    u_logits: load_f32_tensor4(tensors, "u_logits")?,
-                    pred_tokens: load_i64_tensor3(tensors, "pred_tokens")?,
-                    confidence_scores: load_f32_tensor3(tensors, "confidence_scores")?,
-                    tokens_after_step: load_i64_tensor3(tensors, "tokens_after_step")?,
-                    batch_input_ids_before_step: load_i64_tensor3(
-                        tensors,
-                        "batch_input_ids_before_step",
-                    )?,
-                })
-            },
-        )
+        with_safetensors(self.case_dir.join("steps").join(format!("step_{step:02}.safetensors")), |tensors| {
+            Ok(StepCapture {
+                c_logits: load_f32_tensor4(tensors, "c_logits")?,
+                u_logits: load_f32_tensor4(tensors, "u_logits")?,
+                pred_tokens: load_i64_tensor3(tensors, "pred_tokens")?,
+                confidence_scores: load_f32_tensor3(tensors, "confidence_scores")?,
+                tokens_after_step: load_i64_tensor3(tensors, "tokens_after_step")?,
+                batch_input_ids_before_step: load_i64_tensor3(tensors, "batch_input_ids_before_step")?,
+            })
+        })
     }
 
     pub fn load_generated_tokens(&self) -> Result<GeneratedTokens> {
         with_safetensors(self.case_dir.join("final_tokens.safetensors"), |tensors| {
             if tensors.names().contains(&"tokens") {
-                return Ok(GeneratedTokens::Single(load_i64_tensor2(
-                    tensors, "tokens",
-                )?));
+                return Ok(GeneratedTokens::Single(load_i64_tensor2(tensors, "tokens")?));
             }
 
-            let mut chunk_names = tensors
-                .names()
-                .iter()
-                .filter(|name| name.starts_with("chunk_"))
-                .cloned()
-                .collect::<Vec<_>>();
+            let mut chunk_names =
+                tensors.names().iter().filter(|name| name.starts_with("chunk_")).cloned().collect::<Vec<_>>();
             chunk_names.sort();
             if chunk_names.is_empty() {
                 return Err(OmniVoiceError::InvalidData(
-                    "final_tokens.safetensors does not contain `tokens` or `chunk_*` entries"
-                        .to_string(),
+                    "final_tokens.safetensors does not contain `tokens` or `chunk_*` entries".to_string(),
                 ));
             }
 
-            let chunks = chunk_names
-                .into_iter()
-                .map(|name| load_i64_tensor2(tensors, name))
-                .collect::<Result<Vec<_>>>()?;
+            let chunks =
+                chunk_names.into_iter().map(|name| load_i64_tensor2(tensors, name)).collect::<Result<Vec<_>>>()?;
             Ok(GeneratedTokens::Chunked(chunks))
         })
     }
@@ -1297,15 +1212,11 @@ impl ReferenceCaseHandle {
     }
 
     fn load_prepared_json(&self) -> Result<PreparedJson> {
-        Ok(serde_json::from_str(&fs::read_to_string(
-            self.case_dir.join("prepared.json"),
-        )?)?)
+        Ok(serde_json::from_str(&fs::read_to_string(self.case_dir.join("prepared.json"))?)?)
     }
 
     fn load_debug_json(&self) -> Result<DebugJson> {
-        Ok(serde_json::from_str(&fs::read_to_string(
-            self.case_dir.join("debug.json"),
-        )?)?)
+        Ok(serde_json::from_str(&fs::read_to_string(self.case_dir.join("debug.json"))?)?)
     }
 }
 
@@ -1314,27 +1225,32 @@ fn prepared_prompt_contracts(prepared: &PreparedJson) -> Result<Vec<PreparedProm
         return Ok(prepared.prompt_contracts.clone());
     }
 
-    let style_text = prepared.style_text.clone().ok_or_else(|| {
-        OmniVoiceError::InvalidData("prepared.json is missing style_text".to_string())
-    })?;
-    let full_text = prepared.full_text.clone().ok_or_else(|| {
-        OmniVoiceError::InvalidData("prepared.json is missing full_text".to_string())
-    })?;
-    let style_token_ids = prepared.style_token_ids.clone().ok_or_else(|| {
-        OmniVoiceError::InvalidData("prepared.json is missing style_token_ids".to_string())
-    })?;
-    let text_token_ids = prepared.text_token_ids.clone().ok_or_else(|| {
-        OmniVoiceError::InvalidData("prepared.json is missing text_token_ids".to_string())
-    })?;
-    let target_start_idx = prepared.target_start_idx.ok_or_else(|| {
-        OmniVoiceError::InvalidData("prepared.json is missing target_start_idx".to_string())
-    })?;
-    let total_length = prepared.total_length.ok_or_else(|| {
-        OmniVoiceError::InvalidData("prepared.json is missing total_length".to_string())
-    })?;
-    let segments = prepared.segments.clone().ok_or_else(|| {
-        OmniVoiceError::InvalidData("prepared.json is missing segments".to_string())
-    })?;
+    let style_text = prepared
+        .style_text
+        .clone()
+        .ok_or_else(|| OmniVoiceError::InvalidData("prepared.json is missing style_text".to_string()))?;
+    let full_text = prepared
+        .full_text
+        .clone()
+        .ok_or_else(|| OmniVoiceError::InvalidData("prepared.json is missing full_text".to_string()))?;
+    let style_token_ids = prepared
+        .style_token_ids
+        .clone()
+        .ok_or_else(|| OmniVoiceError::InvalidData("prepared.json is missing style_token_ids".to_string()))?;
+    let text_token_ids = prepared
+        .text_token_ids
+        .clone()
+        .ok_or_else(|| OmniVoiceError::InvalidData("prepared.json is missing text_token_ids".to_string()))?;
+    let target_start_idx = prepared
+        .target_start_idx
+        .ok_or_else(|| OmniVoiceError::InvalidData("prepared.json is missing target_start_idx".to_string()))?;
+    let total_length = prepared
+        .total_length
+        .ok_or_else(|| OmniVoiceError::InvalidData("prepared.json is missing total_length".to_string()))?;
+    let segments = prepared
+        .segments
+        .clone()
+        .ok_or_else(|| OmniVoiceError::InvalidData("prepared.json is missing segments".to_string()))?;
 
     Ok(vec![PreparedPromptContractJson {
         mode: prepared.mode.clone(),
@@ -1350,15 +1266,9 @@ fn prepared_prompt_contracts(prepared: &PreparedJson) -> Result<Vec<PreparedProm
     }])
 }
 
-fn load_prompt_contract(
-    contract: &PreparedPromptContractJson,
-    tensors: &SafeTensors<'_>,
-) -> Result<PreparedPrompt> {
+fn load_prompt_contract(contract: &PreparedPromptContractJson, tensors: &SafeTensors<'_>) -> Result<PreparedPrompt> {
     Ok(PreparedPrompt {
-        mode: resolve_generation_mode(
-            contract.mode.as_deref(),
-            contract.segments.ref_audio_length,
-        )?,
+        mode: resolve_generation_mode(contract.mode.as_deref(), contract.segments.ref_audio_length)?,
         style_text: contract.style_text.clone(),
         full_text: contract.full_text.clone(),
         style_token_ids: contract.style_token_ids.clone(),
@@ -1419,14 +1329,10 @@ fn validate_runtime_contracts(
         )));
     }
     if contracts.num_audio_codebooks == 0 {
-        return Err(OmniVoiceError::InvalidData(
-            "manifest num_audio_codebooks must be greater than zero".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidData("manifest num_audio_codebooks must be greater than zero".to_string()));
     }
     if contracts.audio_vocab_size == 0 {
-        return Err(OmniVoiceError::InvalidData(
-            "manifest audio_vocab_size must be greater than zero".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidData("manifest audio_vocab_size must be greater than zero".to_string()));
     }
     let audio_vocab_size_i64 = i64::try_from(contracts.audio_vocab_size).map_err(|_| {
         OmniVoiceError::InvalidData(format!(
@@ -1441,19 +1347,13 @@ fn validate_runtime_contracts(
         )));
     }
     if contracts.sample_rate == 0 {
-        return Err(OmniVoiceError::InvalidData(
-            "manifest sample_rate must be greater than zero".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidData("manifest sample_rate must be greater than zero".to_string()));
     }
     if contracts.hop_length == 0 {
-        return Err(OmniVoiceError::InvalidData(
-            "manifest hop_length must be greater than zero".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidData("manifest hop_length must be greater than zero".to_string()));
     }
     if contracts.frame_rate == 0 {
-        return Err(OmniVoiceError::InvalidData(
-            "manifest frame_rate must be greater than zero".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidData("manifest frame_rate must be greater than zero".to_string()));
     }
     if contracts.token_id_min < 0 {
         return Err(OmniVoiceError::InvalidData(format!(
@@ -1473,10 +1373,7 @@ fn validate_runtime_contracts(
             contracts.token_id_max, contracts.audio_vocab_size
         )));
     }
-    if contracts
-        .token_id_range()
-        .contains(&contracts.audio_mask_id)
-    {
+    if contracts.token_id_range().contains(&contracts.audio_mask_id) {
         return Err(OmniVoiceError::InvalidData(format!(
             "audio_mask_id {} must stay outside generation token range {}..={}",
             contracts.audio_mask_id, contracts.token_id_min, contracts.token_id_max
@@ -1485,9 +1382,8 @@ fn validate_runtime_contracts(
 
     let audio_config: AudioTokenizerContractConfig =
         serde_json::from_str(&fs::read_to_string(audio_tokenizer.config_path())?)?;
-    let preprocessor: PreprocessorContractConfig = serde_json::from_str(&fs::read_to_string(
-        audio_tokenizer.preprocessor_config_path(),
-    )?)?;
+    let preprocessor: PreprocessorContractConfig =
+        serde_json::from_str(&fs::read_to_string(audio_tokenizer.preprocessor_config_path())?)?;
 
     if audio_config.sample_rate != contracts.sample_rate {
         return Err(OmniVoiceError::InvalidData(format!(
@@ -1508,20 +1404,13 @@ fn validate_runtime_contracts(
         )));
     }
     if audio_config.downsample_factor == 0 {
-        return Err(OmniVoiceError::InvalidData(
-            "audio tokenizer downsample_factor must be > 0".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidData("audio tokenizer downsample_factor must be > 0".to_string()));
     }
     if preprocessor.hop_length == 0 {
-        return Err(OmniVoiceError::InvalidData(
-            "preprocessor hop_length must be > 0".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidData("preprocessor hop_length must be > 0".to_string()));
     }
     let derived_frame_rate = usize::try_from(audio_config.sample_rate).map_err(|_| {
-        OmniVoiceError::InvalidData(format!(
-            "sample_rate {} does not fit into usize",
-            audio_config.sample_rate
-        ))
+        OmniVoiceError::InvalidData(format!("sample_rate {} does not fit into usize", audio_config.sample_rate))
     })? / preprocessor.hop_length;
     if derived_frame_rate != contracts.frame_rate {
         return Err(OmniVoiceError::InvalidData(format!(
@@ -1559,9 +1448,7 @@ fn validate_relative_artifact_path(path: &Path) -> Result<()> {
     if normalized.is_empty()
         || normalized.starts_with('/')
         || normalized.contains(':')
-        || normalized
-            .split('/')
-            .any(|component| component == "." || component == "..")
+        || normalized.split('/').any(|component| component == "." || component == "..")
     {
         return Err(OmniVoiceError::InvalidData(format!(
             "artifact path must be relative and stay within the model root: {}",
@@ -1576,9 +1463,7 @@ fn validate_case_id(case_id: &str) -> Result<()> {
     if normalized.is_empty()
         || normalized.starts_with('/')
         || normalized.contains(':')
-        || normalized
-            .split('/')
-            .any(|component| component == "." || component == "..")
+        || normalized.split('/').any(|component| component == "." || component == "..")
     {
         return Err(OmniVoiceError::InvalidData(format!(
             "reference case id must be a single relative directory name: {case_id}"
@@ -1592,20 +1477,17 @@ fn validate_case_id(case_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn inspect_safetensor_prefixes(
-    path: &Path,
-    ignored_keys: &BTreeSet<String>,
-    label: &str,
-) -> Result<BTreeSet<String>> {
+fn inspect_safetensor_prefixes(path: &Path, ignored_keys: &BTreeSet<String>, label: &str) -> Result<BTreeSet<String>> {
     let keys = read_safetensor_names(path)?;
     let mut prefixes = BTreeSet::new();
     for key in keys {
         if ignored_keys.contains(&key) {
             continue;
         }
-        let prefix = key.split('.').next().ok_or_else(|| {
-            OmniVoiceError::InvalidData(format!("{label} contains empty safetensors key"))
-        })?;
+        let prefix = key
+            .split('.')
+            .next()
+            .ok_or_else(|| OmniVoiceError::InvalidData(format!("{label} contains empty safetensors key")))?;
         prefixes.insert(prefix.to_string());
     }
     Ok(prefixes)
@@ -1613,11 +1495,7 @@ fn inspect_safetensor_prefixes(
 
 fn read_safetensor_names(path: impl AsRef<Path>) -> Result<Vec<String>> {
     let parsed = read_safetensor_header_map(path.as_ref())?;
-    Ok(parsed
-        .keys()
-        .filter(|key| *key != "__metadata__")
-        .cloned()
-        .collect())
+    Ok(parsed.keys().filter(|key| *key != "__metadata__").cloned().collect())
 }
 
 fn read_safetensor_header_map(path: &Path) -> Result<serde_json::Map<String, serde_json::Value>> {
@@ -1632,10 +1510,7 @@ fn read_safetensor_header_map(path: &Path) -> Result<serde_json::Map<String, ser
     let mut header_len_bytes = [0_u8; 8];
     file.read_exact(&mut header_len_bytes)?;
     let header_len = usize::try_from(u64::from_le_bytes(header_len_bytes)).map_err(|_| {
-        OmniVoiceError::InvalidData(format!(
-            "safetensors header length does not fit into usize: {}",
-            path.display()
-        ))
+        OmniVoiceError::InvalidData(format!("safetensors header length does not fit into usize: {}", path.display()))
     })?;
     const MAX_SAFETENSORS_HEADER_BYTES: usize = 64 * 1024 * 1024;
     if header_len > MAX_SAFETENSORS_HEADER_BYTES {
@@ -1646,10 +1521,7 @@ fn read_safetensor_header_map(path: &Path) -> Result<serde_json::Map<String, ser
         )));
     }
     let header_len_u64 = u64::try_from(header_len).map_err(|_| {
-        OmniVoiceError::InvalidData(format!(
-            "safetensors header length does not fit into u64: {}",
-            path.display()
-        ))
+        OmniVoiceError::InvalidData(format!("safetensors header length does not fit into u64: {}", path.display()))
     })?;
     if header_len_u64 > file_len - 8 {
         return Err(OmniVoiceError::InvalidData(format!(
@@ -1658,27 +1530,21 @@ fn read_safetensor_header_map(path: &Path) -> Result<serde_json::Map<String, ser
         )));
     }
 
-    let buffer_len = 8usize.checked_add(header_len).ok_or_else(|| {
-        OmniVoiceError::InvalidData("safetensors header length overflow".to_string())
-    })?;
+    let buffer_len = 8usize
+        .checked_add(header_len)
+        .ok_or_else(|| OmniVoiceError::InvalidData("safetensors header length overflow".to_string()))?;
     let mut header_buffer = vec![0_u8; buffer_len];
     header_buffer[..8].copy_from_slice(&header_len_bytes);
     file.seek(SeekFrom::Start(8))?;
     file.read_exact(&mut header_buffer[8..])?;
 
     let header = std::str::from_utf8(&header_buffer[8..]).map_err(|error| {
-        OmniVoiceError::InvalidData(format!(
-            "invalid safetensors header utf-8 for {}: {error}",
-            path.display()
-        ))
+        OmniVoiceError::InvalidData(format!("invalid safetensors header utf-8 for {}: {error}", path.display()))
     })?;
     Ok(serde_json::from_str(header)?)
 }
 
-fn validate_generator_prefixes(
-    observed: &BTreeSet<String>,
-    required: &BTreeSet<String>,
-) -> Result<()> {
+fn validate_generator_prefixes(observed: &BTreeSet<String>, required: &BTreeSet<String>) -> Result<()> {
     validate_minimum_prefixes(observed, required, "generator")?;
     let unexpected: Vec<_> = observed.difference(required).cloned().collect();
     if !unexpected.is_empty() {
@@ -1690,11 +1556,7 @@ fn validate_generator_prefixes(
     Ok(())
 }
 
-fn validate_minimum_prefixes(
-    observed: &BTreeSet<String>,
-    required: &BTreeSet<String>,
-    label: &str,
-) -> Result<()> {
+fn validate_minimum_prefixes(observed: &BTreeSet<String>, required: &BTreeSet<String>, label: &str) -> Result<()> {
     let missing: Vec<_> = required.difference(observed).cloned().collect();
     if !missing.is_empty() {
         return Err(OmniVoiceError::InvalidData(format!(
@@ -1705,10 +1567,7 @@ fn validate_minimum_prefixes(
     Ok(())
 }
 
-fn with_safetensors<T>(
-    path: impl AsRef<Path>,
-    callback: impl FnOnce(&SafeTensors<'_>) -> Result<T>,
-) -> Result<T> {
+fn with_safetensors<T>(path: impl AsRef<Path>, callback: impl FnOnce(&SafeTensors<'_>) -> Result<T>) -> Result<T> {
     let bytes = fs::read(path)?;
     let tensors = SafeTensors::deserialize(&bytes)?;
     callback(&tensors)
@@ -1717,10 +1576,7 @@ fn with_safetensors<T>(
 fn load_i64_tensor3(tensors: &SafeTensors<'_>, name: &str) -> Result<I64Tensor3> {
     let view = tensors.tensor(name)?;
     if view.dtype() != Dtype::I64 {
-        return Err(OmniVoiceError::InvalidData(format!(
-            "{name} expected I64 dtype, got {:?}",
-            view.dtype()
-        )));
+        return Err(OmniVoiceError::InvalidData(format!("{name} expected I64 dtype, got {:?}", view.dtype())));
     }
     I64Tensor3::new(shape3(view.shape())?, decode_i64(&view)?)
 }
@@ -1738,10 +1594,7 @@ fn load_f32_tensor4(tensors: &SafeTensors<'_>, name: &str) -> Result<F32Tensor4>
 fn load_i64_tensor2(tensors: &SafeTensors<'_>, name: &str) -> Result<I64Tensor2> {
     let view = tensors.tensor(name)?;
     if view.dtype() != Dtype::I64 {
-        return Err(OmniVoiceError::InvalidData(format!(
-            "{name} expected I64 dtype, got {:?}",
-            view.dtype()
-        )));
+        return Err(OmniVoiceError::InvalidData(format!("{name} expected I64 dtype, got {:?}", view.dtype())));
     }
     I64Tensor2::new(shape2(view.shape())?, decode_i64(&view)?)
 }
@@ -1749,29 +1602,17 @@ fn load_i64_tensor2(tensors: &SafeTensors<'_>, name: &str) -> Result<I64Tensor2>
 fn load_bool_tensor2(tensors: &SafeTensors<'_>, name: &str) -> Result<BoolTensor2> {
     let view = tensors.tensor(name)?;
     if view.dtype() != Dtype::BOOL {
-        return Err(OmniVoiceError::InvalidData(format!(
-            "{name} expected BOOL dtype, got {:?}",
-            view.dtype()
-        )));
+        return Err(OmniVoiceError::InvalidData(format!("{name} expected BOOL dtype, got {:?}", view.dtype())));
     }
-    BoolTensor2::new(
-        shape2(view.shape())?,
-        view.data().iter().map(|byte| *byte != 0).collect(),
-    )
+    BoolTensor2::new(shape2(view.shape())?, view.data().iter().map(|byte| *byte != 0).collect())
 }
 
 fn load_bool_tensor4(tensors: &SafeTensors<'_>, name: &str) -> Result<BoolTensor4> {
     let view = tensors.tensor(name)?;
     if view.dtype() != Dtype::BOOL {
-        return Err(OmniVoiceError::InvalidData(format!(
-            "{name} expected BOOL dtype, got {:?}",
-            view.dtype()
-        )));
+        return Err(OmniVoiceError::InvalidData(format!("{name} expected BOOL dtype, got {:?}", view.dtype())));
     }
-    BoolTensor4::new(
-        shape4(view.shape())?,
-        view.data().iter().map(|byte| *byte != 0).collect(),
-    )
+    BoolTensor4::new(shape4(view.shape())?, view.data().iter().map(|byte| *byte != 0).collect())
 }
 
 fn decode_i64(view: &TensorView<'_>) -> Result<Vec<i64>> {
@@ -1851,9 +1692,9 @@ fn decode_float_as_f32(view: &TensorView<'_>) -> Result<Vec<f32>> {
         Dtype::F32 => decode_f32(view),
         Dtype::F16 => decode_f16(view),
         Dtype::BF16 => decode_bf16(view),
-        other => Err(OmniVoiceError::InvalidData(format!(
-            "expected floating-point dtype for debug tensor, got {other:?}"
-        ))),
+        other => {
+            Err(OmniVoiceError::InvalidData(format!("expected floating-point dtype for debug tensor, got {other:?}")))
+        }
     }
 }
 
@@ -1861,9 +1702,7 @@ fn shape2(shape: &[usize]) -> Result<(usize, usize)> {
     if let [a, b] = shape {
         Ok((*a, *b))
     } else {
-        Err(OmniVoiceError::InvalidData(format!(
-            "expected 2D shape, got {shape:?}"
-        )))
+        Err(OmniVoiceError::InvalidData(format!("expected 2D shape, got {shape:?}")))
     }
 }
 
@@ -1871,9 +1710,7 @@ fn shape3(shape: &[usize]) -> Result<(usize, usize, usize)> {
     if let [a, b, c] = shape {
         Ok((*a, *b, *c))
     } else {
-        Err(OmniVoiceError::InvalidData(format!(
-            "expected 3D shape, got {shape:?}"
-        )))
+        Err(OmniVoiceError::InvalidData(format!("expected 3D shape, got {shape:?}")))
     }
 }
 
@@ -1881,9 +1718,7 @@ fn shape4(shape: &[usize]) -> Result<(usize, usize, usize, usize)> {
     if let [a, b, c, d] = shape {
         Ok((*a, *b, *c, *d))
     } else {
-        Err(OmniVoiceError::InvalidData(format!(
-            "expected 4D shape, got {shape:?}"
-        )))
+        Err(OmniVoiceError::InvalidData(format!("expected 4D shape, got {shape:?}")))
     }
 }
 
@@ -1893,9 +1728,7 @@ fn resolve_generation_mode(mode: Option<&str>, ref_audio_length: usize) -> Resul
             "auto" => Ok(GenerationMode::Auto),
             "clone" => Ok(GenerationMode::Clone),
             "design" => Ok(GenerationMode::Design),
-            other => Err(OmniVoiceError::InvalidData(format!(
-                "unsupported generation mode {other}"
-            ))),
+            other => Err(OmniVoiceError::InvalidData(format!("unsupported generation mode {other}"))),
         };
     }
 
@@ -1916,14 +1749,8 @@ mod tests {
             classify_gguf_weight_dtype([GgmlDType::BF16, GgmlDType::BF16, GgmlDType::F32]),
             ModelWeightDType::BF16
         );
-        assert_eq!(
-            classify_gguf_weight_dtype([GgmlDType::F16, GgmlDType::F16]),
-            ModelWeightDType::F16
-        );
-        assert_eq!(
-            classify_gguf_weight_dtype([GgmlDType::F32, GgmlDType::F32]),
-            ModelWeightDType::F32
-        );
+        assert_eq!(classify_gguf_weight_dtype([GgmlDType::F16, GgmlDType::F16]), ModelWeightDType::F16);
+        assert_eq!(classify_gguf_weight_dtype([GgmlDType::F32, GgmlDType::F32]), ModelWeightDType::F32);
     }
 
     #[test]

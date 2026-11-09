@@ -17,11 +17,7 @@ pub enum OmniVoiceError {
     #[error("missing artifact at {path}")]
     MissingArtifact { path: PathBuf },
     #[error("invalid tensor shape for {name}: expected {expected}, got {actual}")]
-    InvalidTensorShape {
-        name: String,
-        expected: String,
-        actual: String,
-    },
+    InvalidTensorShape { name: String, expected: String, actual: String },
     #[error("invalid request: {0}")]
     InvalidRequest(String),
     #[error("invalid data: {0}")]

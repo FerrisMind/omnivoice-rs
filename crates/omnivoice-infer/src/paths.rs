@@ -12,12 +12,7 @@ pub(crate) fn omnivoice_root() -> PathBuf {
         return cwd;
     }
 
-    let manifest_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
+    let manifest_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap().to_path_buf();
     if manifest_root.join("Cargo.toml").exists() {
         return manifest_root;
     }

@@ -5,10 +5,7 @@ use candle_nn::Module;
 use serde::Deserialize;
 
 use crate::{
-    artifacts::{
-        gguf_array_usize, gguf_f64, gguf_u32, AudioTokenizerArtifacts,
-        GgufBundleArtifacts, RuntimeArtifacts,
-    },
+    artifacts::{gguf_array_usize, gguf_f64, gguf_u32, AudioTokenizerArtifacts, GgufBundleArtifacts, RuntimeArtifacts},
     codec_layers::{CodecLinear, CodecWeightSource},
     error::{OmniVoiceError, Result},
     runtime::RuntimeOptions,
@@ -100,8 +97,7 @@ pub(crate) struct AudioTokenizerModelConfig {
 
 impl AudioTokenizerModelConfig {
     pub fn from_artifacts(audio_tokenizer: &AudioTokenizerArtifacts) -> Result<Self> {
-        let raw: AudioTokenizerConfigFile =
-            serde_json::from_str(&fs::read_to_string(audio_tokenizer.config_path())?)?;
+        let raw: AudioTokenizerConfigFile = serde_json::from_str(&fs::read_to_string(audio_tokenizer.config_path())?)?;
         let config = Self {
             sample_rate: raw.sample_rate,
             semantic_sample_rate: raw.semantic_sample_rate,
@@ -127,9 +123,7 @@ impl AudioTokenizerModelConfig {
             semantic_conv_kernel: raw.semantic_model_config.conv_kernel,
             semantic_conv_stride: raw.semantic_model_config.conv_stride,
             semantic_feat_extract_norm: raw.semantic_model_config.feat_extract_norm,
-            semantic_feat_extract_activation: parse_activation(
-                &raw.semantic_model_config.feat_extract_activation,
-            )?,
+            semantic_feat_extract_activation: parse_activation(&raw.semantic_model_config.feat_extract_activation)?,
             semantic_feat_proj_layer_norm: raw.semantic_model_config.feat_proj_layer_norm,
             semantic_hidden_activation: parse_activation(&raw.semantic_model_config.hidden_act)?,
             semantic_num_conv_pos_embeddings: raw.semantic_model_config.num_conv_pos_embeddings,
@@ -145,23 +139,17 @@ impl AudioTokenizerModelConfig {
         let downsample_factor = gguf_u32(&content, "omnivoice.downsample_factor")? as usize;
         let codebook_size = gguf_u32(&content, "omnivoice.codebook_size")? as usize;
         let codebook_dim = gguf_u32(&content, "omnivoice.codebook_dim")? as usize;
-        let acoustic_encoder_hidden_size =
-            gguf_u32(&content, "omnivoice.acoustic.encoder_hidden_size")? as usize;
+        let acoustic_encoder_hidden_size = gguf_u32(&content, "omnivoice.acoustic.encoder_hidden_size")? as usize;
         let acoustic_hidden_size = gguf_u32(&content, "omnivoice.acoustic.hidden_size")? as usize;
-        let acoustic_downsampling_ratios =
-            gguf_array_usize(&content, "omnivoice.acoustic.downsampling_ratios")?;
+        let acoustic_downsampling_ratios = gguf_array_usize(&content, "omnivoice.acoustic.downsampling_ratios")?;
         let layout = gguf_semantic_encoder_layout(&content)?;
         let hop_length = acoustic_downsampling_ratios
             .iter()
             .try_fold(1usize, |product, ratio| product.checked_mul(*ratio))
             .unwrap_or(0);
         let num_quantizers = gguf_quantizer_count(&content)?;
-        let target_bandwidths = target_bandwidths_for_quantizers(
-            sample_rate,
-            hop_length,
-            codebook_size,
-            num_quantizers,
-        )?;
+        let target_bandwidths =
+            target_bandwidths_for_quantizers(sample_rate, hop_length, codebook_size, num_quantizers)?;
         let config = Self {
             sample_rate,
             semantic_sample_rate,
@@ -178,18 +166,13 @@ impl AudioTokenizerModelConfig {
             acoustic_encoder_hidden_size,
             acoustic_downsampling_ratios,
             semantic_hidden_size: gguf_u32(&content, "omnivoice.semantic.hidden_size")? as usize,
-            semantic_intermediate_size: gguf_u32(
-                &content,
-                "omnivoice.semantic.intermediate_size",
-            )? as usize,
-            semantic_num_heads: gguf_u32(&content, "omnivoice.semantic.num_attention_heads")?
-                as usize,
-            semantic_num_layers: gguf_u32(&content, "omnivoice.semantic.num_hidden_layers")?
-                as usize,
+            semantic_intermediate_size: gguf_u32(&content, "omnivoice.semantic.intermediate_size")? as usize,
+            semantic_num_heads: gguf_u32(&content, "omnivoice.semantic.num_attention_heads")? as usize,
+            semantic_num_layers: gguf_u32(&content, "omnivoice.semantic.num_hidden_layers")? as usize,
             semantic_layer_norm_eps: gguf_f64(&content, "omnivoice.semantic.layer_norm_eps")?,
-            semantic_conv_bias: content.tensor_infos.contains_key(
-                "semantic_model.feature_extractor.conv_layers.0.conv.bias",
-            ),
+            semantic_conv_bias: content
+                .tensor_infos
+                .contains_key("semantic_model.feature_extractor.conv_layers.0.conv.bias"),
             semantic_conv_dim: gguf_array_usize(&content, "omnivoice.semantic.conv_dim")?,
             semantic_conv_kernel: gguf_array_usize(&content, "omnivoice.semantic.conv_kernel")?,
             semantic_conv_stride: gguf_array_usize(&content, "omnivoice.semantic.conv_stride")?,
@@ -199,14 +182,10 @@ impl AudioTokenizerModelConfig {
                 .tensor_infos
                 .contains_key("semantic_model.feature_projection.layer_norm.weight"),
             semantic_hidden_activation: parse_activation("gelu")?,
-            semantic_num_conv_pos_embeddings: gguf_u32(
-                &content,
-                "omnivoice.semantic.num_conv_pos_embeddings",
-            )? as usize,
-            semantic_num_conv_pos_groups: gguf_u32(
-                &content,
-                "omnivoice.semantic.num_conv_pos_embedding_groups",
-            )? as usize,
+            semantic_num_conv_pos_embeddings: gguf_u32(&content, "omnivoice.semantic.num_conv_pos_embeddings")?
+                as usize,
+            semantic_num_conv_pos_groups: gguf_u32(&content, "omnivoice.semantic.num_conv_pos_embedding_groups")?
+                as usize,
         };
         let config = config.validate()?;
         if config.num_quantizers() != num_quantizers {
@@ -226,8 +205,7 @@ impl AudioTokenizerModelConfig {
         }
         if self.downsample_factor == 0 || self.hop_length() == 0 {
             return Err(OmniVoiceError::InvalidData(
-                "audio tokenizer downsample_factor and hop length must be greater than zero"
-                    .to_string(),
+                "audio tokenizer downsample_factor and hop length must be greater than zero".to_string(),
             ));
         }
         if self.codebook_size == 0 || self.codebook_dim == 0 {
@@ -236,15 +214,10 @@ impl AudioTokenizerModelConfig {
             ));
         }
         if self.codebook_size < 2 {
-            return Err(OmniVoiceError::InvalidData(
-                "audio tokenizer codebook_size must be at least two".to_string(),
-            ));
+            return Err(OmniVoiceError::InvalidData("audio tokenizer codebook_size must be at least two".to_string()));
         }
         if self.target_bandwidths.is_empty()
-            || self
-                .target_bandwidths
-                .iter()
-                .any(|value| !value.is_finite() || *value <= 0.0)
+            || self.target_bandwidths.iter().any(|value| !value.is_finite() || *value <= 0.0)
         {
             return Err(OmniVoiceError::InvalidData(
                 "audio tokenizer target_bandwidths must contain finite positive values".to_string(),
@@ -255,8 +228,7 @@ impl AudioTokenizerModelConfig {
             || self.hop_length() == 0
         {
             return Err(OmniVoiceError::InvalidData(
-                "audio tokenizer acoustic downsampling ratios must be non-zero and fit usize"
-                    .to_string(),
+                "audio tokenizer acoustic downsampling ratios must be non-zero and fit usize".to_string(),
             ));
         }
         if self.strides.is_empty()
@@ -269,8 +241,7 @@ impl AudioTokenizerModelConfig {
             || self.kernel_size == 0
         {
             return Err(OmniVoiceError::InvalidData(
-                "audio tokenizer encoder strides, channel ratios, kernels, and dilations are invalid"
-                    .to_string(),
+                "audio tokenizer encoder strides, channel ratios, kernels, and dilations are invalid".to_string(),
             ));
         }
         if self.semantic_conv_dim.len() != self.semantic_conv_kernel.len()
@@ -284,14 +255,10 @@ impl AudioTokenizerModelConfig {
             || self.acoustic_hidden_size == 0
             || self.acoustic_encoder_hidden_size == 0
             || self.semantic_num_heads == 0
-            || !self
-                .semantic_hidden_size
-                .is_multiple_of(self.semantic_num_heads)
+            || !self.semantic_hidden_size.is_multiple_of(self.semantic_num_heads)
             || self.semantic_num_conv_pos_embeddings == 0
             || self.semantic_num_conv_pos_groups == 0
-            || !self
-                .semantic_hidden_size
-                .is_multiple_of(self.semantic_num_conv_pos_groups)
+            || !self.semantic_hidden_size.is_multiple_of(self.semantic_num_conv_pos_groups)
         {
             return Err(OmniVoiceError::InvalidData(
                 "audio tokenizer semantic model dimensions are inconsistent".to_string(),
@@ -311,9 +278,7 @@ impl AudioTokenizerModelConfig {
         let bandwidth = self.target_bandwidths.last().copied().unwrap_or(2.0);
         let frame_rate = (self.sample_rate as f32 / self.hop_length() as f32).ceil();
         let codebook_bits = (self.codebook_size as f32).log2();
-        ((1000.0 * bandwidth) / (frame_rate * codebook_bits))
-            .floor()
-            .max(1.0) as usize
+        ((1000.0 * bandwidth) / (frame_rate * codebook_bits)).floor().max(1.0) as usize
     }
 
     pub fn semantic_downsample_factor(&self) -> usize {
@@ -334,10 +299,7 @@ pub struct AudioTokenizerRuntimePlan {
 }
 
 impl AudioTokenizerRuntimePlan {
-    pub fn from_runtime_artifacts(
-        options: RuntimeOptions,
-        runtime: &RuntimeArtifacts,
-    ) -> Result<Self> {
+    pub fn from_runtime_artifacts(options: RuntimeOptions, runtime: &RuntimeArtifacts) -> Result<Self> {
         let device = options.resolve_device()?;
         Self::from_runtime_artifacts_with_device(options, runtime, device)
     }
@@ -349,46 +311,24 @@ impl AudioTokenizerRuntimePlan {
     ) -> Result<Self> {
         let runtime_dtype = options.resolve_audio_dtype_for_runtime_device(&device);
         let (config, weights_path) = if let Some(gguf) = runtime.gguf_bundle() {
-            (
-                AudioTokenizerModelConfig::from_gguf_bundle(gguf)?,
-                gguf.audio_tokenizer_path().to_path_buf(),
-            )
+            (AudioTokenizerModelConfig::from_gguf_bundle(gguf)?, gguf.audio_tokenizer_path().to_path_buf())
         } else {
             let audio_tokenizer = runtime.audio_tokenizer()?;
-            (
-                AudioTokenizerModelConfig::from_artifacts(audio_tokenizer)?,
-                audio_tokenizer.weights_path().to_path_buf(),
-            )
+            (AudioTokenizerModelConfig::from_artifacts(audio_tokenizer)?, audio_tokenizer.weights_path().to_path_buf())
         };
-        Ok(Self {
-            device,
-            runtime_dtype,
-            config,
-            weights_path,
-            model: OnceLock::new(),
-        })
+        Ok(Self { device, runtime_dtype, config, weights_path, model: OnceLock::new() })
     }
 
-    pub fn encode_waveform(
-        &self,
-        samples: &[f32],
-        sample_rate: u32,
-    ) -> Result<crate::contracts::I64Tensor2> {
+    pub fn encode_waveform(&self, samples: &[f32], sample_rate: u32) -> Result<crate::contracts::I64Tensor2> {
         let codes = self.encode_waveform_device(samples, sample_rate)?;
         let (quantizers, steps) = codes.dims2()?;
-        let data = codes
-            .to_device(&Device::Cpu)?
-            .to_dtype(DType::I64)?
-            .flatten_all()?
-            .to_vec1::<i64>()?;
+        let data = codes.to_device(&Device::Cpu)?.to_dtype(DType::I64)?.flatten_all()?.to_vec1::<i64>()?;
         crate::contracts::I64Tensor2::new((quantizers, steps), data)
     }
 
     pub fn encode_waveform_device(&self, samples: &[f32], sample_rate: u32) -> Result<Tensor> {
         if samples.is_empty() {
-            return Err(OmniVoiceError::InvalidRequest(
-                "audio tokenizer input waveform is empty".to_string(),
-            ));
+            return Err(OmniVoiceError::InvalidRequest("audio tokenizer input waveform is empty".to_string()));
         }
         if let Some(index) = samples.iter().position(|sample| !sample.is_finite()) {
             return Err(OmniVoiceError::InvalidRequest(format!(
@@ -403,23 +343,14 @@ impl AudioTokenizerRuntimePlan {
         }
         let waveform = Tensor::from_vec(samples.to_vec(), (1, 1, samples.len()), &self.device)?;
         let semantic_waveform = if self.config.sample_rate != self.config.semantic_sample_rate {
-            let semantic_samples = crate::audio_input::resample_linear(
-                samples,
-                self.config.sample_rate,
-                self.config.semantic_sample_rate,
-            );
+            let semantic_samples =
+                crate::audio_input::resample_linear(samples, self.config.sample_rate, self.config.semantic_sample_rate);
             let semantic_len = semantic_samples.len();
-            Some(Tensor::from_vec(
-                semantic_samples,
-                (1, semantic_len),
-                &self.device,
-            )?)
+            Some(Tensor::from_vec(semantic_samples, (1, semantic_len), &self.device)?)
         } else {
             None
         };
-        let codes = self
-            .model()?
-            .encode(&waveform, semantic_waveform.as_ref())?;
+        let codes = self.model()?.encode(&waveform, semantic_waveform.as_ref())?;
         let codes = codes.i(0)?.to_dtype(DType::I64)?;
         let (quantizers, steps) = codes.dims2()?;
         if quantizers != self.config.num_quantizers() || steps == 0 {
@@ -445,13 +376,8 @@ impl AudioTokenizerRuntimePlan {
 
     fn model(&self) -> Result<&AudioTokenizerModel> {
         let result = self.model.get_or_init(|| {
-            AudioTokenizerModel::load(
-                &self.config,
-                &self.weights_path,
-                &self.device,
-                self.runtime_dtype,
-            )
-            .map_err(|error| error.to_string())
+            AudioTokenizerModel::load(&self.config, &self.weights_path, &self.device, self.runtime_dtype)
+                .map_err(|error| error.to_string())
         });
         match result {
             Ok(model) => Ok(model),
@@ -471,12 +397,7 @@ struct AudioTokenizerModel {
 }
 
 impl AudioTokenizerModel {
-    fn load(
-        config: &AudioTokenizerModelConfig,
-        weights_path: &Path,
-        device: &Device,
-        dtype: DType,
-    ) -> Result<Self> {
+    fn load(config: &AudioTokenizerModelConfig, weights_path: &Path, device: &Device, dtype: DType) -> Result<Self> {
         let ws = CodecWeightSource::from_weight_path(weights_path, dtype, device)?;
         Ok(Self {
             semantic_model: HubertModel::load(config, &ws.pp("semantic_model"))?,
@@ -507,13 +428,8 @@ impl AudioTokenizerModel {
         };
         let semantic_features = self
             .semantic_model
-            .extract_semantic_features_from_resampled(
-                &semantic_input,
-                self.config.semantic_downsample_factor(),
-            )?;
-        let semantic_latents = self
-            .encoder_semantic
-            .forward(&semantic_features.transpose(1, 2)?)?;
+            .extract_semantic_features_from_resampled(&semantic_input, self.config.semantic_downsample_factor())?;
+        let semantic_latents = self.encoder_semantic.forward(&semantic_features.transpose(1, 2)?)?;
 
         let acoustic_latents = {
             let raw = self.acoustic_encoder.forward(waveform)?;
@@ -529,10 +445,7 @@ impl AudioTokenizerModel {
         };
 
         let embeddings = Tensor::cat(&[&acoustic_latents, &semantic_latents], 1)?;
-        let embeddings = self
-            .fc
-            .forward(&embeddings.transpose(1, 2)?)?
-            .transpose(1, 2)?;
+        let embeddings = self.fc.forward(&embeddings.transpose(1, 2)?)?.transpose(1, 2)?;
         self.quantizer.encode(&embeddings)
     }
 }
@@ -542,9 +455,7 @@ pub(crate) fn parse_activation(name: &str) -> Result<candle_nn::Activation> {
         "gelu" => Ok(candle_nn::Activation::Gelu),
         "silu" => Ok(candle_nn::Activation::Silu),
         "elu" => Ok(candle_nn::Activation::Elu(1.0)),
-        other => Err(OmniVoiceError::Unsupported(format!(
-            "unsupported activation {other}"
-        ))),
+        other => Err(OmniVoiceError::Unsupported(format!("unsupported activation {other}"))),
     }
 }
 
@@ -562,9 +473,7 @@ fn gguf_quantizer_count(content: &gguf_file::Content) -> Result<usize> {
         }
     }
     if indices.is_empty() {
-        return Err(OmniVoiceError::InvalidData(
-            "GGUF tokenizer is missing quantizer.quantizers tensors".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidData("GGUF tokenizer is missing quantizer.quantizers tensors".to_string()));
     }
     let expected = (0..indices.len()).collect::<BTreeSet<_>>();
     if indices != expected {
@@ -585,10 +494,7 @@ struct GgufSemanticEncoderLayout {
 
 fn gguf_semantic_encoder_layout(content: &gguf_file::Content) -> Result<GgufSemanticEncoderLayout> {
     let kernel_size = gguf_tensor_last_dim(content, "encoder_semantic.conv.weight")?;
-    let unit_kernel_size = gguf_tensor_last_dim(
-        content,
-        "encoder_semantic.conv_blocks.0.res_units.0.conv1.weight",
-    )?;
+    let unit_kernel_size = gguf_tensor_last_dim(content, "encoder_semantic.conv_blocks.0.res_units.0.conv1.weight")?;
     let mut blocks = BTreeSet::new();
     let mut units = BTreeSet::new();
     for name in content.tensor_infos.keys() {
@@ -607,9 +513,7 @@ fn gguf_semantic_encoder_layout(content: &gguf_file::Content) -> Result<GgufSema
         }
     }
     if blocks.is_empty() || units.is_empty() {
-        return Err(OmniVoiceError::InvalidData(
-            "GGUF tokenizer is missing encoder_semantic conv blocks".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidData("GGUF tokenizer is missing encoder_semantic conv blocks".to_string()));
     }
     let n_blocks = blocks.iter().copied().max().unwrap_or(0) + 1;
     let n_units = units.iter().copied().max().unwrap_or(0) + 1;
@@ -633,9 +537,10 @@ fn gguf_tensor_last_dim(content: &gguf_file::Content, name: &str) -> Result<usiz
         .get(name)
         .map(|info| info.shape.dims())
         .ok_or_else(|| OmniVoiceError::InvalidData(format!("missing GGUF tensor {name}")))?;
-    dims.last().copied().filter(|dim| *dim > 0).ok_or_else(|| {
-        OmniVoiceError::InvalidData(format!("GGUF tensor {name} has an empty shape {dims:?}"))
-    })
+    dims.last()
+        .copied()
+        .filter(|dim| *dim > 0)
+        .ok_or_else(|| OmniVoiceError::InvalidData(format!("GGUF tensor {name} has an empty shape {dims:?}")))
 }
 
 fn target_bandwidths_for_quantizers(
@@ -645,9 +550,7 @@ fn target_bandwidths_for_quantizers(
     num_quantizers: usize,
 ) -> Result<Vec<f32>> {
     if hop_length == 0 || codebook_size < 2 || num_quantizers == 0 {
-        return Err(OmniVoiceError::InvalidData(
-            "cannot derive GGUF tokenizer target_bandwidths".to_string(),
-        ));
+        return Err(OmniVoiceError::InvalidData("cannot derive GGUF tokenizer target_bandwidths".to_string()));
     }
     let frame_rate = (sample_rate as f32 / hop_length as f32).ceil();
     let codebook_bits = (codebook_size as f32).log2();
