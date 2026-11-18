@@ -146,6 +146,7 @@ fn execute_command(command: CliCommand) -> Result<(), OmniVoiceError> {
             duration,
             speed,
             asr_model,
+            asr_language,
             device,
             dtype,
             num_step,
@@ -174,6 +175,7 @@ fn execute_command(command: CliCommand) -> Result<(), OmniVoiceError> {
             duration,
             speed,
             asr_model,
+            asr_language,
             device,
             dtype,
             num_step,
@@ -297,6 +299,7 @@ enum CliCommand {
         duration: Option<f32>,
         speed: Option<f32>,
         asr_model: Option<String>,
+        asr_language: Option<String>,
         device: DeviceSpec,
         dtype: DTypeSpec,
         num_step: usize,
@@ -470,6 +473,7 @@ fn parse_infer(args: &[String]) -> Result<CliCommand, OmniVoiceError> {
     let mut duration = None;
     let mut speed = None;
     let mut asr_model = None;
+    let mut asr_language = None;
     let mut device = DeviceSpec::default();
     let mut dtype = DTypeSpec::default();
     let mut num_step = 32usize;
@@ -529,6 +533,10 @@ fn parse_infer(args: &[String]) -> Result<CliCommand, OmniVoiceError> {
             }
             "--asr-model" => {
                 asr_model = Some(required_value(args, index, "--asr-model")?.to_string());
+                index += 2;
+            }
+            "--asr-language" => {
+                asr_language = Some(required_value(args, index, "--asr-language")?.to_string());
                 index += 2;
             }
             "--device" => {
@@ -624,6 +632,7 @@ fn parse_infer(args: &[String]) -> Result<CliCommand, OmniVoiceError> {
         duration,
         speed,
         asr_model,
+        asr_language,
         device,
         dtype,
         num_step,
@@ -1243,6 +1252,7 @@ fn run_infer(
     duration: Option<f32>,
     speed: Option<f32>,
     asr_model: Option<String>,
+    asr_language: Option<String>,
     device: DeviceSpec,
     dtype: DTypeSpec,
     num_step: usize,
@@ -1280,6 +1290,7 @@ fn run_infer(
     request.speeds = vec![speed];
     request.durations = vec![duration];
     request.asr_model = asr_model;
+    request.asr_language = asr_language;
     request.generation_config.num_step = num_step;
     request.generation_config.guidance_scale = guidance_scale;
     request.generation_config.t_shift = t_shift;
@@ -2468,6 +2479,7 @@ fn infer_usage(program: &str) -> String {
             "usage:\n  {program} [--model <path-or-hf-repo>] --text <text> --output <wav> ",
             "[--language <lang>] [--ref_audio <wav>] [--ref_text <text>] [--instruct <text>] ",
             "[--duration <seconds>] [--speed <factor>] [--asr-model <path-or-hf-repo>] ",
+            "[--asr-language <code>] ",
             "[--device {device}] [--dtype auto|f16|bf16|f32] [--num_step <n>] ",
             "[--guidance_scale <value>] [--t_shift <value>] [--layer_penalty_factor <value>] ",
             "[--position_temperature <value>] [--class_temperature <value>] ",
@@ -2545,7 +2557,7 @@ fn usage() -> String {
     [
         "usage:",
         "  omnivoice-cli artifacts validate [--model <path-or-hf-repo>] [--reference-root <path>]",
-        "  omnivoice-cli infer [--model <path-or-hf-repo>] --text <text> --output <wav> [--language <lang>] [--ref-audio <wav>] [--ref-text <text>] [--instruct <text>] [--duration <seconds>] [--speed <factor>] [--asr-model <path-or-hf-repo>] [--device auto|cuda|cuda:N|vulkan|vulkan:N|wgpu|wgpu:N|mps|metal|cpu] [--dtype auto|f16|bf16|f32] [--seed <u64>] [--warmup <n>] [--repeat <n>] [--bench-json <path>]",
+        "  omnivoice-cli infer [--model <path-or-hf-repo>] --text <text> --output <wav> [--language <lang>] [--ref-audio <wav>] [--ref-text <text>] [--instruct <text>] [--duration <seconds>] [--speed <factor>] [--asr-model <path-or-hf-repo>] [--asr-language <code>] [--device auto|cuda|cuda:N|vulkan|vulkan:N|wgpu|wgpu:N|mps|metal|cpu] [--dtype auto|f16|bf16|f32] [--seed <u64>] [--warmup <n>] [--repeat <n>] [--bench-json <path>]",
         "  omnivoice-cli infer-batch [--model <path-or-hf-repo>] --test-list <jsonl> --res-dir <dir> [--device auto|cuda|cuda:N|vulkan|vulkan:N|wgpu|wgpu:N|mps|metal|cpu] [--dtype auto|f16|bf16|f32] [--batch-size <n>] [--batch-duration <seconds>] [--nj-per-gpu <n>] [--warmup <n>]",
         "  omnivoice-cli prepare-prompt [--model <path-or-hf-repo>] --reference-root <path> --case <id> [--device auto|cuda|cuda:N|vulkan|vulkan:N|wgpu|wgpu:N|mps|metal|cpu] [--dtype auto|f16|bf16|f32]",
         "  omnivoice-cli stage1-prepare [--model <path-or-hf-repo>] --reference-root <path> --case <id> [--device auto|cuda|cuda:N|vulkan|vulkan:N|wgpu|wgpu:N|mps|metal|cpu] [--dtype auto|f16|bf16|f32]",

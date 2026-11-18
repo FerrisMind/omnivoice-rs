@@ -143,24 +143,50 @@ impl Phase3Pipeline {
         ref_audio: &ReferenceAudioInput,
         model_name: Option<&str>,
     ) -> Result<String> {
-        let processor = ReferenceAudioProcessor::new(
-            self.runtime_artifacts.contracts().sample_rate,
-            self.runtime_artifacts.contracts().hop_length,
-        );
-        let waveform = processor.load_input(ref_audio)?;
+        self.transcribe_with_language(ref_audio, model_name, None)
+    }
+
+    /// As [`Phase3Pipeline::transcribe`], in a given Whisper language code (`en`, `hi`, `ja`,
+    /// ...), or detected when it is `None`.
+    pub fn transcribe_with_language(
+        &self,
+        ref_audio: &ReferenceAudioInput,
+        model_name: Option<&str>,
+        language: Option<&str>,
+    ) -> Result<String> {
+        let waveform = self.load_reference_waveform(ref_audio)?;
+        self.transcribe_waveform(&waveform, model_name, language)
+    }
+
+    /// The language Whisper detects in a reference recording, as its code (`en`).
+    pub fn detected_language(
+        &self,
+        ref_audio: &ReferenceAudioInput,
+        model_name: Option<&str>,
+    ) -> Result<Option<String>> {
+        let waveform = self.load_reference_waveform(ref_audio)?;
         let samples = crate::audio_input::mono_samples(&waveform.samples, waveform.channels)?;
         self.load_asr_model(model_name)?;
         let mut guard = self.asr.lock().unwrap_or_else(|poison| poison.into_inner());
         let (_, asr) = guard.as_mut().ok_or_else(|| {
             crate::error::OmniVoiceError::InvalidData("ASR model is not loaded".to_string())
         })?;
-        asr.transcribe(&samples, waveform.sample_rate)
+        asr.detected_language(&samples, waveform.sample_rate)
+    }
+
+    fn load_reference_waveform(&self, ref_audio: &ReferenceAudioInput) -> Result<WaveformInput> {
+        let processor = ReferenceAudioProcessor::new(
+            self.runtime_artifacts.contracts().sample_rate,
+            self.runtime_artifacts.contracts().hop_length,
+        );
+        processor.load_input(ref_audio)
     }
 
     fn transcribe_waveform(
         &self,
         waveform: &WaveformInput,
         model_name: Option<&str>,
+        language: Option<&str>,
     ) -> Result<String> {
         let samples = crate::audio_input::mono_samples(&waveform.samples, waveform.channels)?;
         self.load_asr_model(model_name)?;
@@ -168,7 +194,7 @@ impl Phase3Pipeline {
         let (_, asr) = guard.as_mut().ok_or_else(|| {
             crate::error::OmniVoiceError::InvalidData("ASR model is not loaded".to_string())
         })?;
-        asr.transcribe(&samples, waveform.sample_rate)
+        asr.transcribe_with_language(&samples, waveform.sample_rate, language)
     }
 
     pub fn create_voice_clone_prompt_from_audio(
@@ -177,6 +203,26 @@ impl Phase3Pipeline {
         ref_text: Option<&str>,
         preprocess_prompt: bool,
         asr_model: Option<&str>,
+    ) -> Result<VoiceClonePrompt> {
+        self.create_voice_clone_prompt_from_audio_with_language(
+            ref_audio,
+            ref_text,
+            preprocess_prompt,
+            asr_model,
+            None,
+        )
+    }
+
+    /// As [`Phase3Pipeline::create_voice_clone_prompt_from_audio`], transcribing a reference
+    /// without `ref_text` in `asr_language` (a Whisper code such as `hi`) instead of the detected
+    /// language when it is given.
+    pub fn create_voice_clone_prompt_from_audio_with_language(
+        &self,
+        ref_audio: &ReferenceAudioInput,
+        ref_text: Option<&str>,
+        preprocess_prompt: bool,
+        asr_model: Option<&str>,
+        asr_language: Option<&str>,
     ) -> Result<VoiceClonePrompt> {
         let processor = ReferenceAudioProcessor::new(
             self.runtime_artifacts.contracts().sample_rate,
@@ -192,6 +238,7 @@ impl Phase3Pipeline {
                         self.runtime_artifacts.contracts().sample_rate,
                     ),
                     asr_model,
+                    asr_language,
                 )?;
                 if preprocess_prompt {
                     add_punctuation(&resolved_ref_text)
@@ -557,11 +604,12 @@ impl Phase3Pipeline {
                 continue;
             }
             if let Some(ref_audio) = request.ref_audios[index].clone() {
-                let prompt = self.create_voice_clone_prompt_from_audio(
+                let prompt = self.create_voice_clone_prompt_from_audio_with_language(
                     &ref_audio,
                     request.ref_texts[index].as_deref(),
                     request.generation_config.preprocess_prompt,
                     request.asr_model.as_deref(),
+                    request.asr_language.as_deref(),
                 )?;
                 self.validate_ref_rms(prompt.ref_rms, &format!("request item {index}"))?;
                 request.voice_clone_prompts[index] = Some(prompt);
@@ -605,6 +653,7 @@ impl Phase3Pipeline {
                     request.ref_texts[index].as_deref(),
                     request.generation_config.preprocess_prompt,
                     request.asr_model.as_deref(),
+                    request.asr_language.as_deref(),
                 )?;
                 self.validate_ref_rms(prompt.ref_rms, &format!("request item {index}"))?;
                 device_voice_clone_prompts.push(Some(prompt));
@@ -625,6 +674,7 @@ impl Phase3Pipeline {
         ref_text: Option<&str>,
         preprocess_prompt: bool,
         asr_model: Option<&str>,
+        asr_language: Option<&str>,
     ) -> Result<DeviceVoiceClonePrompt> {
         let processor = ReferenceAudioProcessor::new(
             self.runtime_artifacts.contracts().sample_rate,
@@ -641,6 +691,7 @@ impl Phase3Pipeline {
                         self.runtime_artifacts.contracts().sample_rate,
                     ),
                     asr_model,
+                    asr_language,
                 )?;
                 self.ensure_not_cancelled()?;
                 if preprocess_prompt {
