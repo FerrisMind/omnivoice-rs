@@ -338,7 +338,7 @@ fn resolve_model_files(model_id_or_path: &str) -> Result<(PathBuf, PathBuf, Path
     let weights = repo
         .get(&remote_assets.weights)
         .map_err(|error| OmniVoiceError::InvalidData(error.to_string()))?;
-    Ok((config, tokenizer, weights, true))
+    Ok((config, tokenizer, weights, remote_assets.quantized))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -346,6 +346,8 @@ struct WhisperRemoteAssets {
     config: String,
     tokenizer: String,
     weights: String,
+    /// GGUF weights; else the repo's full-precision `model.safetensors`, loaded as F32.
+    quantized: bool,
 }
 
 fn find_remote_whisper_assets(
@@ -357,6 +359,23 @@ fn find_remote_whisper_assets(
             config: find_exact_remote_file(siblings, DEFAULT_WHISPER_CONFIG_FILE)?,
             tokenizer: find_exact_remote_file(siblings, DEFAULT_WHISPER_TOKENIZER_FILE)?,
             weights: find_exact_remote_file(siblings, DEFAULT_WHISPER_Q4_0_FILE)?,
+            quantized: true,
+        });
+    }
+    // No GGUF but full-precision safetensors (`openai/whisper-large-v3-turbo`): load it
+    // unquantized.
+    if !siblings
+        .iter()
+        .any(|sibling| is_supported_whisper_gguf(&sibling.rfilename))
+        && siblings
+            .iter()
+            .any(|sibling| sibling.rfilename == "model.safetensors")
+    {
+        return Ok(WhisperRemoteAssets {
+            config: find_exact_remote_file(siblings, DEFAULT_WHISPER_CONFIG_FILE)?,
+            tokenizer: find_exact_remote_file(siblings, DEFAULT_WHISPER_TOKENIZER_FILE)?,
+            weights: "model.safetensors".to_string(),
+            quantized: false,
         });
     }
 
@@ -368,6 +387,7 @@ fn find_remote_whisper_assets(
             path.ends_with(DEFAULT_WHISPER_TOKENIZER_FILE)
         })?,
         weights: find_remote_whisper_weights(siblings)?,
+        quantized: true,
     })
 }
 
@@ -723,6 +743,53 @@ mod tests {
         assert!(error
             .to_string()
             .contains("whisper-large-v3-turbo-q4_0.gguf"));
+    }
+
+    #[test]
+    fn safetensors_only_remote_repo_loads_full_precision_weights() {
+        let siblings = vec![
+            Siblings {
+                rfilename: "config.json".to_string(),
+            },
+            Siblings {
+                rfilename: "tokenizer.json".to_string(),
+            },
+            Siblings {
+                rfilename: "model.safetensors".to_string(),
+            },
+            Siblings {
+                rfilename: "generation_config.json".to_string(),
+            },
+        ];
+
+        let assets =
+            find_remote_whisper_assets("openai/whisper-large-v3-turbo", &siblings).unwrap();
+
+        assert_eq!(assets.weights, "model.safetensors");
+        assert!(!assets.quantized);
+    }
+
+    #[test]
+    fn gguf_is_preferred_when_a_remote_repo_has_both_formats() {
+        let siblings = vec![
+            Siblings {
+                rfilename: "config.json".to_string(),
+            },
+            Siblings {
+                rfilename: "tokenizer.json".to_string(),
+            },
+            Siblings {
+                rfilename: "model.safetensors".to_string(),
+            },
+            Siblings {
+                rfilename: "whisper-small-q4_0.gguf".to_string(),
+            },
+        ];
+
+        let assets = find_remote_whisper_assets("someone/whisper-small", &siblings).unwrap();
+
+        assert!(assets.weights.ends_with(".gguf"));
+        assert!(assets.quantized);
     }
 
     fn language_tokenizer() -> tokenizers::Tokenizer {
