@@ -156,7 +156,8 @@ impl WhisperAsr {
         language: Option<&str>,
     ) -> Result<String> {
         let audio_features = self.encode(samples, sample_rate)?;
-        let language_token = match language_token(&self.tokenizer, language)? {
+        let language_token = match language_token(&self.tokenizer, &self.language_tokens, language)?
+        {
             Some(token) => Some(token),
             None => self.detect_language(&audio_features)?,
         };
@@ -193,7 +194,8 @@ impl WhisperAsr {
     }
 
     /// The language Whisper detects in the audio, as its code (`en`), or `None` when the model
-    /// has no language tokens.
+    /// has no language tokens. A detected token the tokenizer can't name back is an error, not
+    /// `None`, so the two cases stay apart.
     pub fn detected_language(
         &mut self,
         samples: &[f32],
@@ -203,12 +205,17 @@ impl WhisperAsr {
         let Some(token) = self.detect_language(&audio_features)? else {
             return Ok(None);
         };
-        Ok(self.tokenizer.id_to_token(token).map(|token| {
+        let token = self.tokenizer.id_to_token(token).ok_or_else(|| {
+            OmniVoiceError::InvalidData(format!(
+                "Whisper tokenizer has no token for detected language id {token}"
+            ))
+        })?;
+        Ok(Some(
             token
                 .trim_start_matches("<|")
                 .trim_end_matches("|>")
-                .to_string()
-        }))
+                .to_string(),
+        ))
     }
 
     /// The encoder's features for the audio, resampled to Whisper's 16 kHz.
@@ -506,15 +513,21 @@ fn token_id(tokenizer: &Tokenizer, token: &str) -> Result<u32> {
 }
 
 /// The prompt's language token for a caller-given code (`hi` -> `<|hi|>`), or `None` when no
-/// code is given and Whisper should detect the language.
-fn language_token(tokenizer: &Tokenizer, language: Option<&str>) -> Result<Option<u32>> {
+/// code is given and Whisper should detect the language. Only one of the model's language
+/// tokens is accepted: `startoftranscript` or `translate` exist as `<|...|>` tokens too, but
+/// aren't languages.
+fn language_token(
+    tokenizer: &Tokenizer,
+    language_tokens: &[u32],
+    language: Option<&str>,
+) -> Result<Option<u32>> {
     let Some(code) = language.map(str::trim).filter(|code| !code.is_empty()) else {
         return Ok(None);
     };
     let token = format!("<|{}|>", code.to_ascii_lowercase());
     match tokenizer.token_to_id(&token) {
-        Some(id) => Ok(Some(id)),
-        None => Err(OmniVoiceError::InvalidRequest(format!(
+        Some(id) if language_tokens.binary_search(&id).is_ok() => Ok(Some(id)),
+        _ => Err(OmniVoiceError::InvalidRequest(format!(
             "Whisper has no language token {token} for ASR language `{code}`"
         ))),
     }
@@ -553,8 +566,8 @@ fn mmap_var_builder(
 #[cfg(test)]
 mod tests {
     use super::{
-        default_asr_model_spec, find_remote_whisper_assets, find_remote_whisper_weights,
-        language_token, resolve_model_files, DEFAULT_HF_ASR_MODEL,
+        default_asr_model_spec, find_language_token_ids, find_remote_whisper_assets,
+        find_remote_whisper_weights, language_token, resolve_model_files, DEFAULT_HF_ASR_MODEL,
     };
     use hf_hub::api::Siblings;
     use std::{
@@ -795,7 +808,8 @@ mod tests {
     fn language_tokenizer() -> tokenizers::Tokenizer {
         r#"{"version":"1.0","truncation":null,"padding":null,"added_tokens":[],
             "normalizer":null,"pre_tokenizer":null,"post_processor":null,"decoder":null,
-            "model":{"type":"WordLevel","vocab":{"<|en|>":50259,"<|hi|>":50276,"<|unk|>":0},
+            "model":{"type":"WordLevel","vocab":{"<|en|>":50259,"<|hi|>":50276,
+            "<|startoftranscript|>":50258,"<|translate|>":50358,"<|unk|>":0},
             "unk_token":"<|unk|>"}}"#
             .parse()
             .unwrap()
@@ -804,10 +818,14 @@ mod tests {
     #[test]
     fn a_given_asr_language_becomes_the_prompt_language_token() {
         let tokenizer = language_tokenizer();
+        let languages = find_language_token_ids(&tokenizer);
 
-        assert_eq!(language_token(&tokenizer, Some("hi")).unwrap(), Some(50276));
         assert_eq!(
-            language_token(&tokenizer, Some(" EN ")).unwrap(),
+            language_token(&tokenizer, &languages, Some("hi")).unwrap(),
+            Some(50276)
+        );
+        assert_eq!(
+            language_token(&tokenizer, &languages, Some(" EN ")).unwrap(),
             Some(50259)
         );
     }
@@ -815,16 +833,33 @@ mod tests {
     #[test]
     fn no_asr_language_leaves_the_prompt_to_detection() {
         let tokenizer = language_tokenizer();
+        let languages = find_language_token_ids(&tokenizer);
 
-        assert_eq!(language_token(&tokenizer, None).unwrap(), None);
-        assert_eq!(language_token(&tokenizer, Some("  ")).unwrap(), None);
+        assert_eq!(language_token(&tokenizer, &languages, None).unwrap(), None);
+        assert_eq!(
+            language_token(&tokenizer, &languages, Some("  ")).unwrap(),
+            None
+        );
     }
 
     #[test]
     fn an_unknown_asr_language_is_refused() {
-        let error = language_token(&language_tokenizer(), Some("zz")).unwrap_err();
+        let tokenizer = language_tokenizer();
+        let languages = find_language_token_ids(&tokenizer);
+        let error = language_token(&tokenizer, &languages, Some("zz")).unwrap_err();
 
         assert!(error.to_string().contains("<|zz|>"));
+    }
+
+    #[test]
+    fn a_special_token_is_not_an_asr_language() {
+        let tokenizer = language_tokenizer();
+        let languages = find_language_token_ids(&tokenizer);
+
+        for code in ["startoftranscript", "translate"] {
+            let error = language_token(&tokenizer, &languages, Some(code)).unwrap_err();
+            assert!(error.to_string().contains(&format!("<|{code}|>")));
+        }
     }
 
     #[test]

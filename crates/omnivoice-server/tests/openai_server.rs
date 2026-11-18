@@ -477,6 +477,7 @@ async fn clone_request_maps_extensions_into_generation_request() {
                     "language": "en",
                     "duration": 2.5,
                     "ref_text": "reference text",
+                    "asr_language": "hi",
                     "ref_audio": clone_data_uri(),
                     "instruct": "preferred instruct",
                     "seed": 42,
@@ -500,6 +501,7 @@ async fn clone_request_maps_extensions_into_generation_request() {
         Some("preferred instruct")
     );
     assert_eq!(recorded[0].ref_texts[0].as_deref(), Some("reference text"));
+    assert_eq!(recorded[0].asr_language.as_deref(), Some("hi"));
     assert_eq!(recorded[0].speeds[0], Some(1.25));
     assert!(!recorded[0].generation_config.denoise);
     assert_eq!(recorded[0].generation_config.num_step, 16);
@@ -525,6 +527,7 @@ async fn multipart_clone_request_maps_extensions_into_generation_request() {
             ("language", "en"),
             ("duration", "2.5"),
             ("ref_text", "reference text"),
+            ("asr_language", "hi"),
             ("instruct", "preferred instruct"),
             ("seed", "42"),
             ("num_step", "16"),
@@ -554,6 +557,7 @@ async fn multipart_clone_request_maps_extensions_into_generation_request() {
         Some("preferred instruct")
     );
     assert_eq!(recorded[0].ref_texts[0].as_deref(), Some("reference text"));
+    assert_eq!(recorded[0].asr_language.as_deref(), Some("hi"));
     assert_eq!(recorded[0].speeds[0], Some(1.25));
     assert!(!recorded[0].generation_config.denoise);
     assert_eq!(recorded[0].generation_config.num_step, 16);
