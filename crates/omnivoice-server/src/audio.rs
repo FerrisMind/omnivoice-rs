@@ -125,6 +125,9 @@ fn parse_speech_request(
     if let Some(asr_model) = parse_optional_string(&request.extra, "asr_model")? {
         generation_request.asr_model = Some(asr_model);
     }
+    if let Some(asr_language) = parse_optional_string(&request.extra, "asr_language")? {
+        generation_request.asr_language = Some(asr_language);
+    }
     if let Some(ref_text) = parse_optional_string(&request.extra, "ref_text")? {
         generation_request.ref_texts = vec![Some(ref_text)];
     }

@@ -43,6 +43,8 @@ cargo run -p omnivoice-cli -- infer `
 ### 2. Voice Clone
 
 Reference audio plus reference text, or reference audio with ASR fallback when `--ref-text` is omitted.
+Whisper detects the reference's language; pass `--asr-language <code>` (for example `hi`) to name it when
+detection picks the wrong one.
 
 ```powershell
 cargo run -p omnivoice-cli -- infer `
@@ -190,6 +192,7 @@ Optional request extensions accepted by this server:
 - `ref_audio` as a base64 data URI
 - `instruct`
 - `asr_model`
+- `asr_language`
 - `seed`
 - `num_step`
 - `guidance_scale`

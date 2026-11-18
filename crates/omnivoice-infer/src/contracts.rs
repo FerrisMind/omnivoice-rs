@@ -381,6 +381,9 @@ pub struct GenerationRequest {
     pub speeds: Vec<Option<f32>>,
     pub durations: Vec<Option<f32>>,
     pub asr_model: Option<String>,
+    /// Whisper language code (`en`, `hi`, ...) for transcribing reference audio that has no
+    /// `ref_text`; `None` lets Whisper detect it.
+    pub asr_language: Option<String>,
     pub generation_config: GenerationConfig,
 }
 
@@ -396,6 +399,7 @@ impl GenerationRequest {
             speeds: vec![None],
             durations: vec![None],
             asr_model: None,
+            asr_language: None,
             generation_config: GenerationConfig::default(),
         }
     }
@@ -432,6 +436,11 @@ impl GenerationRequest {
 
     pub fn with_asr_model(mut self, asr_model: impl Into<String>) -> Self {
         self.asr_model = Some(asr_model.into());
+        self
+    }
+
+    pub fn with_asr_language(mut self, asr_language: impl Into<String>) -> Self {
+        self.asr_language = Some(asr_language.into());
         self
     }
 

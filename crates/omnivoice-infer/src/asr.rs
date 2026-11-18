@@ -141,32 +141,28 @@ impl WhisperAsr {
     }
 
     pub fn transcribe(&mut self, samples: &[f32], sample_rate: u32) -> Result<String> {
-        if samples.is_empty() {
-            return Err(OmniVoiceError::InvalidRequest(
-                "ASR input audio is empty".to_string(),
-            ));
-        }
-        if let Some(index) = samples.iter().position(|sample| !sample.is_finite()) {
-            return Err(OmniVoiceError::InvalidRequest(format!(
-                "ASR input sample at index {index} is not finite"
-            )));
-        }
-        if sample_rate == 0 {
-            return Err(OmniVoiceError::InvalidRequest(
-                "ASR input sample rate must be greater than zero".to_string(),
-            ));
-        }
-        let pcm = if sample_rate == whisper::SAMPLE_RATE as u32 {
-            samples.to_vec()
-        } else {
-            crate::audio_input::resample_linear(samples, sample_rate, whisper::SAMPLE_RATE as u32)
+        self.transcribe_with_language(samples, sample_rate, None)
+    }
+
+    /// Transcribes in `language` (a Whisper language code such as `en`, `hi`, `ja`), or in the
+    /// language Whisper detects when it is `None`. Detection can pick the wrong language on short
+    /// clips, noisy recordings and lower-resource languages; the transcript then comes out in the
+    /// wrong language or is hallucinated, and voice cloning gets a reference text that doesn't
+    /// match its audio. A caller that knows the reference's language can name it here.
+    pub fn transcribe_with_language(
+        &mut self,
+        samples: &[f32],
+        sample_rate: u32,
+        language: Option<&str>,
+    ) -> Result<String> {
+        let audio_features = self.encode(samples, sample_rate)?;
+        let language_token = match language_token(&self.tokenizer, &self.language_tokens, language)?
+        {
+            Some(token) => Some(token),
+            None => self.detect_language(&audio_features)?,
         };
-        let mel = whisper::audio::pcm_to_mel(&self.config, &pcm, &self.mel_filters);
-        let mel_len = mel.len() / self.config.num_mel_bins;
-        let mel = Tensor::from_vec(mel, (1, self.config.num_mel_bins, mel_len), &self.device)?;
-        let audio_features = self.model.encoder_forward(&mel, true)?;
         let mut tokens = vec![self.sot_token];
-        if let Some(language_token) = self.detect_language(&audio_features)? {
+        if let Some(language_token) = language_token {
             tokens.push(language_token);
         }
         tokens.extend([self.transcribe_token, self.no_timestamps_token]);
@@ -195,6 +191,59 @@ impl WhisperAsr {
             .decode(&tokens, true)
             .map(|text| text.trim().to_string())
             .map_err(Into::into)
+    }
+
+    /// The language Whisper detects in the audio, as its code (`en`), or `None` when the model
+    /// has no language tokens. A detected token the tokenizer can't name back is an error, not
+    /// `None`, so the two cases stay apart.
+    pub fn detected_language(
+        &mut self,
+        samples: &[f32],
+        sample_rate: u32,
+    ) -> Result<Option<String>> {
+        let audio_features = self.encode(samples, sample_rate)?;
+        let Some(token) = self.detect_language(&audio_features)? else {
+            return Ok(None);
+        };
+        let token = self.tokenizer.id_to_token(token).ok_or_else(|| {
+            OmniVoiceError::InvalidData(format!(
+                "Whisper tokenizer has no token for detected language id {token}"
+            ))
+        })?;
+        Ok(Some(
+            token
+                .trim_start_matches("<|")
+                .trim_end_matches("|>")
+                .to_string(),
+        ))
+    }
+
+    /// The encoder's features for the audio, resampled to Whisper's 16 kHz.
+    fn encode(&mut self, samples: &[f32], sample_rate: u32) -> Result<Tensor> {
+        if samples.is_empty() {
+            return Err(OmniVoiceError::InvalidRequest(
+                "ASR input audio is empty".to_string(),
+            ));
+        }
+        if let Some(index) = samples.iter().position(|sample| !sample.is_finite()) {
+            return Err(OmniVoiceError::InvalidRequest(format!(
+                "ASR input sample at index {index} is not finite"
+            )));
+        }
+        if sample_rate == 0 {
+            return Err(OmniVoiceError::InvalidRequest(
+                "ASR input sample rate must be greater than zero".to_string(),
+            ));
+        }
+        let pcm = if sample_rate == whisper::SAMPLE_RATE as u32 {
+            samples.to_vec()
+        } else {
+            crate::audio_input::resample_linear(samples, sample_rate, whisper::SAMPLE_RATE as u32)
+        };
+        let mel = whisper::audio::pcm_to_mel(&self.config, &pcm, &self.mel_filters);
+        let mel_len = mel.len() / self.config.num_mel_bins;
+        let mel = Tensor::from_vec(mel, (1, self.config.num_mel_bins, mel_len), &self.device)?;
+        self.model.encoder_forward(&mel, true)
     }
 
     fn detect_language(&mut self, audio_features: &Tensor) -> Result<Option<u32>> {
@@ -296,7 +345,7 @@ fn resolve_model_files(model_id_or_path: &str) -> Result<(PathBuf, PathBuf, Path
     let weights = repo
         .get(&remote_assets.weights)
         .map_err(|error| OmniVoiceError::InvalidData(error.to_string()))?;
-    Ok((config, tokenizer, weights, true))
+    Ok((config, tokenizer, weights, remote_assets.quantized))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -304,6 +353,8 @@ struct WhisperRemoteAssets {
     config: String,
     tokenizer: String,
     weights: String,
+    /// GGUF weights; else the repo's full-precision `model.safetensors`, loaded as F32.
+    quantized: bool,
 }
 
 fn find_remote_whisper_assets(
@@ -315,6 +366,23 @@ fn find_remote_whisper_assets(
             config: find_exact_remote_file(siblings, DEFAULT_WHISPER_CONFIG_FILE)?,
             tokenizer: find_exact_remote_file(siblings, DEFAULT_WHISPER_TOKENIZER_FILE)?,
             weights: find_exact_remote_file(siblings, DEFAULT_WHISPER_Q4_0_FILE)?,
+            quantized: true,
+        });
+    }
+    // No GGUF but full-precision safetensors (`openai/whisper-large-v3-turbo`): load it
+    // unquantized.
+    if !siblings
+        .iter()
+        .any(|sibling| is_supported_whisper_gguf(&sibling.rfilename))
+        && siblings
+            .iter()
+            .any(|sibling| sibling.rfilename == "model.safetensors")
+    {
+        return Ok(WhisperRemoteAssets {
+            config: find_exact_remote_file(siblings, DEFAULT_WHISPER_CONFIG_FILE)?,
+            tokenizer: find_exact_remote_file(siblings, DEFAULT_WHISPER_TOKENIZER_FILE)?,
+            weights: "model.safetensors".to_string(),
+            quantized: false,
         });
     }
 
@@ -326,6 +394,7 @@ fn find_remote_whisper_assets(
             path.ends_with(DEFAULT_WHISPER_TOKENIZER_FILE)
         })?,
         weights: find_remote_whisper_weights(siblings)?,
+        quantized: true,
     })
 }
 
@@ -443,6 +512,27 @@ fn token_id(tokenizer: &Tokenizer, token: &str) -> Result<u32> {
     })
 }
 
+/// The prompt's language token for a caller-given code (`hi` -> `<|hi|>`), or `None` when no
+/// code is given and Whisper should detect the language. Only one of the model's language
+/// tokens is accepted: `startoftranscript` or `translate` exist as `<|...|>` tokens too, but
+/// aren't languages.
+fn language_token(
+    tokenizer: &Tokenizer,
+    language_tokens: &[u32],
+    language: Option<&str>,
+) -> Result<Option<u32>> {
+    let Some(code) = language.map(str::trim).filter(|code| !code.is_empty()) else {
+        return Ok(None);
+    };
+    let token = format!("<|{}|>", code.to_ascii_lowercase());
+    match tokenizer.token_to_id(&token) {
+        Some(id) if language_tokens.binary_search(&id).is_ok() => Ok(Some(id)),
+        _ => Err(OmniVoiceError::InvalidRequest(format!(
+            "Whisper has no language token {token} for ASR language `{code}`"
+        ))),
+    }
+}
+
 fn find_language_token_ids(tokenizer: &Tokenizer) -> Vec<u32> {
     let mut language_tokens = tokenizer
         .get_vocab(true)
@@ -476,8 +566,8 @@ fn mmap_var_builder(
 #[cfg(test)]
 mod tests {
     use super::{
-        default_asr_model_spec, find_remote_whisper_assets, find_remote_whisper_weights,
-        resolve_model_files, DEFAULT_HF_ASR_MODEL,
+        default_asr_model_spec, find_language_token_ids, find_remote_whisper_assets,
+        find_remote_whisper_weights, language_token, resolve_model_files, DEFAULT_HF_ASR_MODEL,
     };
     use hf_hub::api::Siblings;
     use std::{
@@ -666,6 +756,110 @@ mod tests {
         assert!(error
             .to_string()
             .contains("whisper-large-v3-turbo-q4_0.gguf"));
+    }
+
+    #[test]
+    fn safetensors_only_remote_repo_loads_full_precision_weights() {
+        let siblings = vec![
+            Siblings {
+                rfilename: "config.json".to_string(),
+            },
+            Siblings {
+                rfilename: "tokenizer.json".to_string(),
+            },
+            Siblings {
+                rfilename: "model.safetensors".to_string(),
+            },
+            Siblings {
+                rfilename: "generation_config.json".to_string(),
+            },
+        ];
+
+        let assets =
+            find_remote_whisper_assets("openai/whisper-large-v3-turbo", &siblings).unwrap();
+
+        assert_eq!(assets.weights, "model.safetensors");
+        assert!(!assets.quantized);
+    }
+
+    #[test]
+    fn gguf_is_preferred_when_a_remote_repo_has_both_formats() {
+        let siblings = vec![
+            Siblings {
+                rfilename: "config.json".to_string(),
+            },
+            Siblings {
+                rfilename: "tokenizer.json".to_string(),
+            },
+            Siblings {
+                rfilename: "model.safetensors".to_string(),
+            },
+            Siblings {
+                rfilename: "whisper-small-q4_0.gguf".to_string(),
+            },
+        ];
+
+        let assets = find_remote_whisper_assets("someone/whisper-small", &siblings).unwrap();
+
+        assert!(assets.weights.ends_with(".gguf"));
+        assert!(assets.quantized);
+    }
+
+    fn language_tokenizer() -> tokenizers::Tokenizer {
+        r#"{"version":"1.0","truncation":null,"padding":null,"added_tokens":[],
+            "normalizer":null,"pre_tokenizer":null,"post_processor":null,"decoder":null,
+            "model":{"type":"WordLevel","vocab":{"<|en|>":50259,"<|hi|>":50276,
+            "<|startoftranscript|>":50258,"<|translate|>":50358,"<|unk|>":0},
+            "unk_token":"<|unk|>"}}"#
+            .parse()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_given_asr_language_becomes_the_prompt_language_token() {
+        let tokenizer = language_tokenizer();
+        let languages = find_language_token_ids(&tokenizer);
+
+        assert_eq!(
+            language_token(&tokenizer, &languages, Some("hi")).unwrap(),
+            Some(50276)
+        );
+        assert_eq!(
+            language_token(&tokenizer, &languages, Some(" EN ")).unwrap(),
+            Some(50259)
+        );
+    }
+
+    #[test]
+    fn no_asr_language_leaves_the_prompt_to_detection() {
+        let tokenizer = language_tokenizer();
+        let languages = find_language_token_ids(&tokenizer);
+
+        assert_eq!(language_token(&tokenizer, &languages, None).unwrap(), None);
+        assert_eq!(
+            language_token(&tokenizer, &languages, Some("  ")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn an_unknown_asr_language_is_refused() {
+        let tokenizer = language_tokenizer();
+        let languages = find_language_token_ids(&tokenizer);
+        let error = language_token(&tokenizer, &languages, Some("zz")).unwrap_err();
+
+        assert!(error.to_string().contains("<|zz|>"));
+    }
+
+    #[test]
+    fn a_special_token_is_not_an_asr_language() {
+        let tokenizer = language_tokenizer();
+        let languages = find_language_token_ids(&tokenizer);
+
+        for code in ["startoftranscript", "translate"] {
+            let error = language_token(&tokenizer, &languages, Some(code)).unwrap_err();
+            assert!(error.to_string().contains(&format!("<|{code}|>")));
+        }
     }
 
     #[test]
