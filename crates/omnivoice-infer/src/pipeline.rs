@@ -39,9 +39,8 @@ static STAGE_TIME_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new(
 static STAGE_TIMINGS: Mutex<Vec<(&'static str, f64)>> = Mutex::new(Vec::new());
 
 fn stage_time_enabled() -> bool {
-    *STAGE_TIME_ENABLED.get_or_init(|| {
-        std::env::var("OMNIVOICE_STAGE_TIME").is_ok_and(|value| value == "1")
-    })
+    *STAGE_TIME_ENABLED
+        .get_or_init(|| std::env::var("OMNIVOICE_STAGE_TIME").is_ok_and(|value| value == "1"))
 }
 
 fn record_stage(name: &'static str, started: &std::time::Instant) {
@@ -79,11 +78,13 @@ impl Phase3Pipeline {
         let runtime_artifacts = options.load_runtime_artifacts()?;
         let frontend = Frontend::from_runtime_artifacts(&runtime_artifacts)?;
         let shared_device = options.resolve_device()?;
-        let audio_tokenizer = Some(AudioTokenizerRuntimePlan::from_runtime_artifacts_with_device(
-            options.clone(),
-            &runtime_artifacts,
-            shared_device.clone(),
-        )?);
+        let audio_tokenizer = Some(
+            AudioTokenizerRuntimePlan::from_runtime_artifacts_with_device(
+                options.clone(),
+                &runtime_artifacts,
+                shared_device.clone(),
+            )?,
+        );
         let stage0 = Stage0RuntimePlan::from_runtime_artifacts_with_device(
             options.clone(),
             &runtime_artifacts,

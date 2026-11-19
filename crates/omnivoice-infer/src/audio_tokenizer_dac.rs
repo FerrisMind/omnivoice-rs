@@ -33,7 +33,16 @@ impl AcousticEncoder {
         let d_model = config.acoustic_encoder_hidden_size
             * (1usize << config.acoustic_downsampling_ratios.len());
         Ok(Self {
-            conv1: ws.pp("conv1").load_conv1d(1, config.acoustic_encoder_hidden_size, 7, 1, 3, 1, true, 1)?,
+            conv1: ws.pp("conv1").load_conv1d(
+                1,
+                config.acoustic_encoder_hidden_size,
+                7,
+                1,
+                3,
+                1,
+                true,
+                1,
+            )?,
             blocks,
             snake1: Snake1d::load(d_model, &ws.pp("snake1"))?,
             conv2: ws.pp("conv2").load_conv1d(
@@ -116,18 +125,13 @@ impl ResidualUnit {
         let padding = ((7 - 1) * dilation) / 2;
         Ok(Self {
             snake1: Snake1d::load(dimension, &ws.pp("snake1"))?,
-            conv1: ws.pp("conv1").load_conv1d(
-                dimension,
-                dimension,
-                7,
-                1,
-                padding,
-                dilation,
-                true,
-                1,
-            )?,
+            conv1: ws
+                .pp("conv1")
+                .load_conv1d(dimension, dimension, 7, 1, padding, dilation, true, 1)?,
             snake2: Snake1d::load(dimension, &ws.pp("snake2"))?,
-            conv2: ws.pp("conv2").load_conv1d(dimension, dimension, 1, 1, 0, 1, true, 1)?,
+            conv2: ws
+                .pp("conv2")
+                .load_conv1d(dimension, dimension, 1, 1, 0, 1, true, 1)?,
         })
     }
 

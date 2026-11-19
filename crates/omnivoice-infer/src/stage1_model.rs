@@ -140,7 +140,9 @@ impl VectorQuantizer {
     ) -> Result<Self> {
         Ok(Self {
             codebook: ws.load_embedding_at(codebook_size, codebook_dim, "codebook.embed")?,
-            project_out: ws.pp("project_out").load_linear(codebook_dim, output_dim, true)?,
+            project_out: ws
+                .pp("project_out")
+                .load_linear(codebook_dim, output_dim, true)?,
         })
     }
 
@@ -281,9 +283,7 @@ impl ResidualUnit {
                 ((7 - 1) * dilation) / 2,
             )?,
             snake2: Snake1d::load(dim, &ws.pp("snake2"))?,
-            conv2: ws
-                .pp("conv2")
-                .load_conv1d_flexible(dim, dim, 1, 1, 0)?,
+            conv2: ws.pp("conv2").load_conv1d_flexible(dim, dim, 1, 1, 0)?,
         })
     }
 }
@@ -362,12 +362,8 @@ impl AcousticDecoder {
         let mut channels = config.decoder_hidden_dim;
         let mut blocks = Vec::with_capacity(config.decoder_strides.len());
         for (index, stride) in config.decoder_strides.iter().enumerate() {
-            let block = DecoderBlock::load(
-                channels,
-                channels / 2,
-                *stride,
-                &ws.pp("block").pp(index),
-            )?;
+            let block =
+                DecoderBlock::load(channels, channels / 2, *stride, &ws.pp("block").pp(index))?;
             channels /= 2;
             blocks.push(block);
         }

@@ -6,8 +6,8 @@ use serde::Deserialize;
 
 use crate::{
     artifacts::{
-        gguf_array_usize, gguf_f64, gguf_u32, AudioTokenizerArtifacts,
-        GgufBundleArtifacts, RuntimeArtifacts,
+        gguf_array_usize, gguf_f64, gguf_u32, AudioTokenizerArtifacts, GgufBundleArtifacts,
+        RuntimeArtifacts,
     },
     codec_layers::{CodecLinear, CodecWeightSource},
     error::{OmniVoiceError, Result},
@@ -178,18 +178,16 @@ impl AudioTokenizerModelConfig {
             acoustic_encoder_hidden_size,
             acoustic_downsampling_ratios,
             semantic_hidden_size: gguf_u32(&content, "omnivoice.semantic.hidden_size")? as usize,
-            semantic_intermediate_size: gguf_u32(
-                &content,
-                "omnivoice.semantic.intermediate_size",
-            )? as usize,
+            semantic_intermediate_size: gguf_u32(&content, "omnivoice.semantic.intermediate_size")?
+                as usize,
             semantic_num_heads: gguf_u32(&content, "omnivoice.semantic.num_attention_heads")?
                 as usize,
             semantic_num_layers: gguf_u32(&content, "omnivoice.semantic.num_hidden_layers")?
                 as usize,
             semantic_layer_norm_eps: gguf_f64(&content, "omnivoice.semantic.layer_norm_eps")?,
-            semantic_conv_bias: content.tensor_infos.contains_key(
-                "semantic_model.feature_extractor.conv_layers.0.conv.bias",
-            ),
+            semantic_conv_bias: content
+                .tensor_infos
+                .contains_key("semantic_model.feature_extractor.conv_layers.0.conv.bias"),
             semantic_conv_dim: gguf_array_usize(&content, "omnivoice.semantic.conv_dim")?,
             semantic_conv_kernel: gguf_array_usize(&content, "omnivoice.semantic.conv_kernel")?,
             semantic_conv_stride: gguf_array_usize(&content, "omnivoice.semantic.conv_stride")?,

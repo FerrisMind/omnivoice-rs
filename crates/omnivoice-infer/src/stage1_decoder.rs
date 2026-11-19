@@ -11,10 +11,7 @@ use regex::Regex;
 use serde::Deserialize;
 
 use crate::{
-    artifacts::{
-        AudioTokenizerArtifacts, GgufBundleArtifacts, RuntimeArtifacts,
-        RuntimeContracts,
-    },
+    artifacts::{AudioTokenizerArtifacts, GgufBundleArtifacts, RuntimeArtifacts, RuntimeContracts},
     codec_layers::CodecWeightSource,
     contracts::{DecodedAudio, F32Tensor3, GeneratedTokens, I64Tensor2},
     error::{OmniVoiceError, Result},
@@ -586,7 +583,7 @@ impl Stage1RuntimePlan {
                 &self.device,
             )
             .and_then(|ws| Stage1Model::load(&ws, self.bundle.model_config()))
-                .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())
         });
         match result {
             Ok(model) => Ok(model),
@@ -1010,7 +1007,9 @@ fn read_safetensor_header(
         .collect()
 }
 
-fn read_gguf_header(path: impl AsRef<Path>) -> Result<std::collections::BTreeMap<String, SafetensorHeaderEntry>> {
+fn read_gguf_header(
+    path: impl AsRef<Path>,
+) -> Result<std::collections::BTreeMap<String, SafetensorHeaderEntry>> {
     let path = path.as_ref();
     let mut file = fs::File::open(path)?;
     let content = gguf_file::Content::read(&mut file)?;

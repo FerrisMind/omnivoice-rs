@@ -407,7 +407,9 @@ fn resolve_gguf_candidate(model_root: &Path, patterns: &[&str], fallback: &str) 
     if fallback_path.is_file() {
         return Ok(fallback_path);
     }
-    Err(OmniVoiceError::MissingArtifact { path: fallback_path })
+    Err(OmniVoiceError::MissingArtifact {
+        path: fallback_path,
+    })
 }
 
 fn read_gguf_content(path: &Path) -> Result<gguf_file::Content> {
@@ -416,16 +418,18 @@ fn read_gguf_content(path: &Path) -> Result<gguf_file::Content> {
 }
 
 pub(crate) fn gguf_u32(content: &gguf_file::Content, key: &str) -> Result<u32> {
-    let value = content.metadata.get(key).ok_or_else(|| {
-        OmniVoiceError::InvalidData(format!("missing GGUF metadata key `{key}`"))
-    })?;
+    let value = content
+        .metadata
+        .get(key)
+        .ok_or_else(|| OmniVoiceError::InvalidData(format!("missing GGUF metadata key `{key}`")))?;
     gguf_value_u32(value, key)
 }
 
 pub(crate) fn gguf_f64(content: &gguf_file::Content, key: &str) -> Result<f64> {
-    let value = content.metadata.get(key).ok_or_else(|| {
-        OmniVoiceError::InvalidData(format!("missing GGUF metadata key `{key}`"))
-    })?;
+    let value = content
+        .metadata
+        .get(key)
+        .ok_or_else(|| OmniVoiceError::InvalidData(format!("missing GGUF metadata key `{key}`")))?;
     match value {
         gguf_file::Value::F32(v) => Ok((*v).into()),
         gguf_file::Value::F64(v) => Ok(*v),
@@ -436,9 +440,10 @@ pub(crate) fn gguf_f64(content: &gguf_file::Content, key: &str) -> Result<f64> {
 }
 
 pub(crate) fn gguf_array_usize(content: &gguf_file::Content, key: &str) -> Result<Vec<usize>> {
-    let value = content.metadata.get(key).ok_or_else(|| {
-        OmniVoiceError::InvalidData(format!("missing GGUF metadata key `{key}`"))
-    })?;
+    let value = content
+        .metadata
+        .get(key)
+        .ok_or_else(|| OmniVoiceError::InvalidData(format!("missing GGUF metadata key `{key}`")))?;
     let items = value.to_vec().map_err(|_| {
         OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` is not an array"))
     })?;
@@ -462,9 +467,8 @@ fn gguf_value_u32(value: &gguf_file::Value, key: &str) -> Result<u32> {
         gguf_file::Value::I32(v) if *v >= 0 => Ok(*v as u32),
         gguf_file::Value::U64(v) => u32::try_from(*v)
             .map_err(|_| OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` exceeds u32"))),
-        gguf_file::Value::I64(v) if *v >= 0 => u32::try_from(*v).map_err(|_| {
-            OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` exceeds u32"))
-        }),
+        gguf_file::Value::I64(v) if *v >= 0 => u32::try_from(*v)
+            .map_err(|_| OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` exceeds u32"))),
         other => Err(OmniVoiceError::InvalidData(format!(
             "GGUF metadata `{key}` is not a non-negative integer: {other:?}"
         ))),

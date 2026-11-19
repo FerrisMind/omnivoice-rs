@@ -134,10 +134,7 @@ impl DTypeSpec {
 }
 
 fn device_prefers_f16_activations(device: &Device) -> bool {
-    device.is_cuda()
-        || device.is_metal()
-        || device.is_vulkan()
-        || device.is_wgpu()
+    device.is_cuda() || device.is_metal() || device.is_vulkan() || device.is_wgpu()
 }
 
 pub(crate) fn activation_dtype_for_weights(
@@ -301,7 +298,8 @@ fn resolve_auto_device() -> Result<Device> {
                 #[cfg(not(feature = "wgpu"))]
                 let _ = index;
             }
-            DeviceSpec::Metal => {
+            DeviceSpec::Metal =>
+            {
                 #[cfg(all(feature = "metal", target_os = "macos"))]
                 if let Ok(device) = Device::new_metal(0) {
                     return Ok(device);
@@ -401,7 +399,10 @@ mod tests {
         assert_eq!(DeviceSpec::parse("cpu").unwrap(), DeviceSpec::Cpu);
         assert_eq!(DeviceSpec::parse("cuda:3").unwrap(), DeviceSpec::Cuda(3));
         assert_eq!(DeviceSpec::parse("metal").unwrap(), DeviceSpec::Metal);
-        assert_eq!(DeviceSpec::parse("vulkan:1").unwrap(), DeviceSpec::Vulkan(1));
+        assert_eq!(
+            DeviceSpec::parse("vulkan:1").unwrap(),
+            DeviceSpec::Vulkan(1)
+        );
         assert_eq!(DeviceSpec::parse("wgpu:2").unwrap(), DeviceSpec::Wgpu(2));
     }
 

@@ -22,9 +22,9 @@ pub mod stage0_qwen3_quantized;
 pub mod stage1_decoder;
 pub mod stage1_model;
 
+pub use artifacts::ModelWeightDType;
 pub use contracts::{BoolTensor2, BoolTensor4, GeneratedAudioResult, GenerationUsage};
 pub use error::{OmniVoiceError, Result};
-pub use artifacts::ModelWeightDType;
 pub use runtime::{DTypeSpec, DeviceSpec, RuntimeOptions};
 
 pub fn workspace_phase_marker() -> &'static str {

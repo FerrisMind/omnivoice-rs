@@ -3,9 +3,9 @@ use candle_nn::{GroupNorm, LayerNorm};
 
 use crate::{
     audio_tokenizer::parse_activation,
+    audio_tokenizer::AudioTokenizerModelConfig,
     codec_layers::{CodecConv1d, CodecLinear, CodecWeightSource},
     error::{OmniVoiceError, Result},
-    audio_tokenizer::AudioTokenizerModelConfig,
 };
 
 #[derive(Debug)]
@@ -19,7 +19,10 @@ impl HubertModel {
     pub(crate) fn load(config: &AudioTokenizerModelConfig, ws: &CodecWeightSource) -> Result<Self> {
         Ok(Self {
             feature_extractor: HubertFeatureExtractor::load(config, &ws.pp("feature_extractor"))?,
-            feature_projection: HubertFeatureProjection::load(config, &ws.pp("feature_projection"))?,
+            feature_projection: HubertFeatureProjection::load(
+                config,
+                &ws.pp("feature_projection"),
+            )?,
             encoder: HubertEncoder::load(config, &ws.pp("encoder"))?,
         })
     }
@@ -82,11 +85,7 @@ impl HubertFeatureExtractor {
                 1,
             )?;
             let group_norm = if layer_index == 0 {
-                Some(load_group_norm(
-                    &layer_ws.pp("layer_norm"),
-                    out_dim,
-                    1e-5,
-                )?)
+                Some(load_group_norm(&layer_ws.pp("layer_norm"), out_dim, 1e-5)?)
             } else {
                 None
             };
@@ -507,16 +506,9 @@ impl SemanticResidualUnit {
                 false,
                 1,
             )?,
-            conv2: ws.pp("conv2").load_conv1d(
-                out_channels,
-                out_channels,
-                1,
-                1,
-                0,
-                1,
-                false,
-                1,
-            )?,
+            conv2: ws
+                .pp("conv2")
+                .load_conv1d(out_channels, out_channels, 1, 1, 0, 1, false, 1)?,
         })
     }
 

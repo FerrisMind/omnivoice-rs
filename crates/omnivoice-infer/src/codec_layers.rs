@@ -1,9 +1,6 @@
 //! GGUF-friendly codec weights: keep Linear/Embedding packed; dequant Conv only per forward.
 
-use std::{
-    path::Path,
-    sync::Arc,
-};
+use std::{path::Path, sync::Arc};
 
 use candle_core::{
     quantized::{GgmlDType, QMatMul, QTensor},
@@ -73,9 +70,7 @@ impl QuantizedEmbedding {
             }
             _ => unreachable!("QuantizedEmbedding holds exactly one weight variant"),
         };
-        hidden
-            .to_dtype(self.activation_dtype)
-            .map_err(Into::into)
+        hidden.to_dtype(self.activation_dtype).map_err(Into::into)
     }
 
     /// Full codebook materialization for VQ distance search (encode path only).
@@ -114,9 +109,7 @@ impl Module for CodecEmbedding {
     fn forward(&self, xs: &Tensor) -> CandleResult<Tensor> {
         match &self.inner {
             CodecEmbeddingInner::Dense(layer) => layer.forward(xs),
-            CodecEmbeddingInner::Quantized(layer) => {
-                layer.forward(xs).map_err(codec_candle_err)
-            }
+            CodecEmbeddingInner::Quantized(layer) => layer.forward(xs).map_err(codec_candle_err),
         }
     }
 }
@@ -296,7 +289,8 @@ impl CodecWeightSource {
         } else {
             let paths = [path];
             // SAFETY: read-only mmap of immutable weight files for process lifetime.
-            let vb = unsafe { VarBuilder::from_mmaped_safetensors(&paths, activation_dtype, device)? };
+            let vb =
+                unsafe { VarBuilder::from_mmaped_safetensors(&paths, activation_dtype, device)? };
             Ok(Self {
                 inner: CodecWeightSourceInner::Dense(vb),
             })
@@ -383,11 +377,7 @@ impl CodecWeightSource {
         }
     }
 
-    pub fn load_embedding(
-        &self,
-        vocab_size: usize,
-        hidden_size: usize,
-    ) -> Result<CodecEmbedding> {
+    pub fn load_embedding(&self, vocab_size: usize, hidden_size: usize) -> Result<CodecEmbedding> {
         match &self.inner {
             CodecWeightSourceInner::Dense(vb) => Ok(CodecEmbedding {
                 inner: CodecEmbeddingInner::Dense(Embedding::new(
@@ -619,7 +609,8 @@ impl CodecWeightSource {
         };
         match &self.inner {
             CodecWeightSourceInner::Dense(vb) => {
-                if let Ok(weight) = vb.get((out_channels, in_channels_per_group, kernel_size), "weight")
+                if let Ok(weight) =
+                    vb.get((out_channels, in_channels_per_group, kernel_size), "weight")
                 {
                     return Ok(CodecConv1d {
                         inner: CodecConv1dInner::Dense(Conv1d::new(

@@ -302,10 +302,7 @@ fn is_local_whisper_bundle(path: &Path) -> bool {
         && path.join(DEFAULT_WHISPER_CONFIG_FILE).is_file()
         && path.join(DEFAULT_WHISPER_TOKENIZER_FILE).is_file()
         && (path.join("model.safetensors").is_file()
-            || find_local_whisper_weights(path)
-                .ok()
-                .flatten()
-                .is_some())
+            || find_local_whisper_weights(path).ok().flatten().is_some())
 }
 
 fn resolve_model_files(model_id_or_path: &str) -> Result<(PathBuf, PathBuf, PathBuf, bool)> {

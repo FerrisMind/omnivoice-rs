@@ -8,15 +8,13 @@ use std::{
     },
 };
 
-use candle_core::{
-    quantized::QMatMul,
-    DType, Device, IndexOp, Module, Tensor,
-};
+use candle_core::{quantized::QMatMul, DType, Device, IndexOp, Module, Tensor};
 use candle_nn::{Embedding, Linear, VarBuilder};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use safetensors::SafeTensors;
 use serde::Deserialize;
 
+use crate::codec_layers::QuantizedEmbedding;
 use crate::{
     artifacts::{GeneratorArtifacts, GgufBundleArtifacts, RuntimeArtifacts},
     contracts::{
@@ -28,7 +26,6 @@ use crate::{
     stage0_qwen3::{Stage0ForwardPass, Stage0Qwen3Backbone, Stage0Qwen3Config},
     stage0_qwen3_quantized::{keep_quantized_matmul, Stage0Qwen3QuantizedBackbone},
 };
-use crate::codec_layers::QuantizedEmbedding;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LocalQwen3Config {
@@ -369,12 +366,18 @@ impl Stage0BackboneKind {
         flash_seqlens: Option<&[usize]>,
     ) -> Result<Stage0ForwardPass> {
         match self {
-            Self::Dense(model) => {
-                model.forward_embeds_with_flash(input_embeds, attention_mask, capture_layers, flash_seqlens)
-            }
-            Self::Quantized(model) => {
-                model.forward_embeds_with_flash(input_embeds, attention_mask, capture_layers, flash_seqlens)
-            }
+            Self::Dense(model) => model.forward_embeds_with_flash(
+                input_embeds,
+                attention_mask,
+                capture_layers,
+                flash_seqlens,
+            ),
+            Self::Quantized(model) => model.forward_embeds_with_flash(
+                input_embeds,
+                attention_mask,
+                capture_layers,
+                flash_seqlens,
+            ),
         }
     }
 }
@@ -1056,8 +1059,7 @@ impl Stage0Model {
         cached_text_embeds: Option<&Tensor>,
         flash_seqlens: Option<&[usize]>,
     ) -> Result<Stage0ForwardOutputs> {
-        let inputs_embeds =
-            self.prepare_embed_inputs(input_ids, audio_mask, cached_text_embeds)?;
+        let inputs_embeds = self.prepare_embed_inputs(input_ids, audio_mask, cached_text_embeds)?;
         let backbone = self.backbone.forward_embeds_with_flash(
             &inputs_embeds,
             Some(attention_mask),
@@ -1267,9 +1269,7 @@ fn gumbel_argmax(logits: &Tensor, temperature: f32) -> Result<Tensor> {
         return logits.argmax(candle_core::D::Minus1).map_err(Into::into);
     }
     let scores = apply_gumbel_noise(logits, temperature)?;
-    scores
-        .argmax(candle_core::D::Minus1)
-        .map_err(Into::into)
+    scores.argmax(candle_core::D::Minus1).map_err(Into::into)
 }
 
 /// Device-side Gumbel noise matching PyTorch OmniVoice `_gumbel_sample`.
@@ -1367,7 +1367,9 @@ fn build_position_gumbel_bank(
     }
     let mut values = Vec::new();
     for step in 0..num_step {
-        let needs = schedules.iter().any(|s| s.get(step).copied().unwrap_or(0) > 0);
+        let needs = schedules
+            .iter()
+            .any(|s| s.get(step).copied().unwrap_or(0) > 0);
         if needs {
             for _ in 0..flat {
                 values.push(sample_gumbel(cpu_rng));
@@ -1772,7 +1774,10 @@ fn mmap_var_builder(
     Ok(unsafe { VarBuilder::from_mmaped_safetensors(&paths, dtype, device)? })
 }
 
-fn gguf_metadata_usize(content: &candle_core::quantized::gguf_file::Content, key: &str) -> Result<usize> {
+fn gguf_metadata_usize(
+    content: &candle_core::quantized::gguf_file::Content,
+    key: &str,
+) -> Result<usize> {
     match content.metadata.get(key) {
         Some(candle_core::quantized::gguf_file::Value::U8(v)) => Ok((*v).into()),
         Some(candle_core::quantized::gguf_file::Value::I8(v)) if *v >= 0 => Ok(*v as usize),
@@ -1780,14 +1785,15 @@ fn gguf_metadata_usize(content: &candle_core::quantized::gguf_file::Content, key
         Some(candle_core::quantized::gguf_file::Value::I16(v)) if *v >= 0 => Ok(*v as usize),
         Some(candle_core::quantized::gguf_file::Value::U32(v)) => Ok(*v as usize),
         Some(candle_core::quantized::gguf_file::Value::I32(v)) if *v >= 0 => Ok(*v as usize),
-        Some(candle_core::quantized::gguf_file::Value::U64(v)) => usize::try_from(*v).map_err(|_| {
-            OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` exceeds usize"))
-        }),
-        Some(candle_core::quantized::gguf_file::Value::I64(v)) if *v >= 0 => {
+        Some(candle_core::quantized::gguf_file::Value::U64(v)) => {
             usize::try_from(*v).map_err(|_| {
                 OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` exceeds usize"))
             })
         }
+        Some(candle_core::quantized::gguf_file::Value::I64(v)) if *v >= 0 => usize::try_from(*v)
+            .map_err(|_| {
+                OmniVoiceError::InvalidData(format!("GGUF metadata `{key}` exceeds usize"))
+            }),
         Some(other) => Err(OmniVoiceError::InvalidData(format!(
             "GGUF metadata `{key}` is not a non-negative integer: {other:?}"
         ))),
@@ -1797,7 +1803,10 @@ fn gguf_metadata_usize(content: &candle_core::quantized::gguf_file::Content, key
     }
 }
 
-fn gguf_metadata_f64(content: &candle_core::quantized::gguf_file::Content, key: &str) -> Result<f64> {
+fn gguf_metadata_f64(
+    content: &candle_core::quantized::gguf_file::Content,
+    key: &str,
+) -> Result<f64> {
     match content.metadata.get(key) {
         Some(candle_core::quantized::gguf_file::Value::F32(v)) => Ok((*v).into()),
         Some(candle_core::quantized::gguf_file::Value::F64(v)) => Ok(*v),
