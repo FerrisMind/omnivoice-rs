@@ -57,17 +57,20 @@ fn metal_f32_pipeline() -> Phase3Pipeline {
 #[test]
 fn phase7_stage0_metal_auto_matches_dense_reference() {
     let _guard = acquire_gpu_test_lock().unwrap();
-    let generated = metal_f32_pipeline()
-        .generate_stage0_from_reference_case(reference_root(), "det_auto_en_short")
+    let debug = metal_f32_pipeline()
+        .debug_stage0_from_reference_case(reference_root(), "det_auto_en_short")
         .unwrap();
+    for (name, metric) in &debug.parity_metrics.metrics {
+        println!("{name}: {metric:?}");
+    }
     let reference = ReferenceArtifactBundle::from_root(reference_root())
         .unwrap()
         .case_by_id("det_auto_en_short")
         .unwrap()
         .load_generated_tokens()
         .unwrap();
-    match (&generated, &reference) {
-        (GeneratedTokens::Single(actual), GeneratedTokens::Single(expected)) => {
+    match (&debug.tokens, &reference) {
+        (actual, GeneratedTokens::Single(expected)) => {
             report_single_token_drift("det_auto_en_short", actual, expected);
             assert_eq!(actual, expected);
         }
