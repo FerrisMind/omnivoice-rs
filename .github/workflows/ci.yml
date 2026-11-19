@@ -71,6 +71,10 @@ jobs:
       # .cargo/config.toml sets target-cpu=native; on Apple Silicon runners
       # that baseline breaks ring 0.17.14's aarch64-darwin feature assertions.
       RUSTFLAGS: ""
+      # Metal's fast-math shaders diverge from the F32 oracle enough to flip
+      # stage0 argmax/confidence ordering. Compile the parity suite with
+      # precise math.
+      CANDLE_METAL_ENABLE_FAST_MATH: "0"
 
     steps:
       - name: Checkout
