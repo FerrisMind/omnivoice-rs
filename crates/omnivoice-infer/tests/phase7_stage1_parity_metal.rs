@@ -24,6 +24,11 @@ fn phase7_stage1_metal_dense_auto_matches_reference() {
     let debug = metal_f32_pipeline()
         .debug_stage1_from_reference_case(reference_root(), "det_auto_en_short")
         .unwrap();
+    for (name, metric) in &debug.tensor_metrics {
+        println!("{name}: {metric:?}");
+    }
+    println!("raw_audio: {:?}", debug.raw_audio_metrics);
+    println!("final_audio: {:?}", debug.final_audio_metrics);
     assert!(debug.tensor_metrics.contains_key("quantizer_output"));
     assert!(debug.tensor_metrics.contains_key("project_out"));
     assert!(debug.tensor_metrics.contains_key("fc2_output"));
