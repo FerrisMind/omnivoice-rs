@@ -1142,9 +1142,10 @@ fn run_artifacts_validate(
     println!("phase_marker={}", workspace_phase_marker());
     println!(
         "runtime_manifest={}",
-        runtime
-            .manifest_path()
-            .map_or_else(|| "<gguf-bundle>".to_string(), |path| path.display().to_string())
+        runtime.manifest_path().map_or_else(
+            || "<gguf-bundle>".to_string(),
+            |path| path.display().to_string()
+        )
     );
     println!("model_root={}", runtime.model_root().display());
     if let Some(gguf) = runtime.gguf_bundle() {
@@ -1211,7 +1212,10 @@ fn run_artifacts_validate(
         );
         println!(
             "audio_tokenizer_preprocessor={}",
-            runtime.audio_tokenizer()?.preprocessor_config_path().display()
+            runtime
+                .audio_tokenizer()?
+                .preprocessor_config_path()
+                .display()
         );
         println!(
             "audio_tokenizer_prefixes={}",
@@ -1303,7 +1307,10 @@ fn run_infer(
     request.generation_config.audio_chunk_duration = audio_chunk_duration;
     request.generation_config.audio_chunk_threshold = audio_chunk_threshold;
 
-    let has_ref_audio = request.ref_audios.iter().any(|reference| reference.is_some());
+    let has_ref_audio = request
+        .ref_audios
+        .iter()
+        .any(|reference| reference.is_some());
 
     // Bench harness support: warmup iterations are run and discarded BEFORE the
     // timed loop so weights are resident; marker lines on stdout are the sync
