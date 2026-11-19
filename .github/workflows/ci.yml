@@ -33,6 +33,28 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+  linux-vulkan:
+    name: Linux Vulkan Build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Vulkan build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential glslc
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Vulkan binaries
+        run: cargo build --locked --workspace --features omnivoice-cli/vulkan,omnivoice-server/vulkan
+
   macos-metal:
     name: macOS Metal
     runs-on: macos-15
