@@ -41,10 +41,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Vulkan build dependencies
+      - name: Install Vulkan shader compiler
         run: |
+          # Ubuntu's glslc predates GL_EXT_integer_dot_product, which Candle's
+          # Q8K kernels require. Install the LunarG shaderc package instead.
+          curl -fsSL https://packages.lunarg.com/lunarg-signing-key-pub.asc \
+            | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc >/dev/null
+          echo "deb https://packages.lunarg.com/vulkan/1.4.313 noble main" \
+            | sudo tee /etc/apt/sources.list.d/lunarg-vulkan.list
           sudo apt-get update
-          sudo apt-get install -y build-essential glslc
+          sudo apt-get install -y --no-install-recommends shaderc
+          glslc --version
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
