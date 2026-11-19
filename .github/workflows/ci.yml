@@ -273,8 +273,14 @@ jobs:
           cargo test -p omnivoice-infer --features metal \
             --test phase7_stage0_parity_metal -- --test-threads=1 --nocapture
 
+      - name: Check metal stage1 parity
+        continue-on-error: true
+        run: |
+          cargo test -p omnivoice-infer --features metal \
+            --test phase5_stage1_decode_metal -- --test-threads=1 --nocapture
+
       - name: Run omnivoice-infer tests (metal)
-        run: cargo test -p omnivoice-infer --features metal -- --test-threads=1 --no-fail-fast
+        run: cargo test -p omnivoice-infer --features metal --no-fail-fast -- --test-threads=1
 
       - name: Run omnivoice-cli tests (metal)
         run: cargo test -p omnivoice-cli --features metal -- --test-threads=1
