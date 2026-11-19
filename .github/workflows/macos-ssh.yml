@@ -14,8 +14,8 @@ permissions:
 
 jobs:
   macos-ssh:
-    name: macOS 14 SSH session
-    runs-on: macos-14
+    name: macOS 15 SSH session
+    runs-on: macos-15
     timeout-minutes: 360
 
     steps:

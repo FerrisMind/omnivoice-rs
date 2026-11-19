@@ -21,7 +21,7 @@ env:
 jobs:
   macos-arm64:
     name: macOS arm64 (Metal)
-    runs-on: macos-14
+    runs-on: macos-15
 
     steps:
       - name: Clone
@@ -99,7 +99,7 @@ jobs:
 
   macos-universal-cpu:
     name: macOS universal (CPU)
-    runs-on: macos-14
+    runs-on: macos-15
 
     steps:
       - name: Clone
