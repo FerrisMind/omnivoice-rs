@@ -1584,6 +1584,18 @@ fn apply_step_updates_device(
     } else {
         selection_scores
     };
+    // Metal's flat arg-sort/scatter update path leaves audio-mask tokens in the
+    // result and drifts from the CUDA oracle. The update set is tiny
+    // (codebooks * target length), so rank it on the host for Metal.
+    if current_tokens.device().is_metal() {
+        return apply_step_updates_metal_host(
+            current_tokens,
+            predicted_tokens,
+            &selection_scores,
+            mask_id,
+            update_count,
+        );
+    }
     let available_mask = current_tokens.eq(mask_id)?;
     let neg_inf = Tensor::full(
         f32::NEG_INFINITY,
@@ -1613,6 +1625,53 @@ fn apply_step_updates_device(
     updated
         .reshape(current_tokens.shape().dims())
         .map_err(Into::into)
+}
+
+fn apply_step_updates_metal_host(
+    current_tokens: &Tensor,
+    predicted_tokens: &Tensor,
+    selection_scores: &Tensor,
+    mask_id: i64,
+    update_count: usize,
+) -> Result<Tensor> {
+    let shape = current_tokens.shape().clone();
+    let mut current = current_tokens
+        .to_device(&Device::Cpu)?
+        .to_dtype(DType::I64)?
+        .flatten_all()?
+        .to_vec1::<i64>()?;
+    let predicted = predicted_tokens
+        .to_device(&Device::Cpu)?
+        .to_dtype(DType::I64)?
+        .flatten_all()?
+        .to_vec1::<i64>()?;
+    let scores = selection_scores
+        .to_device(&Device::Cpu)?
+        .to_dtype(DType::F32)?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+    if predicted.len() != current.len() || scores.len() != current.len() {
+        return Err(OmniVoiceError::InvalidData(
+            "Metal step update tensors have inconsistent element counts".to_string(),
+        ));
+    }
+
+    let mut candidates: Vec<(usize, f32)> = current
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| **token == mask_id)
+        .map(|(index, _)| (index, scores[index]))
+        .collect();
+    candidates.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    for (index, _) in candidates.into_iter().take(update_count) {
+        current[index] = predicted[index];
+    }
+    Tensor::from_vec(current, shape, current_tokens.device()).map_err(Into::into)
 }
 
 fn tensor_parity_metric(actual: &[f32], expected: &[f32]) -> Result<Stage0ParityMetric> {
