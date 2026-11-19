@@ -186,6 +186,50 @@ jobs:
           path: omnivoice-${{ steps.tag.outputs.name }}-bin-ubuntu-x64.tar.gz
           name: omnivoice-bin-ubuntu-x64.tar.gz
 
+  ubuntu-vulkan:
+    name: Ubuntu x64 (Vulkan)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Vulkan build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential glslc
+
+      - name: Build release binaries
+        run: cargo build --locked --release --features vulkan -p omnivoice-cli -p omnivoice-server
+
+      - name: Determine tag name
+        id: tag
+        uses: ./.github/actions/get-tag-name
+
+      - name: Pack artifacts
+        shell: bash
+        run: |
+          ROOT_DIR="$RUNNER_TEMP/${{ env.RELEASE_STAGING_PREFIX }}-${{ steps.tag.outputs.name }}"
+          mkdir -p "$ROOT_DIR"
+          cp target/release/omnivoice-cli "$ROOT_DIR/"
+          cp target/release/omnivoice-server "$ROOT_DIR/"
+          cp LICENSE THIRD_PARTY_LICENSES.md README.md "$ROOT_DIR/"
+          tar -czvf omnivoice-${{ steps.tag.outputs.name }}-bin-ubuntu-vulkan-x64.tar.gz -C "$RUNNER_TEMP" "${{ env.RELEASE_STAGING_PREFIX }}-${{ steps.tag.outputs.name }}"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          path: omnivoice-${{ steps.tag.outputs.name }}-bin-ubuntu-vulkan-x64.tar.gz
+          name: omnivoice-bin-ubuntu-vulkan-x64.tar.gz
+
   ubuntu-cuda:
     name: Ubuntu x64 (CUDA 12.6)
     runs-on: ubuntu-24.04
@@ -299,6 +343,62 @@ jobs:
           path: omnivoice-${{ steps.tag.outputs.name }}-bin-win-cpu-x64.zip
           name: omnivoice-bin-win-cpu-x64.zip
 
+  windows-vulkan:
+    name: Windows x64 (Vulkan)
+    runs-on: windows-2022
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          choco install vulkan-sdk --version=1.4.363.1 --no-progress -y
+          $sdk = Get-ChildItem 'C:\VulkanSDK' -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $sdk -or -not (Test-Path (Join-Path $sdk.FullName 'Bin\glslc.exe'))) {
+            throw 'Vulkan SDK installation is missing Bin\glslc.exe'
+          }
+          "VULKAN_SDK=$($sdk.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Join-Path $sdk.FullName 'Bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & (Join-Path $sdk.FullName 'Bin\glslc.exe') --version
+
+      - name: Build release binaries
+        shell: pwsh
+        run: cargo build --locked --release --features vulkan -p omnivoice-cli -p omnivoice-server
+
+      - name: Determine tag name
+        id: tag
+        uses: ./.github/actions/get-tag-name
+
+      - name: Pack artifacts
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "${{ env.RELEASE_STAGING_PREFIX }}-${{ steps.tag.outputs.name }}"
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          Copy-Item target\release\omnivoice-cli.exe $root
+          Copy-Item target\release\omnivoice-server.exe $root
+          Copy-Item LICENSE $root
+          Copy-Item THIRD_PARTY_LICENSES.md $root
+          Copy-Item README.md $root
+          Push-Location $env:RUNNER_TEMP
+          7z a -snl "$env:GITHUB_WORKSPACE\omnivoice-${{ steps.tag.outputs.name }}-bin-win-vulkan-x64.zip" "${{ env.RELEASE_STAGING_PREFIX }}-${{ steps.tag.outputs.name }}"
+          Pop-Location
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          path: omnivoice-${{ steps.tag.outputs.name }}-bin-win-vulkan-x64.zip
+          name: omnivoice-bin-win-vulkan-x64.zip
+
   windows-cuda:
     name: Windows x64 (CUDA 12.6)
     runs-on: windows-2022
@@ -395,8 +495,10 @@ jobs:
       - macos-x64
       - macos-universal-cpu
       - ubuntu-cpu
+      - ubuntu-vulkan
       - ubuntu-cuda
       - windows-cpu
+      - windows-vulkan
       - windows-cuda
 
     steps:
@@ -443,11 +545,13 @@ jobs:
 
             **Linux:**
             - [Ubuntu x64 (CPU)](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/omnivoice-${{ steps.tag.outputs.name }}-bin-ubuntu-x64.tar.gz)
+            - [Ubuntu x64 (Vulkan)](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/omnivoice-${{ steps.tag.outputs.name }}-bin-ubuntu-vulkan-x64.tar.gz)
             - [Ubuntu x64 (CUDA 12.6)](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/omnivoice-${{ steps.tag.outputs.name }}-bin-ubuntu-cuda-12.6-x64.tar.gz)
             - [Ubuntu x64 (CUDA 12.6 runtime libs)](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/cudart-omnivoice-${{ steps.tag.outputs.name }}-bin-ubuntu-cuda-12.6-x64.tar.gz)
 
             **Windows:**
             - [Windows x64 (CPU)](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/omnivoice-${{ steps.tag.outputs.name }}-bin-win-cpu-x64.zip)
+            - [Windows x64 (Vulkan)](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/omnivoice-${{ steps.tag.outputs.name }}-bin-win-vulkan-x64.zip)
             - [Windows x64 (CUDA 12.6)](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/omnivoice-${{ steps.tag.outputs.name }}-bin-win-cuda-12.6-x64.zip)
             - [Windows x64 (CUDA 12.6 DLLs)](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.name }}/cudart-omnivoice-${{ steps.tag.outputs.name }}-bin-win-cuda-12.6-x64.zip)
 
