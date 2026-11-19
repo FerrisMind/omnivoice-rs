@@ -155,9 +155,9 @@ impl WhisperAsr {
         sample_rate: u32,
         language: Option<&str>,
     ) -> Result<String> {
+        let explicit_language = language_token(&self.tokenizer, &self.language_tokens, language)?;
         let audio_features = self.encode(samples, sample_rate)?;
-        let language_token = match language_token(&self.tokenizer, &self.language_tokens, language)?
-        {
+        let language_token = match explicit_language {
             Some(token) => Some(token),
             None => self.detect_language(&audio_features)?,
         };
