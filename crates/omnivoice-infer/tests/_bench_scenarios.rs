@@ -41,20 +41,15 @@ fn default_dtype() -> String {
 }
 
 fn parse_device(s: &str) -> DeviceSpec {
-    if s == "cpu" {
-        DeviceSpec::Cpu
-    } else if s == "cuda" || s == "cuda:0" {
-        DeviceSpec::Cuda(0)
-    } else if let Some(rest) = s.strip_prefix("cuda:") {
-        DeviceSpec::Cuda(rest.parse().expect("cuda index"))
-    } else {
-        panic!("unsupported device {s}");
-    }
+    DeviceSpec::parse(s).expect("valid bench device")
 }
 
 #[test]
 fn bench_listening_scenarios() {
-    let path = std::env::var("OMNIVOICE_BENCH_CONFIG").expect("OMNIVOICE_BENCH_CONFIG");
+    let Ok(path) = std::env::var("OMNIVOICE_BENCH_CONFIG") else {
+        eprintln!("skipping bench_listening_scenarios: OMNIVOICE_BENCH_CONFIG is not set");
+        return;
+    };
     let cfg: BenchConfig =
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).expect("config json");
     let model = PathBuf::from(&cfg.model);

@@ -17,10 +17,15 @@ fn runtime_options_default_to_auto_gpu_first() {
 
     assert_eq!(options.device(), DeviceSpec::Auto);
     assert_eq!(options.dtype(), DTypeSpec::Auto);
-    let _ = device;
+    // Auto dtype follows the resolved device: CPU uses F32, GPU backends F16.
+    let expected_dtype = if device.is_cpu() {
+        DType::F32
+    } else {
+        DType::F16
+    };
     assert_eq!(
         options.resolve_dtype_for_runtime_device(&device),
-        DType::F32
+        expected_dtype
     );
 }
 
