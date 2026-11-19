@@ -1787,12 +1787,10 @@ fn decode_i64(view: &TensorView<'_>) -> Result<Vec<i64>> {
     }
     Ok(view
         .data()
-        .chunks_exact(8)
-        .map(|chunk| {
-            let mut array = [0_u8; 8];
-            array.copy_from_slice(chunk);
-            i64::from_le_bytes(array)
-        })
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|chunk| i64::from_le_bytes(*chunk))
         .collect())
 }
 
@@ -1805,12 +1803,10 @@ fn decode_f32(view: &TensorView<'_>) -> Result<Vec<f32>> {
     }
     Ok(view
         .data()
-        .chunks_exact(4)
-        .map(|chunk| {
-            let mut array = [0_u8; 4];
-            array.copy_from_slice(chunk);
-            f32::from_le_bytes(array)
-        })
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect())
 }
 
@@ -1823,12 +1819,10 @@ fn decode_f16(view: &TensorView<'_>) -> Result<Vec<f32>> {
     }
     Ok(view
         .data()
-        .chunks_exact(2)
-        .map(|chunk| {
-            let mut array = [0_u8; 2];
-            array.copy_from_slice(chunk);
-            f16::from_bits(u16::from_le_bytes(array)).to_f32()
-        })
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|chunk| f16::from_bits(u16::from_le_bytes(*chunk)).to_f32())
         .collect())
 }
 
@@ -1841,12 +1835,10 @@ fn decode_bf16(view: &TensorView<'_>) -> Result<Vec<f32>> {
     }
     Ok(view
         .data()
-        .chunks_exact(2)
-        .map(|chunk| {
-            let mut array = [0_u8; 2];
-            array.copy_from_slice(chunk);
-            bf16::from_bits(u16::from_le_bytes(array)).to_f32()
-        })
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|chunk| bf16::from_bits(u16::from_le_bytes(*chunk)).to_f32())
         .collect())
 }
 

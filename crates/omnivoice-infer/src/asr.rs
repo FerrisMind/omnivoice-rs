@@ -508,8 +508,8 @@ fn load_mel_filters(num_mel_bins: usize) -> Result<Vec<f32>> {
         }
     };
     let mut filters = Vec::with_capacity(bytes.len() / 4);
-    for chunk in bytes.chunks_exact(4) {
-        filters.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    for chunk in bytes.as_chunks::<4>().0 {
+        filters.push(f32::from_le_bytes(*chunk));
     }
     Ok(filters)
 }
