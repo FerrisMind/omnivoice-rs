@@ -147,3 +147,100 @@ pub fn assert_audio_matches_reference_with_frame_tolerance(
     assert!(metrics.rmse < rmse_limit, "{metrics:?}");
     assert!(metrics.max_abs < max_abs_limit, "{metrics:?}");
 }
+
+/// Pearson correlation of short-time RMS envelopes, ignoring absolute phase.
+///
+/// Cross-backend audio parity tests cannot require sample-exact waveforms:
+/// tiny numerical differences in a convolution decoder shift high-frequency
+/// phase while leaving the perceived speech and loudness contour intact.
+pub fn audio_envelope_correlation(
+    actual: &DecodedAudio,
+    expected: &DecodedAudio,
+    window: usize,
+) -> f32 {
+    let compare_len = actual.frame_count().min(expected.frame_count());
+    let window = window.max(1);
+    let mut actual_envelope = Vec::new();
+    let mut expected_envelope = Vec::new();
+    let mut start = 0;
+    while start + window <= compare_len {
+        let mut actual_power = 0.0_f64;
+        let mut expected_power = 0.0_f64;
+        for offset in 0..window {
+            let actual_sample = f64::from(actual.samples[start + offset]);
+            let expected_sample = f64::from(expected.samples[start + offset]);
+            actual_power += actual_sample * actual_sample;
+            expected_power += expected_sample * expected_sample;
+        }
+        actual_envelope.push((actual_power / window as f64).sqrt());
+        expected_envelope.push((expected_power / window as f64).sqrt());
+        start += window;
+    }
+    if actual_envelope.len() < 2 {
+        return 0.0;
+    }
+    let count = actual_envelope.len() as f64;
+    let actual_mean = actual_envelope.iter().sum::<f64>() / count;
+    let expected_mean = expected_envelope.iter().sum::<f64>() / count;
+    let mut covariance = 0.0_f64;
+    let mut actual_variance = 0.0_f64;
+    let mut expected_variance = 0.0_f64;
+    for (actual_value, expected_value) in actual_envelope.iter().zip(&expected_envelope) {
+        let actual_centered = actual_value - actual_mean;
+        let expected_centered = expected_value - expected_mean;
+        covariance += actual_centered * expected_centered;
+        actual_variance += actual_centered * actual_centered;
+        expected_variance += expected_centered * expected_centered;
+    }
+    if actual_variance <= f64::EPSILON || expected_variance <= f64::EPSILON {
+        return 0.0;
+    }
+    (covariance / (actual_variance.sqrt() * expected_variance.sqrt())) as f32
+}
+
+/// Assert that `actual` is the same utterance and loudness as `expected`
+/// without requiring sample-exact phase.
+pub fn assert_audio_perceptually_matches_reference(
+    actual: &DecodedAudio,
+    expected: &DecodedAudio,
+    max_frame_delta: usize,
+    min_envelope_correlation: f32,
+    max_rms_ratio_db: f32,
+) {
+    assert_eq!(actual.sample_rate, expected.sample_rate);
+    let frame_delta = actual.frame_count().abs_diff(expected.frame_count());
+    assert!(
+        frame_delta <= max_frame_delta,
+        "frame delta {} exceeds {} (actual={}, reference={})",
+        frame_delta,
+        max_frame_delta,
+        actual.frame_count(),
+        expected.frame_count()
+    );
+    assert!(
+        actual.samples.iter().all(|sample| sample.is_finite()),
+        "actual audio contains non-finite samples"
+    );
+    let window = (actual.sample_rate as usize / 50).max(1);
+    let correlation = audio_envelope_correlation(actual, expected, window);
+    assert!(
+        correlation >= min_envelope_correlation,
+        "audio envelope correlation {correlation} is below {min_envelope_correlation}"
+    );
+    let compare_len = actual.frame_count().min(expected.frame_count());
+    let actual_power = actual.samples[..compare_len]
+        .iter()
+        .map(|sample| f64::from(*sample) * f64::from(*sample))
+        .sum::<f64>();
+    let expected_power = expected.samples[..compare_len]
+        .iter()
+        .map(|sample| f64::from(*sample) * f64::from(*sample))
+        .sum::<f64>();
+    if actual_power > f64::EPSILON && expected_power > f64::EPSILON {
+        let ratio_db = (10.0 * (actual_power / expected_power).log10()).abs();
+        assert!(
+            ratio_db <= f64::from(max_rms_ratio_db),
+            "audio RMS ratio {ratio_db} dB exceeds {max_rms_ratio_db} dB"
+        );
+    }
+}

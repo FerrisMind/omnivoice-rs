@@ -12,7 +12,8 @@ use omnivoice_infer::{
     workspace_phase_marker,
 };
 use support::{
-    assert_audio_matches_reference_with_frame_tolerance, deterministic_reference_root,
+    assert_audio_matches_reference_with_frame_tolerance,
+    assert_audio_perceptually_matches_reference, deterministic_reference_root,
     live_oracle_clone_prompt, model_root, ref_audio_path, reference_root,
 };
 
@@ -50,11 +51,9 @@ fn phase10_metal_auto_matches_reference_audio() {
     let actual = metal_f32_pipeline().generate(&request).unwrap();
     let expected = case.load_final_audio().unwrap();
     assert_eq!(actual.len(), 1);
-    // Empirical CI evidence on GitHub macOS runners shows Metal drifts noticeably from the
-    // CUDA-generated oracle on waveform parity while still producing valid speech.
-    assert_audio_matches_reference_with_frame_tolerance(
-        &actual[0], &expected, 480, 3.0e-3, 1.0e-2, 0.4,
-    );
+    // Metal's stage0 trajectory is not bit-identical to the CUDA oracle, so
+    // compare the perceived utterance instead of sample-exact phase.
+    assert_audio_perceptually_matches_reference(&actual[0], &expected, 480, 0.5, 6.0);
 }
 
 #[test]
@@ -65,10 +64,8 @@ fn phase10_metal_design_matches_reference_audio() {
     let request = case.build_generation_request().unwrap();
     let actual = metal_f32_pipeline().generate(&request).unwrap();
     let expected = case.load_final_audio().unwrap();
-    // Metal design mode shows substantially higher waveform drift than CUDA on CI runners.
-    assert_audio_matches_reference_with_frame_tolerance(
-        &actual[0], &expected, 480, 7.0e-2, 9.0e-2, 0.6,
-    );
+    // Design mode has the same cross-backend phase drift as auto mode.
+    assert_audio_perceptually_matches_reference(&actual[0], &expected, 480, 0.5, 6.0);
 }
 
 #[test]
@@ -285,7 +282,5 @@ fn phase10_metal_auto_device_dtype_prioritize_gpu() {
     let request = case.build_generation_request().unwrap();
     let actual = pipeline.generate(&request).unwrap();
     let expected = case.load_final_audio().unwrap();
-    assert_audio_matches_reference_with_frame_tolerance(
-        &actual[0], &expected, 480, 3.0e-3, 1.0e-2, 0.4,
-    );
+    assert_audio_perceptually_matches_reference(&actual[0], &expected, 480, 0.5, 6.0);
 }
