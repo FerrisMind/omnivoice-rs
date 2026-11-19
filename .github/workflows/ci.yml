@@ -267,8 +267,14 @@ jobs:
       - name: Run clippy (metal)
         run: cargo clippy --workspace --all-targets --features metal -- -D warnings
 
+      - name: Check metal stage0 parity
+        continue-on-error: true
+        run: |
+          cargo test -p omnivoice-infer --features metal \
+            --test phase7_stage0_parity_metal -- --test-threads=1 --nocapture
+
       - name: Run omnivoice-infer tests (metal)
-        run: cargo test -p omnivoice-infer --features metal -- --test-threads=1
+        run: cargo test -p omnivoice-infer --features metal -- --test-threads=1 --no-fail-fast
 
       - name: Run omnivoice-cli tests (metal)
         run: cargo test -p omnivoice-cli --features metal -- --test-threads=1
