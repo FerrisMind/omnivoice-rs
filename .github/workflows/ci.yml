@@ -61,6 +61,9 @@ jobs:
     env:
       OMNIVOICE_ROOT: ${{ github.workspace }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      # .cargo/config.toml sets target-cpu=native; on Apple Silicon runners
+      # that baseline breaks ring 0.17.14's aarch64-darwin feature assertions.
+      RUSTFLAGS: ""
 
     steps:
       - name: Checkout
