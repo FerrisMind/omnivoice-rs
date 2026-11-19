@@ -1,0 +1,70 @@
+version: 2.1
+
+commands:
+  restore-cargo-cache:
+    steps:
+      - restore_cache:
+          keys:
+            - cargo-{{ checksum "Cargo.lock" }}
+            - cargo-
+
+  save-cargo-cache:
+    steps:
+      - save_cache:
+          key: cargo-{{ checksum "Cargo.lock" }}
+          paths:
+            - ~/.cargo/registry
+            - ~/.cargo/git
+
+  install-vulkan-shaderc:
+    steps:
+      - run:
+          name: Install Vulkan shader compiler
+          # Ubuntu 22.04's glslc predates GL_EXT_integer_dot_product, which
+          # Candle's Q8K kernels require. Use LunarG's shaderc package instead.
+          command: |
+            curl -fsSL https://packages.lunarg.com/lunarg-signing-key-pub.asc \
+              | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc >/dev/null
+            echo "deb https://packages.lunarg.com/vulkan/1.4.313 jammy main" \
+              | sudo tee /etc/apt/sources.list.d/lunarg-vulkan.list
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends shaderc
+            glslc --version
+
+jobs:
+  test:
+    docker:
+      - image: cimg/rust:1.100.0
+    steps:
+      - checkout
+      - restore-cargo-cache
+      - run:
+          name: Fetch dependencies
+          command: cargo fetch --locked
+      - save-cargo-cache
+      - run:
+          name: Run workspace tests
+          command: cargo test --workspace --locked
+          no_output_timeout: 30m
+
+  vulkan-build:
+    docker:
+      - image: cimg/rust:1.100.0
+    steps:
+      - checkout
+      - restore-cargo-cache
+      - run:
+          name: Fetch dependencies
+          command: cargo fetch --locked
+      - save-cargo-cache
+      - install-vulkan-shaderc
+      - run:
+          name: Build workspace with Vulkan
+          command: cargo build --locked --workspace --features omnivoice-cli/vulkan,omnivoice-server/vulkan
+          no_output_timeout: 30m
+
+workflows:
+  ci:
+    jobs:
+      - test
+      - vulkan-build
