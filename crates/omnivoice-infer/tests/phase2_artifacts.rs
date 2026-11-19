@@ -106,7 +106,11 @@ fn runtime_loader_allows_missing_optional_chat_template() {
 
     let artifacts = RuntimeArtifacts::from_model_root(temp.path()).unwrap();
 
-    assert!(artifacts.text_tokenizer().unwrap().chat_template_path().is_none());
+    assert!(artifacts
+        .text_tokenizer()
+        .unwrap()
+        .chat_template_path()
+        .is_none());
 }
 
 #[test]

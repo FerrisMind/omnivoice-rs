@@ -242,10 +242,7 @@ fn phase6_stage0_cuda_stage1_smoke_matches_reference_audio() {
     let _guard = acquire_gpu_test_lock().unwrap();
     let pipeline = cuda_f32_pipeline();
     let generated = pipeline
-        .generate_stage0_from_reference_case(
-            cuda_debug_reference_root(),
-            "det_debug_auto_en_short",
-        )
+        .generate_stage0_from_reference_case(cuda_debug_reference_root(), "det_debug_auto_en_short")
         .unwrap();
     let bundle = ReferenceArtifactBundle::from_root(cuda_debug_reference_root()).unwrap();
     let case = bundle.case_by_id("det_debug_auto_en_short").unwrap();

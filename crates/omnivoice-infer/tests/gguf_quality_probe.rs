@@ -32,10 +32,7 @@ fn zcr(samples: &[f32]) -> f32 {
     if samples.len() < 2 {
         return 0.0;
     }
-    let crosses = samples
-        .windows(2)
-        .filter(|w| w[0] * w[1] < 0.0)
-        .count();
+    let crosses = samples.windows(2).filter(|w| w[0] * w[1] < 0.0).count();
     crosses as f32 / (samples.len() - 1) as f32
 }
 

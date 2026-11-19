@@ -1,4 +1,3 @@
-
 use omnivoice_infer::contracts::{GenerationRequest, ReferenceAudioInput};
 use omnivoice_infer::pipeline::Phase3Pipeline;
 use omnivoice_infer::runtime::{DTypeSpec, DeviceSpec, RuntimeOptions};
@@ -124,7 +123,8 @@ fn bench_listening_scenarios() {
                         }
                     }
                 } else {
-                    req.ref_audios = vec![Some(ReferenceAudioInput::from_path(cfg.ref_audio.clone()))];
+                    req.ref_audios =
+                        vec![Some(ReferenceAudioInput::from_path(cfg.ref_audio.clone()))];
                     req.ref_texts = vec![if sc.use_ref_text {
                         Some(cfg.ref_text.clone())
                     } else {
