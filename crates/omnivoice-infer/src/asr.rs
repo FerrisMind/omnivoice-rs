@@ -284,17 +284,28 @@ pub fn default_local_asr_model_path() -> &'static str {
 pub fn default_asr_model_spec(model_root: Option<&Path>) -> String {
     if let Some(model_root) = model_root {
         let nested = model_root.join(DEFAULT_LOCAL_ASR_DIR_NAME);
-        if nested.is_dir() {
+        if is_local_whisper_bundle(&nested) {
             return nested.display().to_string();
         }
         if let Some(parent) = model_root.parent() {
             let sibling = parent.join(DEFAULT_LOCAL_ASR_DIR_NAME);
-            if sibling.is_dir() {
+            if is_local_whisper_bundle(&sibling) {
                 return sibling.display().to_string();
             }
         }
     }
     DEFAULT_HF_ASR_MODEL.to_string()
+}
+
+fn is_local_whisper_bundle(path: &Path) -> bool {
+    path.is_dir()
+        && path.join(DEFAULT_WHISPER_CONFIG_FILE).is_file()
+        && path.join(DEFAULT_WHISPER_TOKENIZER_FILE).is_file()
+        && (path.join("model.safetensors").is_file()
+            || find_local_whisper_weights(path)
+                .ok()
+                .flatten()
+                .is_some())
 }
 
 fn resolve_model_files(model_id_or_path: &str) -> Result<(PathBuf, PathBuf, PathBuf, bool)> {
@@ -572,7 +583,7 @@ mod tests {
     use hf_hub::api::Siblings;
     use std::{
         fs,
-        path::PathBuf,
+        path::{Path, PathBuf},
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -585,6 +596,13 @@ mod tests {
             "omnivoice-asr-tests-{name}-{}-{nanos}",
             std::process::id()
         ))
+    }
+
+    fn stage_whisper_bundle(path: &Path) {
+        fs::create_dir_all(path).unwrap();
+        fs::write(path.join("config.json"), "{}").unwrap();
+        fs::write(path.join("tokenizer.json"), "{}").unwrap();
+        fs::write(path.join("model.safetensors"), b"stub").unwrap();
     }
 
     #[test]
@@ -667,11 +685,33 @@ mod tests {
     fn default_asr_model_spec_prefers_runtime_local_whisper_bundle() {
         let root = unique_temp_dir("default-local-whisper");
         let whisper_root = root.join("whisper");
-        fs::create_dir_all(&whisper_root).unwrap();
+        stage_whisper_bundle(&whisper_root);
 
         assert_eq!(
             default_asr_model_spec(Some(root.as_path())),
             whisper_root.display().to_string()
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn default_asr_model_spec_ignores_incomplete_local_whisper_dir() {
+        let root = unique_temp_dir("default-incomplete-whisper");
+        let whisper_root = root.join("whisper");
+        fs::create_dir_all(whisper_root.join("tiny.en")).unwrap();
+
+        assert_eq!(
+            default_asr_model_spec(Some(root.as_path())),
+            DEFAULT_HF_ASR_MODEL
+        );
+
+        fs::write(whisper_root.join("config.json"), "{}").unwrap();
+        fs::write(whisper_root.join("tokenizer.json"), "{}").unwrap();
+
+        assert_eq!(
+            default_asr_model_spec(Some(root.as_path())),
+            DEFAULT_HF_ASR_MODEL
         );
 
         fs::remove_dir_all(root).unwrap();
@@ -697,7 +737,7 @@ mod tests {
         let tts_root = root.join("OmniVoice-GGUF");
         let whisper_root = root.join("whisper");
         fs::create_dir_all(&tts_root).unwrap();
-        fs::create_dir_all(&whisper_root).unwrap();
+        stage_whisper_bundle(&whisper_root);
 
         assert_eq!(
             default_asr_model_spec(Some(tts_root.as_path())),
